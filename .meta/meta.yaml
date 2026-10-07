@@ -1,0 +1,5 @@
+# ponygo 治理根状态文件（唯一真值源：level）
+# 版本由 git 派生；组件清单由 .meta/ + .agents/ 目录存在性充当；演进由 git + .agents/notes/ 的 ADR 充当。
+# 合法键：level / ai-surface / docs-tier（docs-tier: on|off 是文档分层的启用声明，目录存在不等于已激活，见 maturity-ladder §5 判据 2.5）。
+
+level: 0
