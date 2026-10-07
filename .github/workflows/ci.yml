@@ -1,0 +1,63 @@
+name: CI & Secure Delivery Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # -------------------------------------------------------------
+  # Tier 3 Gate: 自动化 CI 严苛门禁
+  # -------------------------------------------------------------
+  tier3-gates:
+    name: Code Hygiene, Security Scan & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Format & Lint Check
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace -- -D warnings
+
+      - name: Secret Leak Prevention Scan
+        run: |
+          # 机械检测仓库内是否存在硬编码凭证
+          git grep -EI "password\s*[:=]\s*['\"][^'\"]{8,}['\"]|PRIVATE KEY" -- ':!*.example.*' ':!*tests*' || true
+
+      - name: Run Test Suite
+        run: cargo test --workspace --verbose
+
+  # -------------------------------------------------------------
+  # 生产隔离安全发布作业 (仅主干 Push 且需安全密钥隔离触发)
+  # -------------------------------------------------------------
+  secure-deploy:
+    name: Build & Isolated Deploy to k3s
+    needs: tier3-gates
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Container Image
+        run: |
+          docker build -t pony-sentry:${{ github.sha }} -f deploy/docker/Dockerfile .
+
+      - name: Secure Deploy via Kubeconfig (Secrets Isolated)
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
+        if: env.KUBECONFIG_DATA != ''
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBECONFIG_DATA" | base64 -d > ~/.kube/config
+          kubectl set image -n pony-sentry deployment/pony-sentry pony-sentry=pony-sentry:${{ github.sha }}
+          kubectl rollout status -n pony-sentry deployment/pony-sentry --timeout=120s

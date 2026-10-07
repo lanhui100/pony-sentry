@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pony-sentry
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pony-sentry-config
+  namespace: pony-sentry
+data:
+  PORT: "3000"
+  RUST_LOG: "info,pony_sentry=debug"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pony-sentry
+  namespace: pony-sentry
+  labels:
+    app.kubernetes.io/name: pony-sentry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pony-sentry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pony-sentry
+    spec:
+      containers:
+        - name: pony-sentry
+          image: pony-sentry:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: pony-sentry-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: pony-sentry-secrets
+                  key: DATABASE_URL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "20m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pony-sentry
+  namespace: pony-sentry
+  labels:
+    app.kubernetes.io/name: pony-sentry
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app.kubernetes.io/name: pony-sentry
+---
+# -------------------------------------------------------------
+# 1. 公网加密访问 (Public Encrypted Ingest for Multi-Clients)
+# 仅路由 /api/v1/ingest 与 /healthz，挂载 Let's Encrypt 证书
+# -------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pony-sentry-public-ingest
+  namespace: pony-sentry
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - sentry.ponyjob.top
+      secretName: sentry-ponyjob-top-tls
+  rules:
+    - host: sentry.ponyjob.top
+      http:
+        paths:
+          - path: /api/v1/ingest
+            pathType: Prefix
+            backend:
+              service:
+                name: pony-sentry
+                port:
+                  number: 3000
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: pony-sentry
+                port:
+                  number: 3000
+---
+# -------------------------------------------------------------
+# 2. Tailscale 私网限定控制台 (Private Web & Issues Dashboard)
+# 强制限制来源 IP 白名单为 Tailscale CGNAT 范围 (100.64.0.0/10)
+# -------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: tailscale-ipallowlist
+  namespace: pony-sentry
+spec:
+  ipAllowList:
+    sourceRange:
+      - 100.64.0.0/10
+      - 127.0.0.1/32
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pony-sentry-private-web
+  namespace: pony-sentry
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: pony-sentry-tailscale-ipallowlist@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - sentry-internal.ponyjob.top
+      secretName: sentry-internal-tls
+  rules:
+    - host: sentry-internal.ponyjob.top
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pony-sentry
+                port:
+                  number: 3000

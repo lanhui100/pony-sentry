@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# .meta/gates/pre-push
+# Tier 2 Gate: 本地中成本测试与治理自检门禁 (< 30s)
+# 职责：编译语法树校验、全量测试通过性、ponygo 治理合规校验
+
+set -euo pipefail
+
+echo "==> [Gate 2/3] Running pre-push integration & governance compliance check..."
+
+# 1. 静态检查
+echo "--> Checking Rust workspace..."
+cargo check --workspace
+
+# 2. 全量回归测试
+echo "--> Running workspace tests..."
+cargo test --workspace
+
+# 3. ponygo 治理状态检查
+echo "--> Verifying ponygo governance status..."
+if command -v ponygo >/dev/null 2>&1; then
+    ponygo status
+elif [ -x /home/dm/.local/bin/ponygo ]; then
+    /home/dm/.local/bin/ponygo status
+else
+    echo "⚠️ ponygo CLI not found, skipping ponygo status check."
+fi
+
+# 4. 架构文档与蓝图机械校验
+if [ -f "/home/dm/.agents/skills/dev-docs/scripts/dev-docs-lint.py" ]; then
+    echo "--> Running dev-docs mechanical lint..."
+    python3 /home/dm/.agents/skills/dev-docs/scripts/dev-docs-lint.py docs/
+fi
+
+echo "✅ [PASS] Pre-push gate passed cleanly."

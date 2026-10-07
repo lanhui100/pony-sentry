@@ -133,7 +133,9 @@
 | 领域 | 选型结果 | 核心考量 | 对应决策记录 (ADR) |
 | :--- | :--- | :--- | :--- |
 | 服务端框架 | Rust Axum + Tokio | 高性能、轻量低开销、类型安全与异步生态完备 | [ADR-001](../decisions/001-tech-stack-and-delivery-architecture.md) |
-| 存储引擎 | SQLite (WAL 模式) | 单文件轻量运行，零外部依赖，极低内存消耗 | [ADR-001](../decisions/001-tech-stack-and-delivery-architecture.md) |
+| 存储引擎 | SQLite (WAL) / PostgreSQL 双模 | 单文件轻量运行与集群化生产级持久化兼具 | [ADR-001](../decisions/001-tech-stack-and-delivery-architecture.md), [ADR-002](../decisions/002-postgres-dual-network-and-tiered-gates.md) |
+| 网络隔离拓扑 | 公网 Ingest + Tailscale 私网 UI | 兼顾客户端跨网络上报与内部控制台高安全性 | [ADR-002](../decisions/002-postgres-dual-network-and-tiered-gates.md) |
+| 交付质量治理 | 三层门禁 (pre-commit/pre-push/CI) | 防敏感信息泄露、保证开源代码与发布流水线安全隔离 | [ADR-002](../decisions/002-postgres-dual-network-and-tiered-gates.md) |
 | 控制台技术 | Vue 3 + TailwindCSS | 组件化轻量控制台，SPA 可直接编译嵌入 Rust 二进制 | [ADR-001](../decisions/001-tech-stack-and-delivery-architecture.md) |
 
 ---

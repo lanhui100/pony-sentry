@@ -18,7 +18,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub repo: Arc<SqliteIssueRepository>,
+    pub repo: Arc<dyn IssueRepository>,
 }
 
 #[derive(Debug, Deserialize)]

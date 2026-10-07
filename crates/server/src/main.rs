@@ -1,7 +1,9 @@
-use pony_sentry_core::{create_pool, SqliteIssueRepository};
+use pony_sentry_core::{create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository};
 use pony_sentry_server::{create_app_with_state, AppState};
+use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 #[tokio::main]
@@ -9,9 +11,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:ponysentry.db?mode=rwc".into());
-    let pool = create_pool(&db_url).await?;
-    let repo = Arc::new(SqliteIssueRepository::new(pool));
-    repo.migrate().await?;
+    let repo: Arc<dyn IssueRepository> = if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") {
+        info!("Connecting to PostgreSQL database...");
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(Duration::from_millis(3000))
+            .connect(&db_url)
+            .await?;
+        let pg_repo = PgIssueRepository::new(pool);
+        pg_repo.migrate().await?;
+        Arc::new(pg_repo)
+    } else {
+        info!("Connecting to SQLite database (default)...");
+        let pool = create_pool(&db_url).await?;
+        let sqlite_repo = SqliteIssueRepository::new(pool);
+        sqlite_repo.migrate().await?;
+        Arc::new(sqlite_repo)
+    };
 
     let state = AppState { repo };
     let app = create_app_with_state(state);
