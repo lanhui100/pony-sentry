@@ -94,7 +94,7 @@ metadata:
   namespace: pony-sentry
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
 spec:
   ingressClassName: traefik
   tls:
@@ -133,6 +133,7 @@ spec:
   ipAllowList:
     sourceRange:
       - 100.64.0.0/10
+      - 10.42.0.0/16
       - 127.0.0.1/32
 ---
 apiVersion: networking.k8s.io/v1
@@ -142,7 +143,7 @@ metadata:
   namespace: pony-sentry
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: pony-sentry-tailscale-ipallowlist@kubernetescrd
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: traefik
