@@ -7,3 +7,4 @@ Thumbs.db
 # target/         # Rust
 # node_modules/   # Node
 # __pycache__/    # Python
+target/
