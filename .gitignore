@@ -12,5 +12,15 @@ target/
 node_modules/
 *.crt
 *.key
+*.pem
+*.pfx
+*.p12
+*.env
+*.env.local
+*.env.*.local
+.env
+.env.*
+!*.env.example
+!*.example.*
 __pycache__/
 .pytest_cache/

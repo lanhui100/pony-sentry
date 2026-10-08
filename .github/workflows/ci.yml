@@ -28,8 +28,17 @@ jobs:
 
       - name: Secret Leak Prevention Scan
         run: |
-          # 机械检测仓库内是否存在硬编码凭证
-          git grep -EI "password\s*[:=]\s*['\"][^'\"]{8,}['\"]|PRIVATE KEY" -- ':!*.example.*' ':!*tests*' || true
+          # 机械检测仓库内是否存在硬编码凭证（带严格阻断逻辑）
+          echo "Scanning repository for potential hardcoded secrets..."
+          PATTERN='password[[:space:]]*[:=][[:space:]]*['\''"][^'\''"]{8,}['\''"]|BEGIN (RSA|EC|OPENSSH|DSA) PRIVATE KEY|eyJ[a-zA-Z0-9_-]{20,}|(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82}|glpat-[a-zA-Z0-9-]{20}|xox[baprs]-[0-9a-zA-Z]{10,48})'
+          LEAKS=$(git grep -EI "$PATTERN" -- ':!*.example*' ':!*tests*' ':!*.sample' ':!docs/*' ':!.meta/gates/*' || true)
+
+          if [ -n "$LEAKS" ]; then
+            echo "::error::Detected potential hardcoded secrets in repository:"
+            echo "$LEAKS"
+            exit 1
+          fi
+          echo "No hardcoded secrets detected."
 
       - name: Run Test Suite
         run: cargo test --workspace --verbose
