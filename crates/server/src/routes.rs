@@ -1,24 +1,26 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header, HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, patch, post},
     Json, Router,
 };
 use pony_sentry_core::{
-    models::{Event, Issue, IssueStatus},
+    models::IssueStatus,
     repository::{IssueFilter, IssueRepository},
-    SqliteIssueRepository,
 };
 use pony_sentry_fingerprint::FingerprintEngine;
 use pony_sentry_ingest::{RawEvent, SanitizationPipeline};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
 
 #[derive(Clone)]
 pub struct AppState {
     pub repo: Arc<dyn IssueRepository>,
+    pub client_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,10 +60,29 @@ pub struct UpdateIssueRequest {
 }
 
 pub fn create_app_with_state(state: AppState) -> Router {
-    let cors = CorsLayer::new()
+    // 1. Ingest 专用 CORS：仅开放 POST，收敛跨域能力
+    let ingest_cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::HeaderName::from_static("x-sentry-auth"),
+            header::HeaderName::from_static("x-client-token"),
+        ]);
+
+    // 2. 遥测上报路由 (强制挂载 512KB 请求体硬限制与专有 CORS)
+    let ingest_routes = Router::new()
+        .route("/api/v1/ingest", post(handle_ingest))
+        .layer(DefaultBodyLimit::max(512 * 1024))
+        .layer(ingest_cors);
+
+    // 3. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
+    let admin_routes = Router::new()
+        .route("/api/v1/issues", get(handle_list_issues))
+        .route("/api/v1/issues/:id", get(handle_get_issue))
+        .route("/api/v1/issues/:id", patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)))
+        .route("/api/v1/issues/:id/events", get(handle_get_issue_events));
 
     let html_content = include_str!("../../../web/dist/index.html");
 
@@ -70,19 +91,34 @@ pub fn create_app_with_state(state: AppState) -> Router {
             axum::response::Html(html_content)
         }))
         .route("/healthz", get(|| async { "OK" }))
-        .route("/api/v1/ingest", post(handle_ingest))
-        .route("/api/v1/issues", get(handle_list_issues))
-        .route("/api/v1/issues/:id", get(handle_get_issue))
-        .route("/api/v1/issues/:id", patch(handle_update_issue))
-        .route("/api/v1/issues/:id/events", get(handle_get_issue_events))
-        .layer(cors)
+        .merge(ingest_routes)
+        .merge(admin_routes)
+        .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .with_state(state)
 }
 
 async fn handle_ingest(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<IngestPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // 若配置了 CLIENT_TOKEN，验证客户端请求头
+    if let Some(ref expected_token) = state.client_token {
+        let provided = headers
+            .get("x-client-token")
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| {
+                headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+            });
+
+        match provided {
+            Some(t) if t.trim() == expected_token => {}
+            _ => return Err((StatusCode::UNAUTHORIZED, "Invalid or missing client token".into())),
+        }
+    }
     let raw_event = RawEvent {
         platform: payload.platform.unwrap_or_else(|| "other".into()),
         release: payload.release,

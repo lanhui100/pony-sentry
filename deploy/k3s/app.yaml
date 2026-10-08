@@ -47,6 +47,12 @@ spec:
                 secretKeyRef:
                   name: pony-sentry-secrets
                   key: DATABASE_URL
+            - name: CLIENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pony-sentry-secrets
+                  key: CLIENT_TOKEN
+                  optional: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -84,8 +90,46 @@ spec:
     app.kubernetes.io/name: pony-sentry
 ---
 # -------------------------------------------------------------
+# 安全中间件：强制 HTTPS 重定向 + 公网限流 + 请求体缓冲限制
+# -------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: pony-sentry
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ingest-ratelimit
+  namespace: pony-sentry
+spec:
+  rateLimit:
+    average: 100
+    burst: 200
+    period: 1m
+    sourceCriterion:
+      ipStrategy:
+        depth: 1
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ingest-buffering
+  namespace: pony-sentry
+spec:
+  buffering:
+    maxRequestBodyBytes: 524288
+    memRequestBodyBytes: 65536
+---
+# -------------------------------------------------------------
 # 1. 公网加密访问 (Public Encrypted Ingest for Multi-Clients)
-# 仅路由 /api/v1/ingest 与 /healthz，挂载 Let's Encrypt 证书
+# 仅路由 /api/v1/ingest 与 /healthz（Exact 匹配），挂载 Let's Encrypt 证书
+# 挂载 HTTPS 重定向 + 限流 + 请求体限制中间件
 # -------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -95,6 +139,10 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: >-
+      pony-sentry-redirect-https@kubernetescrd,
+      pony-sentry-ingest-ratelimit@kubernetescrd,
+      pony-sentry-ingest-buffering@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
@@ -106,14 +154,14 @@ spec:
       http:
         paths:
           - path: /api/v1/ingest
-            pathType: Prefix
+            pathType: Exact
             backend:
               service:
                 name: pony-sentry
                 port:
                   number: 3000
           - path: /healthz
-            pathType: Prefix
+            pathType: Exact
             backend:
               service:
                 name: pony-sentry
@@ -123,6 +171,7 @@ spec:
 # -------------------------------------------------------------
 # 2. Tailscale 私网限定控制台 (Private Web & Issues Dashboard)
 # 强制限制来源 IP 白名单为 Tailscale CGNAT 范围 (100.64.0.0/10)
+# 移除 Pod CIDR 10.42.0.0/16，仅保留真实 Tailscale 设备网段
 # -------------------------------------------------------------
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -133,7 +182,6 @@ spec:
   ipAllowList:
     sourceRange:
       - 100.64.0.0/10
-      - 10.42.0.0/16
       - 127.0.0.1/32
 ---
 apiVersion: networking.k8s.io/v1
@@ -142,8 +190,10 @@ metadata:
   name: pony-sentry-private-web
   namespace: pony-sentry
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: pony-sentry-tailscale-ipallowlist@kubernetescrd
     traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: >-
+      pony-sentry-redirect-https@kubernetescrd,
+      pony-sentry-tailscale-ipallowlist@kubernetescrd
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: traefik

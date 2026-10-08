@@ -29,7 +29,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(sqlite_repo)
     };
 
-    let state = AppState { repo };
+    // 可选客户端上报鉴权 Token：若配置了 CLIENT_TOKEN，则强制校验请求头
+    let client_token = std::env::var("CLIENT_TOKEN").ok().filter(|t| !t.is_empty());
+
+    let state = AppState { repo, client_token };
     let app = create_app_with_state(state);
 
     let port: u16 = std::env::var("PORT")

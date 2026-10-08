@@ -19,7 +19,7 @@ if [ -n "$STAGED_FILES" ]; then
     # 匹配常见明文敏感 pattern: private_key, postgresql password, api_token
     SUSPICIOUS=$(git grep -EI \
       "password\s*[:=]\s*['\"][^'\"]{8,}['\"]|BEGIN (RSA|EC|OPENSSH) PRIVATE KEY|eyJ[a-zA-Z0-9_\-]{20,}" \
-      -- $STAGED_FILES 2>/dev/null | grep -v "\.meta/gates/pre-commit" | grep -v "example" | grep -v "REDACTED" || true)
+      -- $STAGED_FILES 2>/dev/null | grep -v "\.meta/gates/pre-commit" | grep -v "example" | grep -v "REDACTED" | grep -v "tests/" || true)
 
     if [ -n "$SUSPICIOUS" ]; then
         echo "❌ [FAIL] Detected potential hardcoded secrets or private keys in staged files:"

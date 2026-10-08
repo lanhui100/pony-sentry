@@ -1,6 +1,6 @@
 use crate::{
-    db::{create_pool, DatabasePool},
-    models::{Event, Issue, IssueStatus, Platform},
+    db::DatabasePool,
+    models::{Event, Issue, IssueStatus},
     repository::{IssueFilter, IssueRepository, RepositoryError},
 };
 use async_trait::async_trait;
@@ -182,24 +182,27 @@ impl IssueRepository for SqliteIssueRepository {
     }
 
     async fn list_issues(&self, filter: IssueFilter) -> Result<Vec<Issue>, RepositoryError> {
-        let mut query = "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, first_seen_at, last_seen_at FROM issues WHERE 1=1".to_string();
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, first_seen_at, last_seen_at FROM issues WHERE 1=1"
+        );
 
         if let Some(ref st) = filter.status {
-            query.push_str(&format!(" AND status = '{}'", st));
+            builder.push(" AND status = ").push_bind(st.to_string());
         }
         if let Some(ref pf) = filter.platform {
-            query.push_str(&format!(" AND platform = '{}'", pf));
+            builder.push(" AND platform = ").push_bind(pf);
         }
         if let Some(ref rel) = filter.release {
-            query.push_str(&format!(" AND last_release = '{}'", rel));
+            builder.push(" AND last_release = ").push_bind(rel);
         }
-        query.push_str(" ORDER BY last_seen_at DESC");
+        builder.push(" ORDER BY last_seen_at DESC");
 
-        let limit = filter.limit.unwrap_or(50);
-        let offset = filter.offset.unwrap_or(0);
-        query.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
+        let limit = filter.limit.unwrap_or(50).clamp(1, 100);
+        let offset = filter.offset.unwrap_or(0).max(0);
+        builder.push(" LIMIT ").push_bind(limit)
+               .push(" OFFSET ").push_bind(offset);
 
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        let rows = builder.build().fetch_all(&self.pool).await?;
         let mut issues = Vec::new();
         for row in rows {
             let status_str: String = row.get("status");

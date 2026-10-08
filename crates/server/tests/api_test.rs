@@ -11,7 +11,7 @@ async fn test_ingest_and_agent_api_flow() {
     let repo = Arc::new(SqliteIssueRepository::new(pool));
     repo.migrate().await.unwrap();
 
-    let state = AppState { repo: repo.clone() };
+    let state = AppState { repo: repo.clone(), client_token: None };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -102,3 +102,78 @@ async fn test_ingest_and_agent_api_flow() {
     assert_eq!(repeat_json["status"], "regression");
     assert_eq!(repeat_json["count"], 2);
 }
+
+#[tokio::test]
+async fn test_ingest_requires_client_token_when_configured() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    // 配置了 CLIENT_TOKEN 时必须校验
+    let state = AppState { repo: repo.clone(), client_token: Some("test-secret-token".into()) };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    let payload = json!({
+        "platform": "rust",
+        "message": "auth test"
+    });
+
+    // 无 Token → 401
+    let res_no_token = server.post("/api/v1/ingest").json(&payload).await;
+    res_no_token.assert_status(StatusCode::UNAUTHORIZED);
+
+    // 错误 Token → 401
+    let res_bad_token = server
+        .post("/api/v1/ingest")
+        .add_header("x-client-token", "wrong-token")
+        .json(&payload)
+        .await;
+    res_bad_token.assert_status(StatusCode::UNAUTHORIZED);
+
+    // 正确 Token → 200
+    let res_ok = server
+        .post("/api/v1/ingest")
+        .add_header("x-client-token", "test-secret-token")
+        .json(&payload)
+        .await;
+    res_ok.assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_sql_injection_is_safely_parametrized() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState { repo: repo.clone(), client_token: None };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 插入一条测试数据
+    server
+        .post("/api/v1/ingest")
+        .json(&json!({
+            "platform": "rust",
+            "message": "injection base",
+            "exception": {
+                "error_type": "TestError",
+                "value": "base"
+            }
+        }))
+        .await
+        .assert_status(StatusCode::OK);
+
+    // 尝试 SQL 注入 payload（URL 编码），参数化绑定后应安全返回 200 且为空结果
+    let inject_res = server
+        .get("/api/v1/issues?platform=%27%20OR%20%271%27%3D%271%27--")
+        .await;
+    inject_res.assert_status(StatusCode::OK);
+    let issues: Vec<serde_json::Value> = inject_res.json();
+    assert_eq!(issues.len(), 0, "SQL injection attempt must not return data");
+
+    // 负分页参数应被钳制而非报错
+    let neg_res = server.get("/api/v1/issues?limit=-5&offset=-10").await;
+    neg_res.assert_status(StatusCode::OK);
+}
+
