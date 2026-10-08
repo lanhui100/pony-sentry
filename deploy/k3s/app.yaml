@@ -81,10 +81,11 @@ metadata:
   labels:
     app.kubernetes.io/name: pony-sentry
 spec:
-  type: ClusterIP
+  type: NodePort
   ports:
     - port: 3000
       targetPort: 3000
+      nodePort: 31000
       name: http
   selector:
     app.kubernetes.io/name: pony-sentry
@@ -169,46 +170,9 @@ spec:
                   number: 3000
 ---
 # -------------------------------------------------------------
-# 2. Tailscale 私网限定控制台 (Private Web & Issues Dashboard)
-# 强制限制来源 IP 白名单为 Tailscale CGNAT 范围 (100.64.0.0/10)
-# 移除 Pod CIDR 10.42.0.0/16，仅保留真实 Tailscale 设备网段
+# 2. Tailscale 私网控制台（Web UI & Issues Dashboard）
+# 不暴露公网域名/Ingress：通过 Tailscale MagicDNS + NodePort 访问
+#   http://devserver.taildb165c.ts.net:31000  （WireGuard 内加密，仅 Tailscale 设备可路由）
+#   或启用 tailscale serve 后 https://devserver.taildb165c.ts.net （443 自动 TLS）
+# 公网（101.37.23.94）对该路径无任何路由，天然无法访问
 # -------------------------------------------------------------
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: tailscale-ipallowlist
-  namespace: pony-sentry
-spec:
-  ipAllowList:
-    sourceRange:
-      - 100.64.0.0/10
-      - 127.0.0.1/32
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: pony-sentry-private-web
-  namespace: pony-sentry
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
-    traefik.ingress.kubernetes.io/router.middlewares: >-
-      pony-sentry-redirect-https@kubernetescrd,
-      pony-sentry-tailscale-ipallowlist@kubernetescrd
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-spec:
-  ingressClassName: traefik
-  tls:
-    - hosts:
-        - sentry-internal.ponyjob.top
-      secretName: sentry-internal-tls
-  rules:
-    - host: sentry-internal.ponyjob.top
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: pony-sentry
-                port:
-                  number: 3000
