@@ -21,9 +21,9 @@ PonySentry 初始基于 SQLite 单文件运行。现需在 k3s 集群进行单�
    - 保留 `IssueRepository` trait，增加 `PgIssueRepository` 实现；
    - 根据 `DATABASE_URL` 协议前缀（`sqlite:` 或 `postgres:` / `postgresql:`）自动初始化连接池并执行对应 DDL 迁移；
    - 新增 `migrations/postgres/0001_init.sql`。
-2. **k3s 双网络接入拓扑**：
-   - **公网加密入口 (Public Ingest)**：通过 Traefik Ingress 暴露独立域名（如 `sentry-ingest.ponyjob.top` 或路径路由），挂载 `letsencrypt-prod` 证书，仅路由 `/api/v1/ingest` 与 `/healthz`；
-   - **私网控制台 (Tailscale Private Web)**：通过 Tailscale 内部域名（如 `sentry.local.ponyjob.top` 或基于 Traefik Ingress 的白名单 CIDR 中间件 `100.64.0.0/10`）限制仅 Tailscale 节点可访问 Web UI 及管理 API。
+2. **k3s 双网络接入拓扑**（最终实现）：
+   - **公网加密入口 (Public Ingest)**：`sentry.ponyjob.top`（A 记录 → 101.37.23.94），Traefik Ingress 挂载 `letsencrypt-prod`（HTTP-01 已签发 Ready），仅路由 `/api/v1/ingest` 与 `/healthz`（Exact），叠加 HTTPS 重定向 + 限流 + 请求体缓冲中间件；
+   - **私网控制台 (Tailscale Private Web)**：不暴露任何公网 DNS/Ingress。PonySentry Service 以 NodePort 31000 暴露，Tailscale 设备经 **MagicDNS**（`http://devserver.taildb165c.ts.net:31000`）访问，WireGuard 内加密；公网无法路由 Tailscale CGNAT 网段且无对应公网记录，天然隔离。*实现沿革：曾尝试 `sentry-internal.ponyjob.top` + Traefik ipAllowList(100.64/10)，因集群 externalTrafficPolicy=Cluster 的 SNAT 丢失真实源 IP 导致 403，弃用该路径。*
 3. **Ponygo 三层门禁与开源安全发布体系**：
    - **Layer 1: Pre-commit 门禁**：本地极速运行，包括 `cargo fmt --check`、基于正则与特定模式的敏感凭据（Token/Secret/Private Key）扫描防泄露检查。
    - **Layer 2: Pre-push 门禁**：本地中成本运行，包含 `cargo check`、`cargo test --workspace` 与 `ponygo status` 机械合规自检。
