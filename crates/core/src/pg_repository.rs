@@ -1,5 +1,6 @@
 use crate::{
     models::{Event, Issue, IssueStatus},
+    reindex::{plan_reindex, FingerprintOut, ReindexSummary},
     repository::{IssueFilter, IssueRepository, RepositoryError},
 };
 use async_trait::async_trait;
@@ -289,5 +290,121 @@ impl IssueRepository for PgIssueRepository {
             .into_iter()
             .map(|row| row.get::<String, _>("project"))
             .collect())
+    }
+
+    async fn reindex_fingerprints(
+        &self,
+        fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
+    ) -> Result<ReindexSummary, RepositoryError> {
+        let event_rows = sqlx::query(
+            "SELECT id, issue_id, payload, release, environment, created_at FROM events",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(event_rows.len());
+        for row in event_rows {
+            events.push(Event {
+                id: row.get("id"),
+                issue_id: row.get("issue_id"),
+                payload: row.get("payload"),
+                release: row.get("release"),
+                environment: row.get("environment"),
+                created_at: row.get("created_at"),
+            });
+        }
+
+        let issue_rows = sqlx::query(
+            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut issues = Vec::with_capacity(issue_rows.len());
+        for row in issue_rows {
+            let status_str: String = row.get("status");
+            issues.push(Issue {
+                id: row.get("id"),
+                fingerprint: row.get("fingerprint"),
+                title: row.get("title"),
+                culprit: row.get("culprit"),
+                platform: row.get("platform"),
+                status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
+                assigned_to: row.get("assigned_to"),
+                count: row.get("count"),
+                last_release: row.get("last_release"),
+                project: row.get("project"),
+                first_seen_at: row.get("first_seen_at"),
+                last_seen_at: row.get("last_seen_at"),
+            });
+        }
+
+        let plan = plan_reindex(&events, &issues, fingerprint_of);
+
+        let mut tx = self.pool.begin().await?;
+        for row in &plan.issue_rows {
+            if plan.reused_ids.contains(&row.id) {
+                sqlx::query(
+                    "UPDATE issues SET fingerprint = $1, title = $2, culprit = $3, platform = $4, status = $5, assigned_to = $6, count = $7, last_release = $8, project = $9, first_seen_at = $10, last_seen_at = $11 WHERE id = $12",
+                )
+                .bind(&row.fingerprint)
+                .bind(&row.title)
+                .bind(&row.culprit)
+                .bind(&row.platform)
+                .bind(row.status.to_string())
+                .bind(&row.assigned_to)
+                .bind(row.count)
+                .bind(&row.last_release)
+                .bind(&row.project)
+                .bind(row.first_seen_at)
+                .bind(row.last_seen_at)
+                .bind(&row.id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(&row.id)
+                .bind(&row.fingerprint)
+                .bind(&row.title)
+                .bind(&row.culprit)
+                .bind(&row.platform)
+                .bind(row.status.to_string())
+                .bind(&row.assigned_to)
+                .bind(row.count)
+                .bind(&row.last_release)
+                .bind(&row.project)
+                .bind(row.first_seen_at)
+                .bind(row.last_seen_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        for (event_id, issue_id) in &plan.assignments {
+            sqlx::query("UPDATE events SET issue_id = $1 WHERE id = $2")
+                .bind(issue_id)
+                .bind(event_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        for id in &plan.delete_ids {
+            sqlx::query("DELETE FROM issues WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(ReindexSummary {
+            issues_created: plan.issue_rows.len() - plan.reused_ids.len(),
+            issues_reused: plan.reused_ids.len(),
+            issues_deleted: plan.delete_ids.len(),
+            events_moved: plan.assignments.len(),
+            events_skipped: plan.skipped_events,
+        })
     }
 }

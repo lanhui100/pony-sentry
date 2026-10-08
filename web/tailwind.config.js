@@ -8,6 +8,8 @@ export default {
     extend: {
       fontFamily: {
         sans: [
+          '"MiSans"',
+          '"MiSans Normal"',
           'Inter',
           '-apple-system',
           'BlinkMacSystemFont',

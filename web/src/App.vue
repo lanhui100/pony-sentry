@@ -1,45 +1,122 @@
 <template>
-  <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/20 selection:text-indigo-200">
-    <!-- 顶部导航栏 -->
-    <header class="border-b border-slate-800/80 bg-slate-900/80 backdrop-blur-md px-6 py-4 flex items-center justify-between sticky top-0 z-40">
+  <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+    <!-- 顶部极简导航栏 -->
+    <header class="border-b border-slate-800/80 bg-slate-900/90 backdrop-blur-md px-6 py-4 flex items-center justify-between sticky top-0 z-40">
       <div class="flex items-center space-x-3.5">
-        <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-indigo-500 via-indigo-600 to-violet-500 flex items-center justify-center font-bold text-white shadow-md shadow-indigo-500/20 text-sm tracking-tighter">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-indigo-500 via-indigo-600 to-violet-500 flex items-center justify-center font-bold text-white shadow-md shadow-indigo-500/20 text-sm tracking-tight font-mono">
           PS
         </div>
         <div>
           <div class="flex items-center space-x-2">
             <h1 class="text-base font-semibold tracking-tight text-white">PonySentry</h1>
-            <span class="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700/60 font-medium">控制台</span>
+            <span class="text-[11px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 border border-slate-700/60 font-medium">Console</span>
           </div>
-          <p class="text-xs text-slate-400 font-normal">轻量级多端崩溃收集与 AI 智能体缺陷诊断平台</p>
+          <p class="text-xs text-slate-400 font-normal">多端崩溃遥测与 AI 缺陷诊断</p>
         </div>
       </div>
       <div class="flex items-center space-x-3">
-        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800/80 shadow-sm shadow-emerald-950/40">
+        <!-- 自动刷新状态提示 -->
+        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800/80 shadow-sm shadow-emerald-950/30">
           <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-2 animate-pulse"></span>
-          接收网关运行中
+          网关就绪
         </span>
+        <button
+          @click="refreshAll"
+          class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/70 transition flex items-center space-x-1.5 active:scale-95 shadow-sm"
+          title="快捷键: R"
+        >
+          <svg class="w-4 h-4 text-slate-400" :class="{ 'animate-spin': isRefreshing }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+          </svg>
+          <span>刷新</span>
+        </button>
       </div>
     </header>
 
     <!-- 主视口区域 -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-5">
-      <!-- 快捷过滤工具栏 -->
-      <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900/50 p-4 rounded-xl border border-slate-800/80 shadow-sm backdrop-blur-sm">
-        <div class="flex flex-wrap items-center gap-3">
+      <!-- 统计指标与健康概览卡片 (KPI Bento) -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div
+          @click="filterStatus = 'attention'"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500/50 transition"
+          :class="{ 'ring-2 ring-indigo-500/40 bg-slate-900/90': filterStatus === 'attention' }"
+        >
+          <div class="text-xs uppercase tracking-wider text-slate-300 font-medium">需关注缺陷 (默认)</div>
+          <div class="mt-2 flex items-baseline justify-between">
+            <span class="text-2xl font-bold font-mono text-indigo-300">{{ attentionCount }}</span>
+            <span class="text-xs text-slate-400 font-mono">待处理+诊断中</span>
+          </div>
+        </div>
+        <div
+          @click="filterStatus = 'unresolved'"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-rose-500/50 transition"
+          :class="{ 'ring-2 ring-rose-500/40 bg-slate-900/90': filterStatus === 'unresolved' }"
+        >
+          <div class="text-xs uppercase tracking-wider text-rose-400 font-medium">待处理 (Unresolved)</div>
+          <div class="mt-2 flex items-baseline justify-between">
+            <span class="text-2xl font-bold font-mono text-rose-300">{{ unresolvedCount }}</span>
+            <span class="text-xs text-rose-400/80 font-mono">紧急</span>
+          </div>
+        </div>
+        <div
+          @click="filterStatus = 'in_progress'"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-amber-500/50 transition"
+          :class="{ 'ring-2 ring-amber-500/40 bg-slate-900/90': filterStatus === 'in_progress' }"
+        >
+          <div class="text-xs uppercase tracking-wider text-amber-400 font-medium">诊断修复中</div>
+          <div class="mt-2 flex items-baseline justify-between">
+            <span class="text-2xl font-bold font-mono text-amber-300">{{ inProgressCount }}</span>
+            <span class="text-xs text-amber-400/80 font-mono">In Progress</span>
+          </div>
+        </div>
+        <div
+          @click="filterStatus = 'resolved'"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition"
+          :class="{ 'ring-2 ring-emerald-500/40 bg-slate-900/90': filterStatus === 'resolved' }"
+        >
+          <div class="text-xs uppercase tracking-wider text-emerald-400 font-medium">已修复 (Resolved)</div>
+          <div class="mt-2 flex items-baseline justify-between">
+            <span class="text-2xl font-bold font-mono text-emerald-300">{{ resolvedCount }}</span>
+            <span class="text-xs text-emerald-400/80 font-mono">历史闭环</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 快捷过滤工具栏与关键字搜索 -->
+      <div class="flex flex-wrap items-center justify-between gap-4 bg-slate-900/50 p-3.5 rounded-xl border border-slate-800/80 shadow-sm backdrop-blur-sm">
+        <div class="flex flex-wrap items-center gap-2.5 flex-1 max-w-3xl">
+          <!-- 关键词快速搜索 -->
+          <div class="relative flex-1 min-w-[200px]">
+            <input
+              type="text"
+              v-model="searchKeyword"
+              placeholder="搜索缺陷标题、代码路径、指纹..."
+              class="w-full bg-slate-800/80 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition"
+            />
+            <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-slate-500">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </div>
+            <button
+              v-if="searchKeyword"
+              @click="searchKeyword = ''"
+              class="absolute inset-y-0 right-0 flex items-center pr-2 text-slate-400 hover:text-slate-200 text-xs"
+            >&times;</button>
+          </div>
+
           <!-- 状态筛选 -->
           <div class="relative">
             <select
               v-model="filterStatus"
-              @change="fetchIssues"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8 font-medium"
             >
-              <option value="">全部状态 (All)</option>
+              <option value="attention">需关注问题 (默认)</option>
               <option value="unresolved">待处理 (Unresolved)</option>
-              <option value="in_progress">诊断/修复中 (In Progress)</option>
-              <option value="resolved">已修复 (Resolved)</option>
+              <option value="in_progress">诊断修复中 (In Progress)</option>
               <option value="regression">再次复现 (Regression)</option>
+              <option value="resolved">已修复 (Resolved)</option>
               <option value="ignored">已忽略 (Ignored)</option>
+              <option value="">全部状态 (All)</option>
             </select>
             <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -51,9 +128,9 @@
             <select
               v-model="filterPlatform"
               @change="fetchIssues"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
             >
-              <option value="">全部端与平台 (All)</option>
+              <option value="">全部平台</option>
               <option value="rust">Rust 客户端</option>
               <option value="tauri">Tauri 桌面端</option>
               <option value="vue">Vue 前端</option>
@@ -69,128 +146,129 @@
             <select
               v-model="filterProject"
               @change="fetchIssues"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
             >
-              <option value="">全部项目 (All)</option>
+              <option value="">全部项目</option>
               <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
             </select>
             <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
             </div>
           </div>
-
-          <!-- 刷新按钮 -->
-          <button
-            @click="refreshAll"
-            class="bg-slate-800 hover:bg-slate-700/90 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/70 transition flex items-center space-x-1.5 active:scale-95 shadow-sm"
-          >
-            <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-            </svg>
-            <span>刷新列表</span>
-          </button>
         </div>
 
-        <div class="text-xs text-slate-400 flex items-center space-x-2">
-          <span>缺陷聚合总数：</span>
-          <span class="font-mono font-semibold text-slate-200 bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700/60">{{ issues.length }}</span>
+        <div class="text-xs text-slate-400 flex items-center space-x-2 shrink-0">
+          <span>匹配缺陷：</span>
+          <span class="font-mono font-semibold text-slate-200 bg-slate-800/90 px-2 py-0.5 rounded border border-slate-700/60">
+            {{ filteredIssues.length }}
+          </span>
         </div>
       </div>
 
       <!-- 缺陷数据表格 -->
       <div class="bg-slate-900/60 rounded-xl border border-slate-800/80 overflow-hidden shadow-xl">
-        <table class="w-full text-left border-collapse">
-          <thead>
-            <tr class="border-b border-slate-800 text-slate-400 text-[11px] font-medium uppercase tracking-wider bg-slate-900/90">
-              <th class="py-3 px-4">缺陷摘要 / 根因定位 (Issue)</th>
-              <th class="py-3 px-4 w-28">上报来源</th>
-              <th class="py-3 px-4 w-32">项目</th>
-              <th class="py-3 px-4 w-32">当前状态</th>
-              <th class="py-3 px-4 w-24 text-center">频次</th>
-              <th class="py-3 px-4 w-40">诊断修复 Agent</th>
-              <th class="py-3 px-4 w-44 text-right">最后触发时间</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-800/60 text-sm">
-            <tr v-if="issues.length === 0">
-              <td colspan="7" class="py-12 text-center text-slate-500">
-                <div class="flex flex-col items-center justify-center space-y-2">
-                  <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                  </svg>
-                  <p class="text-xs text-slate-400 font-medium">暂无未解决的异常缺陷</p>
-                  <p class="text-[11px] text-slate-500 font-mono">向 /api/v1/ingest 端点上报崩溃事件后将自动聚合在此</p>
-                </div>
-              </td>
-            </tr>
-            <tr v-for="issue in issues" :key="issue.id" class="hover:bg-slate-800/40 transition group">
-              <!-- 标题与位置 -->
-              <td class="py-3.5 px-4">
-                <div
-                  class="font-medium text-slate-200 group-hover:text-indigo-300 cursor-pointer transition line-clamp-1 flex items-center space-x-1.5"
-                  @click="selectIssue(issue)"
-                  :title="issue.title"
-                >
-                  <span>{{ issue.title }}</span>
-                </div>
-                <div class="text-xs text-slate-400 truncate max-w-lg mt-0.5 font-mono text-[11px]">
-                  {{ issue.culprit || '未指定或未解析到代码栈' }}
-                </div>
-              </td>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left border-collapse table-fixed">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-300 text-xs font-semibold uppercase tracking-wider bg-slate-900/90">
+                <th class="py-3.5 px-4 w-[42%]">缺陷摘要 / 根因定位 (Issue)</th>
+                <th class="py-3.5 px-4 w-[10%]">来源</th>
+                <th class="py-3.5 px-4 w-[12%]">项目</th>
+                <th class="py-3.5 px-4 w-[10%]">状态</th>
+                <th class="py-3.5 px-4 w-[7%] text-center">频次</th>
+                <th class="py-3.5 px-4 w-[11%]">诊断修复</th>
+                <th class="py-3.5 px-4 w-[12%] text-right">最后上报</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 text-sm">
+              <tr v-if="filteredIssues.length === 0">
+                <td colspan="7" class="py-14 text-center text-slate-500">
+                  <div class="flex flex-col items-center justify-center space-y-2.5">
+                    <svg class="w-9 h-9 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <p class="text-sm text-slate-400 font-medium">无匹配的异常缺陷</p>
+                    <p class="text-xs text-slate-500 font-mono">当前视图仅展示需关注的待处理/诊断中缺陷，可切换全部状态查看</p>
+                  </div>
+                </td>
+              </tr>
+              <tr
+                v-for="issue in filteredIssues"
+                :key="issue.id"
+                class="hover:bg-slate-800/40 transition group cursor-pointer"
+                @click="selectIssue(issue)"
+              >
+                <!-- 标题与位置：严格限制单行截断（truncate + max-w-full）避免折行撑高表格 -->
+                <td class="py-3 px-4 overflow-hidden max-w-0">
+                  <div
+                    class="font-medium text-slate-100 group-hover:text-indigo-300 transition truncate text-sm leading-snug"
+                    :title="issue.title"
+                  >
+                    {{ issue.title }}
+                  </div>
+                  <div class="text-xs text-slate-400 truncate mt-1 font-mono">
+                    {{ issue.culprit || '未指定代码栈位置' }}
+                  </div>
+                </td>
 
-              <!-- 平台 -->
-              <td class="py-3.5 px-4">
-                <span class="inline-flex px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700/60">
-                  {{ issue.platform }}
-                </span>
-              </td>
+                <!-- 平台 -->
+                <td class="py-3 px-4 truncate">
+                  <span class="inline-flex px-2 py-0.5 rounded text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700/60">
+                    {{ issue.platform }}
+                  </span>
+                </td>
 
-              <!-- 项目（工作区路径末段） -->
-              <td class="py-3.5 px-4">
-                <span
-                  v-if="issue.project"
-                  class="font-mono text-[11px] text-indigo-300/90"
-                  :title="issue.project"
-                >{{ issue.project }}</span>
-                <span v-else class="text-slate-600 text-[11px] font-mono">未上报</span>
-              </td>
+                <!-- 项目 -->
+                <td class="py-3 px-4 truncate">
+                  <span
+                    v-if="issue.project"
+                    class="font-mono text-xs text-indigo-300/90 font-medium"
+                    :title="issue.project"
+                  >{{ issue.project }}</span>
+                  <span v-else class="text-slate-600 text-xs font-mono">未上报</span>
+                </td>
 
-              <!-- 状态 -->
-              <td class="py-3.5 px-4">
-                <span :class="statusBadgeClass(issue.status)">
-                  {{ formatStatusText(issue.status) }}
-                </span>
-              </td>
+                <!-- 状态 -->
+                <td class="py-3 px-4 truncate">
+                  <span :class="statusBadgeClass(issue.status)">
+                    {{ formatStatusText(issue.status) }}
+                  </span>
+                </td>
 
-              <!-- 频次 -->
-              <td class="py-3.5 px-4 text-center font-mono text-slate-300 font-semibold text-xs">
-                {{ issue.count }}
-              </td>
+                <!-- 频次 -->
+                <td class="py-3 px-4 text-center font-mono text-slate-200 font-semibold text-xs">
+                  {{ issue.count }}
+                </td>
 
-              <!-- 修复 Agent -->
-              <td class="py-3.5 px-4 text-xs font-mono">
-                <span
-                  v-if="issue.assigned_to"
-                  :class="agentBadgeClass(issue.assigned_to)"
-                >
-                  {{ issue.assigned_to }}
-                </span>
-                <span v-else class="text-slate-500 text-[11px]">-</span>
-              </td>
+                <!-- 诊断修复 (去除 Agent 字样) -->
+                <td class="py-3 px-4 text-xs font-mono truncate">
+                  <span
+                    v-if="issue.assigned_to"
+                    :class="agentBadgeClass(issue.assigned_to)"
+                  >
+                    {{ issue.assigned_to }}
+                  </span>
+                  <span v-else class="text-slate-500 text-xs">-</span>
+                </td>
 
-              <!-- 时间 -->
-              <td class="py-3.5 px-4 text-right text-xs text-slate-400 font-mono text-[11px]">
-                {{ formatDate(issue.last_seen_at) }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                <!-- 时间 -->
+                <td class="py-3 px-4 text-right text-xs text-slate-400 font-mono">
+                  {{ formatDate(issue.last_seen_at) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <!-- 缺陷详情抽屉 (Modal/Drawer) -->
-      <div v-if="selected" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex justify-end z-50 animate-fade-in">
-        <div class="w-full max-w-2xl bg-slate-900 border-l border-slate-800 h-full p-6 flex flex-col shadow-2xl overflow-hidden">
-          <!-- 抽屉头部 (固定高度) -->
+      <div
+        v-if="selected"
+        class="fixed inset-0 bg-black/60 backdrop-blur-sm flex justify-end z-50 transition-opacity"
+        @keydown.esc="selected = null"
+      >
+        <div class="w-full max-w-2xl bg-slate-900 border-l border-slate-800 h-full p-6 flex flex-col shadow-2xl overflow-hidden animate-slide-in">
+          <!-- 抽屉头部 -->
           <div class="flex items-start justify-between border-b border-slate-800 pb-4 shrink-0">
             <div>
               <div class="flex items-center space-x-2">
@@ -200,82 +278,172 @@
                 <span class="text-xs font-mono text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">
                   {{ selected.platform }}
                 </span>
+                <span v-if="selected.project" class="text-xs font-mono text-indigo-300 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/60">
+                  {{ selected.project }}
+                </span>
               </div>
               <h2 class="text-base font-semibold text-slate-100 mt-2 break-all leading-snug">{{ selected.title }}</h2>
-              <p class="text-xs text-slate-400 mt-1 font-mono">聚合唯一指纹: <code class="text-indigo-300">{{ selected.fingerprint }}</code></p>
+              <div class="flex items-center space-x-2 mt-1">
+                <p class="text-xs text-slate-400 font-mono">指纹: <code class="text-indigo-300">{{ selected.fingerprint }}</code></p>
+                <button
+                  @click="copyText(selected.fingerprint, '指纹')"
+                  class="text-[10px] text-slate-400 hover:text-slate-200 border border-slate-700 px-1.5 py-0.2 rounded hover:bg-slate-800 transition"
+                >
+                  {{ copySuccess === '指纹' ? '已复制' : '复制' }}
+                </button>
+              </div>
             </div>
-            <button @click="selected = null" class="text-slate-400 hover:text-slate-200 text-2xl font-light p-1 leading-none rounded-lg hover:bg-slate-800 transition">
+            <button
+              @click="selected = null"
+              class="text-slate-400 hover:text-slate-200 text-2xl font-light p-1 leading-none rounded-lg hover:bg-slate-800 transition"
+              title="Esc 键关闭"
+            >
               &times;
             </button>
           </div>
 
-          <!-- 抽屉主体 (占据剩余空间；内容区一律无底色、无边框，仅靠字号/字色/字重分级) -->
-          <div class="space-y-6 flex-1 flex flex-col min-h-0 pt-6">
+          <!-- 快速流转操作栏 -->
+          <div class="flex items-center justify-between bg-slate-800/40 px-3.5 py-2.5 border-b border-slate-800 shrink-0 text-xs">
+            <span class="text-slate-300 font-medium">状态标记：</span>
+            <div class="flex items-center space-x-2">
+              <button
+                @click="updateStatus(selected.id, 'unresolved')"
+                :disabled="selected.status === 'unresolved'"
+                class="px-2.5 py-1 rounded border text-xs font-medium transition"
+                :class="selected.status === 'unresolved' ? 'bg-rose-950/60 border-rose-800 text-rose-300' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'"
+              >
+                待处理
+              </button>
+              <button
+                @click="updateStatus(selected.id, 'in_progress')"
+                :disabled="selected.status === 'in_progress'"
+                class="px-2.5 py-1 rounded border text-xs font-medium transition"
+                :class="selected.status === 'in_progress' ? 'bg-amber-950/60 border-amber-800 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'"
+              >
+                诊断中
+              </button>
+              <button
+                @click="updateStatus(selected.id, 'resolved')"
+                :disabled="selected.status === 'resolved'"
+                class="px-2.5 py-1 rounded border text-xs font-medium transition"
+                :class="selected.status === 'resolved' ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'"
+              >
+                标记已解决
+              </button>
+              <button
+                @click="updateStatus(selected.id, 'ignored')"
+                :disabled="selected.status === 'ignored'"
+                class="px-2.5 py-1 rounded border text-xs font-medium transition"
+                :class="selected.status === 'ignored' ? 'bg-slate-700 border-slate-600 text-slate-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+              >
+                忽略
+              </button>
+            </div>
+          </div>
+
+          <!-- 抽屉主体内容区 -->
+          <div class="space-y-5 flex-1 flex flex-col min-h-0 pt-4">
             <!-- 核心出错源 -->
             <div class="shrink-0">
-              <h3 class="text-[11px] uppercase tracking-widest font-medium text-slate-500">
-                核心出错位置 · Culprit
-              </h3>
-              <p class="mt-2 font-mono text-[13px] leading-relaxed text-rose-300/90 break-all select-all">
-                {{ selected.culprit || '未获取到确切位置' }}
+              <div class="flex items-center justify-between">
+                <h3 class="text-xs uppercase tracking-widest font-semibold text-slate-400">
+                  核心出错位置 · Culprit
+                </h3>
+                <button
+                  v-if="selected.culprit"
+                  @click="copyText(selected.culprit, 'Culprit')"
+                  class="text-xs text-slate-400 hover:text-slate-200 border border-slate-700 px-2 py-0.5 rounded hover:bg-slate-800 transition"
+                >
+                  {{ copySuccess === 'Culprit' ? '已复制' : '复制栈位置' }}
+                </button>
+              </div>
+              <p class="mt-2 font-mono text-xs leading-relaxed text-rose-300/90 break-all select-all bg-rose-950/20 p-3 rounded-lg border border-rose-900/40">
+                {{ selected.culprit || '未获取到确切代码栈位置' }}
               </p>
             </div>
 
-            <!-- 统计信息 -->
-            <div class="grid grid-cols-4 gap-x-4 gap-y-3 shrink-0">
+            <!-- 核心元数据统计面板 -->
+            <div class="grid grid-cols-4 gap-3 bg-slate-900/80 p-3.5 rounded-lg border border-slate-800/80 shrink-0">
               <div>
-                <span class="block text-[11px] tracking-wide text-slate-500">首次发生</span>
+                <span class="block text-xs text-slate-400">首次发生</span>
                 <p class="mt-1 text-xs font-mono text-slate-300">{{ formatDate(selected.first_seen_at) }}</p>
               </div>
               <div>
-                <span class="block text-[11px] tracking-wide text-slate-500">累计发生</span>
-                <p class="mt-1 text-base font-mono text-indigo-300 font-semibold leading-none">{{ selected.count }}</p>
+                <span class="block text-xs text-slate-400">累计频次</span>
+                <p class="mt-1 text-base font-mono text-indigo-300 font-semibold">{{ selected.count }}</p>
               </div>
               <div>
-                <span class="block text-[11px] tracking-wide text-slate-500">关联版本</span>
-                <p class="mt-1 text-xs font-mono text-slate-300">{{ selected.last_release || '未知版本' }}</p>
+                <span class="block text-xs text-slate-400">发布版本</span>
+                <p class="mt-1 text-xs font-mono text-slate-300">{{ selected.last_release || '未指定' }}</p>
               </div>
               <div>
-                <span class="block text-[11px] tracking-wide text-slate-500">诊断修复 Agent</span>
+                <span class="block text-xs text-slate-400">诊断修复</span>
                 <p class="mt-1 text-xs font-mono text-slate-300 truncate">
                   <span v-if="selected.assigned_to">{{ selected.assigned_to }}</span>
-                  <span v-else class="text-slate-600">未指派</span>
+                  <span v-else class="text-slate-500">未指派</span>
                 </p>
               </div>
             </div>
 
-            <!-- 事件明细 (占满所有剩余高度，超出视口可滚动且隐藏滚动条) -->
+            <!-- 事件明细列表 -->
             <div class="flex-1 flex flex-col min-h-0">
-              <div class="flex items-baseline justify-between mb-1 shrink-0">
-                <h3 class="text-[11px] uppercase tracking-widest font-medium text-slate-500">
-                  近期原始上报事件 · Recent Events
+              <div class="flex items-baseline justify-between mb-2 shrink-0">
+                <h3 class="text-xs uppercase tracking-widest font-semibold text-slate-400">
+                  原始上报事件 ({{ selectedEvents.length }})
                 </h3>
-                <span class="text-[11px] text-slate-600 font-mono">已脱敏保留</span>
+                <span class="text-xs text-slate-500 font-mono">已脱敏处理</span>
               </div>
-              <div class="flex-1 overflow-y-auto no-scrollbar pr-0.5 space-y-6">
-                <p v-if="selectedEvents.length === 0" class="py-6 text-xs text-slate-600">暂无事件明细</p>
-                <article v-for="ev in selectedEvents" :key="ev.id">
-                  <div class="flex justify-between items-baseline text-[11px] font-mono text-slate-500">
-                    <span>事件ID {{ ev.id }}</span>
+              <div class="flex-1 overflow-y-auto no-scrollbar space-y-4 pr-1">
+                <p v-if="selectedEvents.length === 0" class="py-8 text-center text-xs text-slate-500">
+                  正在加载或暂无事件明细
+                </p>
+                <article
+                  v-for="ev in selectedEvents"
+                  :key="ev.id"
+                  class="bg-slate-950/60 p-3.5 rounded-lg border border-slate-800/80 space-y-2.5"
+                >
+                  <div class="flex justify-between items-baseline text-xs font-mono text-slate-400 border-b border-slate-800/60 pb-1.5">
+                    <span class="font-semibold text-slate-300">事件 #{{ ev.id }}</span>
                     <span>{{ formatDate(ev.created_at) }}</span>
                   </div>
-                  <pre class="mt-2 overflow-x-auto no-scrollbar font-mono text-[11px] leading-relaxed text-slate-400 whitespace-pre-wrap break-all">{{ JSON.stringify(ev.payload, null, 2) }}</pre>
+
+                  <!-- 面包屑轻量流式展现 -->
+                  <div v-if="ev.payload && ev.payload.breadcrumbs && ev.payload.breadcrumbs.length" class="space-y-1">
+                    <div class="text-xs uppercase font-semibold text-slate-300">Breadcrumbs 行为轨迹:</div>
+                    <div class="bg-slate-900/80 p-2.5 rounded border border-slate-800/60 space-y-1 max-h-36 overflow-y-auto no-scrollbar font-mono text-xs">
+                      <div
+                        v-for="(b, idx) in ev.payload.breadcrumbs"
+                        :key="idx"
+                        class="flex items-center space-x-2 text-slate-300"
+                      >
+                        <span class="text-slate-500 text-xs">{{ idx + 1 }}.</span>
+                        <span class="text-indigo-400 font-medium">[{{ b.category || 'default' }}]</span>
+                        <span class="truncate">{{ b.message || JSON.stringify(b.data || {}) }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 原始 Payload -->
+                  <div>
+                    <div class="text-xs uppercase font-semibold text-slate-300 mb-1">Payload 结构:</div>
+                    <pre class="bg-slate-900/90 p-2.5 rounded border border-slate-800/80 font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap break-all max-h-52 overflow-y-auto no-scrollbar">{{ JSON.stringify(ev.payload, null, 2) }}</pre>
+                  </div>
                 </article>
               </div>
             </div>
           </div>
 
-          <!-- 抽屉底部操作 (固定底部) -->
-          <div class="pt-4 border-t border-slate-800 flex justify-between items-center shrink-0">
+          <!-- 抽屉底部操作 -->
+          <div class="pt-3.5 border-t border-slate-800 flex justify-between items-center shrink-0">
             <span class="text-xs text-slate-500 font-mono flex items-center space-x-1.5">
               <span class="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
-              <span>由 Coding Agent 自动诊断闭环</span>
+              <span>由 Coding Agent 自动闭环治理</span>
             </span>
             <button
               @click="selected = null"
-              class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium px-4 py-2 rounded-lg transition active:scale-95"
+              class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium px-4 py-1.5 rounded-lg transition active:scale-95"
             >
-              关闭
+              关闭 (Esc)
             </button>
           </div>
         </div>
@@ -285,19 +453,56 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const issues = ref([])
 const projects = ref([])
 const selected = ref(null)
 const selectedEvents = ref([])
-const filterStatus = ref('')
+// 默认视图为需关注问题（attention），自动排除已解决(resolved)和已忽略(ignored)
+const filterStatus = ref('attention')
 const filterPlatform = ref('')
 const filterProject = ref('')
+const searchKeyword = ref('')
+const isRefreshing = ref(false)
+const copySuccess = ref(null)
+
+const unresolvedCount = computed(() => issues.value.filter(i => i.status === 'unresolved').length)
+const inProgressCount = computed(() => issues.value.filter(i => i.status === 'in_progress').length)
+const resolvedCount = computed(() => issues.value.filter(i => i.status === 'resolved').length)
+const attentionCount = computed(() => issues.value.filter(i => i.status === 'unresolved' || i.status === 'in_progress' || i.status === 'regression').length)
+
+const filteredIssues = computed(() => {
+  let list = issues.value
+
+  // 状态筛选：如果是 attention，只展示需关注的缺陷
+  if (filterStatus.value === 'attention') {
+    list = list.filter(i => i.status === 'unresolved' || i.status === 'in_progress' || i.status === 'regression')
+  } else if (filterStatus.value) {
+    list = list.filter(i => i.status === filterStatus.value)
+  }
+
+  // 平台与项目本地双重防护过滤
+  if (filterPlatform.value) {
+    list = list.filter(i => i.platform === filterPlatform.value)
+  }
+  if (filterProject.value) {
+    list = list.filter(i => i.project === filterProject.value)
+  }
+
+  if (!searchKeyword.value.trim()) return list
+  const kw = searchKeyword.value.trim().toLowerCase()
+  return list.filter(i => {
+    return (i.title && i.title.toLowerCase().includes(kw)) ||
+      (i.culprit && i.culprit.toLowerCase().includes(kw)) ||
+      (i.fingerprint && i.fingerprint.toLowerCase().includes(kw)) ||
+      (i.project && i.project.toLowerCase().includes(kw))
+  })
+})
 
 const fetchIssues = async () => {
+  // 请求服务端获取全量 issue（以便前端精准统计 KPI，状态过滤由 filteredIssues 控制）
   let url = '/api/v1/issues?'
-  if (filterStatus.value) url += `status=${filterStatus.value}&`
   if (filterPlatform.value) url += `platform=${filterPlatform.value}&`
   if (filterProject.value) url += `project=${encodeURIComponent(filterProject.value)}&`
   try {
@@ -321,9 +526,13 @@ const fetchProjects = async () => {
   }
 }
 
-// 候选列表只随显式刷新重取：筛选过程中重建下拉会让已选项被冲掉
 const refreshAll = async () => {
-  await Promise.all([fetchProjects(), fetchIssues()])
+  isRefreshing.value = true
+  try {
+    await Promise.all([fetchProjects(), fetchIssues()])
+  } finally {
+    isRefreshing.value = false
+  }
 }
 
 const updateStatus = async (id, status) => {
@@ -334,6 +543,10 @@ const updateStatus = async (id, status) => {
       body: JSON.stringify({ status })
     })
     if (res.ok) {
+      const updated = await res.json()
+      if (selected.value && selected.value.id === id) {
+        selected.value.status = updated.status
+      }
       fetchIssues()
     }
   } catch (e) {
@@ -343,6 +556,7 @@ const updateStatus = async (id, status) => {
 
 const selectIssue = async (issue) => {
   selected.value = issue
+  selectedEvents.value = []
   try {
     const res = await fetch(`/api/v1/issues/${issue.id}/events`)
     if (res.ok) {
@@ -350,6 +564,19 @@ const selectIssue = async (issue) => {
     }
   } catch (e) {
     console.error('获取缺陷事件详情失败', e)
+  }
+}
+
+const copyText = async (text, label) => {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    copySuccess.value = label
+    setTimeout(() => {
+      if (copySuccess.value === label) copySuccess.value = null
+    }, 1500)
+  } catch (e) {
+    console.error('复制失败', e)
   }
 }
 
@@ -362,8 +589,7 @@ const formatDate = (isoStr) => {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
+      minute: '2-digit'
     })
   } catch {
     return isoStr
@@ -372,31 +598,27 @@ const formatDate = (isoStr) => {
 
 const formatStatusText = (status) => {
   switch (status) {
-    case 'unresolved':
-      return '待处理'
-    case 'in_progress':
-      return '修复中'
-    case 'resolved':
-      return '已解决'
-    case 'regression':
-      return '再次复现'
-    case 'ignored':
-      return '已忽略'
-    default:
-      return status
+    case 'unresolved': return '待处理'
+    case 'in_progress': return '诊断中'
+    case 'resolved': return '已解决'
+    case 'regression': return '再次复现'
+    case 'ignored': return '已忽略'
+    default: return status
   }
 }
 
 const statusBadgeClass = (status) => {
   switch (status) {
     case 'unresolved':
-      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800'
+      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-rose-950/80 text-rose-400 border border-rose-800/80'
     case 'in_progress':
-      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-amber-950 text-amber-400 border border-amber-800'
+      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-amber-950/80 text-amber-400 border border-amber-800/80'
     case 'resolved':
-      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800'
+      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80'
     case 'regression':
-      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-purple-950 text-purple-400 border border-purple-800'
+      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-purple-950/80 text-purple-400 border border-purple-800/80'
+    case 'ignored':
+      return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700/60'
     default:
       return 'inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-300'
   }
@@ -416,7 +638,20 @@ const agentBadgeClass = (agent) => {
   return 'inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-slate-800 text-slate-300 border border-slate-700/60'
 }
 
+const handleKeydown = (e) => {
+  if (e.key === 'Escape' && selected.value) {
+    selected.value = null
+  } else if (e.key === 'r' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) {
+    refreshAll()
+  }
+}
+
 onMounted(() => {
   refreshAll()
+  window.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
 })
 </script>

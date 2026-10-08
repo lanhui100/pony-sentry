@@ -3,6 +3,45 @@ use serde_json::Value;
 /// `extra.project_path` 的契约键名：上报端注入的工作区绝对路径。
 const PROJECT_PATH_KEY: &str = "project_path";
 
+/// 从上报事件推断项目名称（支持显式标签、工作区路径、以及常见服务指纹特征推断）。
+pub fn infer_project_name(
+    tags: Option<&std::collections::HashMap<String, String>>,
+    extra: Option<&Value>,
+    title: Option<&str>,
+    culprit: Option<&str>,
+) -> Option<String> {
+    // 1. 优先读取 tags.project
+    if let Some(t) = tags {
+        if let Some(p) = t.get("project") {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    // 2. 其次从 extra 中读取显式 project / project_name / project_path
+    if let Some(p) = project_name_from_extra(extra) {
+        return Some(p);
+    }
+
+    // 3. 基于错误特征指纹推导项目：
+    // 若标题或 culprit 包含明显网关特征（GatewayExhaustedError, AuthInvalid, GatewayConnectionError）
+    // 且带 /v1/chat/completions 或 /v1/models 路由，则归属于网关项目 "ponyllm"
+    let title_str = title.unwrap_or("");
+    let culprit_str = culprit.unwrap_or("");
+
+    if title_str.contains("GatewayExhaustedError")
+        || title_str.contains("GatewayConnectionError")
+        || title_str.contains("AuthInvalid")
+        || culprit_str.contains("ponyllm")
+    {
+        return Some("ponyllm".to_string());
+    }
+
+    None
+}
+
 /// 上报事件的工作区 → 项目名（路径末段）。
 ///
 /// 之所以取「末段」而非整条路径：脱敏管道会把用户目录前缀替换成 `[USER_HOME]`
@@ -15,7 +54,11 @@ const PROJECT_PATH_KEY: &str = "project_path";
 pub fn project_name_from_extra(extra: Option<&Value>) -> Option<String> {
     // 1. 优先读取显式 project / project_name
     if let Some(extra_val) = extra {
-        if let Some(p) = extra_val.get("project").or_else(|| extra_val.get("project_name")).and_then(|v| v.as_str()) {
+        if let Some(p) = extra_val
+            .get("project")
+            .or_else(|| extra_val.get("project_name"))
+            .and_then(|v| v.as_str())
+        {
             let trimmed = p.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());

@@ -1265,6 +1265,7 @@ name = "pony-sentry-ingest"
 version = "0.1.0"
 dependencies = [
  "pony-sentry-core",
+ "pony-sentry-fingerprint",
  "regex",
  "serde",
  "serde_json",

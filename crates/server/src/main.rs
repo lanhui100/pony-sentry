@@ -35,6 +35,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_token = std::env::var("CLIENT_TOKEN").ok().filter(|t| !t.is_empty());
     let webhook_url = std::env::var("WEBHOOK_URL").ok().filter(|t| !t.is_empty());
 
+    // 运维子命令：全量指纹重索引（幂等）。
+    // 用法：PONY_REINDEX_FINGERPRINTS=1 pony-sentry-server
+    // 重索引会按 v2 指纹方案重建 issue 归属，随后进程退出（不启动 HTTP 服务）。
+    if std::env::var("PONY_REINDEX_FINGERPRINTS").as_deref() == Ok("1") {
+        info!("Running fingerprint reindex (PONY_REINDEX_FINGERPRINTS=1)...");
+        let summary = repo
+            .reindex_fingerprints(&|payload: &serde_json::Value| {
+                serde_json::from_value::<pony_sentry_ingest::RawEvent>(payload.clone())
+                    .ok()
+                    .map(|ev| pony_sentry_ingest::compute_issue_fingerprint(&ev))
+            })
+            .await?;
+        info!(
+            "Reindex complete: created={} reused={} deleted={} moved_events={} skipped={}",
+            summary.issues_created,
+            summary.issues_reused,
+            summary.issues_deleted,
+            summary.events_moved,
+            summary.events_skipped
+        );
+        return Ok(());
+    }
+
     let state = AppState {
         repo,
         client_token,

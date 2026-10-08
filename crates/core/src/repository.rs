@@ -1,4 +1,5 @@
 use crate::models::{Event, Issue, IssueStatus};
+use crate::reindex::FingerprintOut;
 use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,4 +56,12 @@ pub trait IssueRepository: Send + Sync {
 
     /// 已出现过的项目名去重列表，供 Web 端项目筛选下拉使用（不含未注入工作区的事件）。
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError>;
+
+    /// 全量指纹重索引（幂等）：按新指纹方案重建 issue 归属并持久化。
+    /// `fingerprint_of` 由上层注入与实时上报完全一致的指纹计算闭包。
+    /// 返回执行摘要（新建/复用/删除/事件迁移/跳过）。
+    async fn reindex_fingerprints(
+        &self,
+        fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
+    ) -> Result<crate::reindex::ReindexSummary, RepositoryError>;
 }

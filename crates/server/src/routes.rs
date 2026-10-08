@@ -9,8 +9,9 @@ use pony_sentry_core::{
     models::IssueStatus,
     repository::{IssueFilter, IssueRepository},
 };
-use pony_sentry_fingerprint::FingerprintEngine;
-use pony_sentry_ingest::{project_name_from_extra, RawEvent, SanitizationPipeline};
+use pony_sentry_ingest::{
+    compute_issue_fingerprint, infer_project_name, RawEvent, SanitizationPipeline,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -145,63 +146,19 @@ async fn handle_ingest(
     // 1. 脱敏
     let sanitized = SanitizationPipeline::sanitize_event(raw_event);
 
-    // 2. 计算指纹与提取核心信息
-    let (error_type, culprit, title) = if let Some(ref ex) = sanitized.exception {
-        let cul = ex.stacktrace.as_ref().and_then(|frames| {
-            frames
-                .first()
-                .and_then(|f| match (&f.filename, &f.function) {
-                    (Some(file), Some(func)) => Some(format!("{} in {}", file, func)),
-                    (Some(file), None) => Some(file.clone()),
-                    (None, Some(func)) => Some(func.clone()),
-                    _ => None,
-                })
-        });
-        (
-            ex.error_type.clone(),
-            cul,
-            format!("{}: {}", ex.error_type, ex.value.as_deref().unwrap_or("")),
-        )
-    } else {
-        (
-            "GenericError".to_string(),
-            None,
-            sanitized
-                .message
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string()),
-        )
-    };
+    // 2. 计算指纹与提取核心信息（唯一真相源：compute_issue_fingerprint）
+    let info = compute_issue_fingerprint(&sanitized);
+    let title = info.title.clone();
+    let culprit = info.culprit.clone();
+    let fingerprint = info.fingerprint.clone();
 
-    // 若 culprit 为空，从 tags 或 extra 提取区分标识（如 requested_model / model）
-    let discriminator = if culprit.is_none() {
-        sanitized
-            .tags
-            .as_ref()
-            .and_then(|t| t.get("requested_model").or_else(|| t.get("model")).map(|s| s.as_str()))
-            .or_else(|| {
-                sanitized
-                    .extra
-                    .as_ref()
-                    .and_then(|e| e.get("requested_model").or_else(|| e.get("model")).and_then(|v| v.as_str()))
-            })
-    } else {
-        None
-    };
-
-    let fingerprint = FingerprintEngine::compute_fingerprint_with_discriminator(
-        &error_type,
+    // 3. 项目维度：使用 infer_project_name 综合 tags、extra、title 与 culprit 智能识别
+    let project = infer_project_name(
+        sanitized.tags.as_ref(),
+        sanitized.extra.as_ref(),
+        Some(&title),
         culprit.as_deref(),
-        &sanitized.platform,
-        discriminator,
     );
-
-    // 3. 项目维度：优先 extra.project / tags.project，再回退 extra.project_path
-    let project = sanitized
-        .tags
-        .as_ref()
-        .and_then(|t| t.get("project").cloned())
-        .or_else(|| project_name_from_extra(sanitized.extra.as_ref()));
 
     // 4. 持久化与状态机流转
     let payload_json = serde_json::to_value(&sanitized)

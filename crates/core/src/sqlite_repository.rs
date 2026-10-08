@@ -1,6 +1,7 @@
 use crate::{
     db::DatabasePool,
     models::{Event, Issue, IssueStatus},
+    reindex::{plan_reindex, FingerprintOut, ReindexSummary},
     repository::{IssueFilter, IssueRepository, RepositoryError},
 };
 use async_trait::async_trait;
@@ -321,5 +322,136 @@ impl IssueRepository for SqliteIssueRepository {
             .into_iter()
             .map(|row| row.get::<String, _>("project"))
             .collect())
+    }
+
+    async fn reindex_fingerprints(
+        &self,
+        fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
+    ) -> Result<ReindexSummary, RepositoryError> {
+        // 1. 全量读取 events 与 issues
+        let event_rows = sqlx::query(
+            "SELECT id, issue_id, payload, release, environment, created_at FROM events",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(event_rows.len());
+        for row in event_rows {
+            let created_str: String = row.get("created_at");
+            let payload_str: String = row.get("payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or(json!({}));
+            events.push(Event {
+                id: row.get("id"),
+                issue_id: row.get("issue_id"),
+                payload,
+                release: row.get("release"),
+                environment: row.get("environment"),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            });
+        }
+
+        let issue_rows = sqlx::query(
+            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut issues = Vec::with_capacity(issue_rows.len());
+        for row in issue_rows {
+            let status_str: String = row.get("status");
+            let first_str: String = row.get("first_seen_at");
+            let last_str: String = row.get("last_seen_at");
+            issues.push(Issue {
+                id: row.get("id"),
+                fingerprint: row.get("fingerprint"),
+                title: row.get("title"),
+                culprit: row.get("culprit"),
+                platform: row.get("platform"),
+                status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
+                assigned_to: row.get("assigned_to"),
+                count: row.get("count"),
+                last_release: row.get("last_release"),
+                project: row.get("project"),
+                first_seen_at: chrono::DateTime::parse_from_rfc3339(&first_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                last_seen_at: chrono::DateTime::parse_from_rfc3339(&last_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            });
+        }
+
+        // 2. 规划（纯函数）
+        let plan = plan_reindex(&events, &issues, fingerprint_of);
+
+        // 3. 事务持久化
+        let mut tx = self.pool.begin().await?;
+        for row in &plan.issue_rows {
+            if plan.reused_ids.contains(&row.id) {
+                sqlx::query(
+                    "UPDATE issues SET fingerprint = ?, title = ?, culprit = ?, platform = ?, status = ?, assigned_to = ?, count = ?, last_release = ?, project = ?, first_seen_at = ?, last_seen_at = ? WHERE id = ?",
+                )
+                .bind(&row.fingerprint)
+                .bind(&row.title)
+                .bind(&row.culprit)
+                .bind(&row.platform)
+                .bind(row.status.to_string())
+                .bind(&row.assigned_to)
+                .bind(row.count)
+                .bind(&row.last_release)
+                .bind(&row.project)
+                .bind(row.first_seen_at.to_rfc3339())
+                .bind(row.last_seen_at.to_rfc3339())
+                .bind(&row.id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&row.id)
+                .bind(&row.fingerprint)
+                .bind(&row.title)
+                .bind(&row.culprit)
+                .bind(&row.platform)
+                .bind(row.status.to_string())
+                .bind(&row.assigned_to)
+                .bind(row.count)
+                .bind(&row.last_release)
+                .bind(&row.project)
+                .bind(row.first_seen_at.to_rfc3339())
+                .bind(row.last_seen_at.to_rfc3339())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        for (event_id, issue_id) in &plan.assignments {
+            sqlx::query("UPDATE events SET issue_id = ? WHERE id = ?")
+                .bind(issue_id)
+                .bind(event_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        for id in &plan.delete_ids {
+            sqlx::query("DELETE FROM issues WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+
+        Ok(ReindexSummary {
+            issues_created: plan.issue_rows.len() - plan.reused_ids.len(),
+            issues_reused: plan.reused_ids.len(),
+            issues_deleted: plan.delete_ids.len(),
+            events_moved: plan.assignments.len(),
+            events_skipped: plan.skipped_events,
+        })
     }
 }

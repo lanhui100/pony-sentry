@@ -3,95 +3,34 @@ kind: Namespace
 metadata:
   name: pony-sentry
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: pony-sentry-config
-  namespace: pony-sentry
-data:
-  PORT: "3000"
-  RUST_LOG: "info,pony_sentry=debug"
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: pony-sentry
-  namespace: pony-sentry
-  labels:
-    app.kubernetes.io/name: pony-sentry
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: pony-sentry
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: pony-sentry
-    spec:
-      containers:
-        - name: pony-sentry
-          image: pony-sentry:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 3000
-              name: http
-          envFrom:
-            - configMapRef:
-                name: pony-sentry-config
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: pony-sentry-secrets
-                  key: DATABASE_URL
-            - name: CLIENT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: pony-sentry-secrets
-                  key: CLIENT_TOKEN
-                  optional: true
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 3000
-            initialDelaySeconds: 3
-            periodSeconds: 5
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "20m"
-            limits:
-              memory: "128Mi"
-              cpu: "500m"
----
+# -------------------------------------------------------------
+# 1. 宿主机代理 Service & Endpoints（将 Ingress 流量转送宿主机原生端口 3000）
+# -------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
   name: pony-sentry
   namespace: pony-sentry
-  labels:
-    app.kubernetes.io/name: pony-sentry
 spec:
-  type: NodePort
   ports:
-    - port: 3000
+    - name: http
+      port: 3000
       targetPort: 3000
-      nodePort: 31000
-      name: http
-  selector:
-    app.kubernetes.io/name: pony-sentry
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: pony-sentry
+  namespace: pony-sentry
+subsets:
+  - addresses:
+      - ip: 100.95.193.103
+    ports:
+      - name: http
+        port: 3000
 ---
 # -------------------------------------------------------------
-# 安全中间件：强制 HTTPS 重定向 + 公网限流 + 请求体缓冲限制
+# 2. 安全中间件：强制 HTTPS 重定向 + 公网限流 + 请求体缓冲限制
 # -------------------------------------------------------------
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -128,9 +67,7 @@ spec:
     memRequestBodyBytes: 65536
 ---
 # -------------------------------------------------------------
-# 1. 公网加密访问 (Public Encrypted Ingest for Multi-Clients)
-# 仅路由 /api/v1/ingest 与 /healthz（Exact 匹配），挂载 Let's Encrypt 证书
-# 挂载 HTTPS 重定向 + 限流 + 请求体限制中间件
+# 3. 生产公网 Ingress（仅暴露 /api/v1/ingest 与 /healthz）
 # -------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -170,9 +107,8 @@ spec:
                   number: 3000
 ---
 # -------------------------------------------------------------
-# 2. Tailscale 私网控制台（Web UI & Issues Dashboard）
-# 不暴露公网域名/Ingress：通过 Tailscale MagicDNS + NodePort 访问
-#   http://devserver.taildb165c.ts.net:31000  （WireGuard 内加密，仅 Tailscale 设备可路由）
-#   或启用 tailscale serve 后 https://devserver.taildb165c.ts.net （443 自动 TLS）
-# 公网（101.37.23.94）对该路径无任何路由，天然无法访问
+# 4. Tailscale 私网控制台（Web UI & Dashboard）
 # -------------------------------------------------------------
+# 不暴露公网域名/Ingress：仅限 Tailscale 内网 MagicDNS 访问宿主机服务：
+#   http://devserver.taildb165c.ts.net:3000
+# 根路径与控制台页面对外网返回 HTTP 404，天然杜绝泄露风险。

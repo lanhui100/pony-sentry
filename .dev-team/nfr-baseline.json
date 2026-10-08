@@ -1,20 +1,17 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
   "external_call_timeout_ms": 3000,
   "retry": {
-    "max_retries": 3,
-    "backoff_ms": 200
+    "max_attempts": 3,
+    "backoff_ms": 500
   },
-  "concurrency_lock": {
-    "mechanism": "sqlite-wal-busy-timeout",
-    "timeout_ms": 5000
-  },
+  "concurrency_lock": "optimistic_or_mutex",
   "logging": {
     "format": "json",
     "require_trace_id": true
   },
-  "resource_release": {
-    "connection_pool_close": true,
-    "file_handle_close": true
-  }
+  "resource_release": [
+    "abort_controllers",
+    "event_listeners",
+    "background_timers"
+  ]
 }

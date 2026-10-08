@@ -221,6 +221,26 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
         "project": project_name or os.path.basename(os.path.normpath(workspace_path)),
     }
 
+    # 触发诊断后，自动回调 PonySentry API 将该缺陷认领指派给 DSH 智能体并将状态置为 in_progress
+    issue_id = issue.get("id")
+    if issue_id:
+        try:
+            sentry_api_url = os.getenv("PONY_SENTRY_INTERNAL_URL") or "http://127.0.0.1:3000"
+            if not sentry_api_url.startswith("http"):
+                sentry_api_url = f"http://{sentry_api_url}"
+            patch_url = f"{sentry_api_url.rstrip('/')}/api/v1/issues/{issue_id}"
+            with httpx.Client(timeout=5.0, trust_env=False) as client:
+                resp = client.patch(
+                    patch_url,
+                    json={
+                        "status": "in_progress",
+                        "assigned_to": "dsh",
+                    },
+                )
+                logger.info(f"已回写 PonySentry 认领状态: issue_id={issue_id}, code={resp.status_code}")
+        except Exception as e:
+            logger.warning(f"回写 PonySentry 认领状态失败: {e}")
+
     result = run_dsh_diagnosis(workspace_path, issue_info)
     session_id = result.get("session_id")
     summary = result.get("summary", "")

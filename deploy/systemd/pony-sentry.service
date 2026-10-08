@@ -1,0 +1,16 @@
+[Unit]
+Description=PonySentry Telemetry and Crash Console
+After=network.target
+
+[Service]
+Type=simple
+User=dm
+Group=dm
+EnvironmentFile=/etc/pony-sentry/pony-sentry.env
+ExecStart=/usr/local/bin/pony-sentry-server
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
