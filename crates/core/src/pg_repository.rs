@@ -24,6 +24,8 @@ impl PgIssueRepository {
         // 0002 用 ADD COLUMN IF NOT EXISTS 表达，重复启动重放保持幂等。
         let migration_sql = include_str!("../../../migrations/postgres/0002_add_project.sql");
         sqlx::raw_sql(migration_sql).execute(&self.pool).await?;
+        let migration_traces_sql = include_str!("../../../migrations/postgres/0003_add_traces.sql");
+        sqlx::raw_sql(migration_traces_sql).execute(&self.pool).await?;
         Ok(())
     }
 }

@@ -59,7 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = AppState {
-        repo,
+        repo: repo.clone(),
+        trace_repo: if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") {
+            None
+        } else {
+            let pool = create_pool(&db_url).await?;
+            Some(Arc::new(SqliteIssueRepository::new(pool)))
+        },
         client_token,
         webhook_url,
     };

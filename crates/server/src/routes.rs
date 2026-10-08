@@ -6,8 +6,8 @@ use axum::{
     Json, Router,
 };
 use pony_sentry_core::{
-    models::IssueStatus,
-    repository::{IssueFilter, IssueRepository},
+    models::{EvalStatus, IssueStatus, TraceFilter, TraceRecord},
+    repository::{IssueFilter, IssueRepository, TraceRepository},
 };
 use pony_sentry_ingest::{
     compute_issue_fingerprint, infer_project_name, RawEvent, SanitizationPipeline,
@@ -17,12 +17,30 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
     pub repo: Arc<dyn IssueRepository>,
+    pub trace_repo: Option<Arc<dyn TraceRepository>>,
     pub client_token: Option<String>,
     pub webhook_url: Option<String>,
+}
+
+impl AppState {
+    pub fn new(repo: Arc<dyn IssueRepository>) -> Self {
+        Self {
+            repo,
+            trace_repo: None,
+            client_token: None,
+            webhook_url: None,
+        }
+    }
+
+    pub fn with_trace_repo(mut self, trace_repo: Option<Arc<dyn TraceRepository>>) -> Self {
+        self.trace_repo = trace_repo;
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +80,39 @@ pub struct UpdateIssueRequest {
     pub assigned_to: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentTraceIngestRequest {
+    pub session_id: String,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub environment: Option<String>,
+    pub release: Option<String>,
+    pub eval_status: Option<EvalStatus>,
+    pub turns: Option<Vec<serde_json::Value>>,
+    pub tags: Option<std::collections::HashMap<String, String>>,
+    pub extra: Option<serde_json::Value>,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_duration_ms: Option<i64>,
+    pub reported_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TraceQuery {
+    pub session_id: Option<String>,
+    pub eval_status: Option<String>,
+    pub environment: Option<String>,
+    pub release: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTraceRequest {
+    pub eval_status: EvalStatus,
+    pub note: Option<String>,
+}
+
 pub fn create_app_with_state(state: AppState) -> Router {
     // 1. Ingest 专用 CORS：仅开放 POST，收敛跨域能力
     let ingest_cors = CorsLayer::new()
@@ -77,6 +128,7 @@ pub fn create_app_with_state(state: AppState) -> Router {
     // 2. 遥测上报路由 (强制挂载 512KB 请求体硬限制与专有 CORS)
     let ingest_routes = Router::new()
         .route("/api/v1/ingest", post(handle_ingest))
+        .route("/api/v1/traces", post(handle_ingest_trace))
         .layer(DefaultBodyLimit::max(512 * 1024))
         .layer(ingest_cors);
 
@@ -89,7 +141,13 @@ pub fn create_app_with_state(state: AppState) -> Router {
             "/api/v1/issues/:id",
             patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)),
         )
-        .route("/api/v1/issues/:id/events", get(handle_get_issue_events));
+        .route("/api/v1/issues/:id/events", get(handle_get_issue_events))
+        .route("/api/v1/traces", get(handle_list_traces))
+        .route("/api/v1/traces/:id", get(handle_get_trace))
+        .route(
+            "/api/v1/traces/:id",
+            patch(handle_update_trace).layer(DefaultBodyLimit::max(64 * 1024)),
+        );
 
     let html_content = include_str!("../../../web/dist/index.html");
 
@@ -327,4 +385,147 @@ async fn handle_get_issue_events(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(events))
+}
+
+async fn handle_ingest_trace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentTraceIngestRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if let Some(ref expected_token) = state.client_token {
+        let provided = headers
+            .get("x-client-token")
+            .and_then(|h| h.to_str().ok())
+            .or_else(|| {
+                headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+            });
+
+        match provided {
+            Some(t) if t.trim() == expected_token => {}
+            _ => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid or missing client token".into(),
+                ))
+            }
+        }
+    }
+
+    let trace_repo = state
+        .trace_repo
+        .as_ref()
+        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+
+    let now = chrono::Utc::now();
+    let reported_at = payload
+        .reported_at_ms
+        .and_then(|ms| {
+            chrono::DateTime::from_timestamp_millis(ms as i64)
+        })
+        .unwrap_or(now);
+
+    let raw_payload = serde_json::to_value(&payload)
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    let trace = TraceRecord {
+        id: Uuid::new_v4().to_string(),
+        session_id: payload.session_id,
+        run_id: payload.run_id,
+        turn_id: payload.turn_id,
+        environment: payload.environment.unwrap_or_else(|| "default".to_string()),
+        release: payload.release.unwrap_or_else(|| "unknown".to_string()),
+        eval_status: payload.eval_status.unwrap_or(EvalStatus::Unreviewed),
+        payload: raw_payload,
+        total_input_tokens: payload.total_input_tokens,
+        total_output_tokens: payload.total_output_tokens,
+        total_duration_ms: payload.total_duration_ms,
+        reported_at,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = trace_repo
+        .record_trace(trace)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn handle_list_traces(
+    State(state): State<AppState>,
+    Query(query): Query<TraceQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let trace_repo = state
+        .trace_repo
+        .as_ref()
+        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+
+    let eval_status = match query.eval_status {
+        Some(s) => Some(s.parse::<EvalStatus>().map_err(|e| (StatusCode::BAD_REQUEST, e))?),
+        None => None,
+    };
+
+    let filter = TraceFilter {
+        session_id: query.session_id,
+        eval_status,
+        environment: query.environment,
+        release: query.release,
+        limit: query.limit,
+        offset: query.offset,
+    };
+
+    let traces = trace_repo
+        .list_traces(filter)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(traces))
+}
+
+async fn handle_get_trace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let trace_repo = state
+        .trace_repo
+        .as_ref()
+        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+
+    let trace = trace_repo.get_trace(&id).await.map_err(|e| match e {
+        pony_sentry_core::RepositoryError::TraceNotFound(_)
+        | pony_sentry_core::RepositoryError::NotFound(_) => {
+            (StatusCode::NOT_FOUND, "Trace not found".into())
+        }
+        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+    })?;
+
+    Ok(Json(trace))
+}
+
+async fn handle_update_trace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateTraceRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let trace_repo = state
+        .trace_repo
+        .as_ref()
+        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+
+    let updated = trace_repo
+        .update_trace_eval_status(&id, body.eval_status)
+        .await
+        .map_err(|e| match e {
+            pony_sentry_core::RepositoryError::TraceNotFound(_)
+            | pony_sentry_core::RepositoryError::NotFound(_) => {
+                (StatusCode::NOT_FOUND, "Trace not found".into())
+            }
+            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        })?;
+
+    Ok(Json(updated))
 }

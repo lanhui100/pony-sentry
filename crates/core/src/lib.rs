@@ -6,8 +6,8 @@ pub mod repository;
 pub mod sqlite_repository;
 
 pub use db::{create_pool, DatabasePool};
-pub use models::{Event, Issue, IssueStatus, Platform};
+pub use models::{EvalStatus, Event, Issue, IssueStatus, Platform, TraceFilter, TraceRecord};
 pub use pg_repository::PgIssueRepository;
 pub use reindex::{FingerprintOut, ReindexPlan, ReindexSummary};
-pub use repository::{IssueFilter, IssueRepository, RepositoryError};
+pub use repository::{IssueFilter, IssueRepository, RepositoryError, TraceRepository, UpsertIssueResult};
 pub use sqlite_repository::SqliteIssueRepository;

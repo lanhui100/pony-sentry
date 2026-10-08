@@ -13,6 +13,7 @@ async fn test_ingest_and_agent_api_flow() {
 
     let state = AppState {
         repo: repo.clone(),
+        trace_repo: None,
         client_token: None,
         webhook_url: None,
     };
@@ -118,6 +119,7 @@ async fn test_ingest_requires_client_token_when_configured() {
     // 配置了 CLIENT_TOKEN 时必须校验
     let state = AppState {
         repo: repo.clone(),
+        trace_repo: None,
         client_token: Some("test-secret-token".into()),
         webhook_url: None,
     };
@@ -158,6 +160,7 @@ async fn test_sql_injection_is_safely_parametrized() {
 
     let state = AppState {
         repo: repo.clone(),
+        trace_repo: None,
         client_token: None,
         webhook_url: None,
     };
@@ -204,6 +207,7 @@ async fn test_project_path_is_surfaced_and_filterable() {
 
     let state = AppState {
         repo: repo.clone(),
+        trace_repo: None,
         client_token: None,
         webhook_url: None,
     };
@@ -302,6 +306,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
 
     let state = AppState {
         repo: repo.clone(),
+        trace_repo: None,
         client_token: None,
         webhook_url: Some(webhook_url),
     };

@@ -98,3 +98,72 @@ pub struct Event {
     pub environment: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalStatus {
+    #[default]
+    Unreviewed,
+    TriageGood,
+    TriageBad,
+    EvalDataset,
+    Optimized,
+    Wontfix,
+}
+
+impl std::fmt::Display for EvalStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreviewed => write!(f, "unreviewed"),
+            Self::TriageGood => write!(f, "triage_good"),
+            Self::TriageBad => write!(f, "triage_bad"),
+            Self::EvalDataset => write!(f, "eval_dataset"),
+            Self::Optimized => write!(f, "optimized"),
+            Self::Wontfix => write!(f, "wontfix"),
+        }
+    }
+}
+
+impl std::str::FromStr for EvalStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unreviewed" => Ok(EvalStatus::Unreviewed),
+            "triage_good" => Ok(EvalStatus::TriageGood),
+            "triage_bad" => Ok(EvalStatus::TriageBad),
+            "eval_dataset" => Ok(EvalStatus::EvalDataset),
+            "optimized" => Ok(EvalStatus::Optimized),
+            "wontfix" => Ok(EvalStatus::Wontfix),
+            _ => Err(format!("Unknown eval status: {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceRecord {
+    pub id: String,
+    pub session_id: String,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub environment: String,
+    pub release: String,
+    pub eval_status: EvalStatus,
+    pub payload: serde_json::Value,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_duration_ms: Option<i64>,
+    pub reported_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceFilter {
+    pub session_id: Option<String>,
+    pub eval_status: Option<EvalStatus>,
+    pub environment: Option<String>,
+    pub release: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+

@@ -34,6 +34,8 @@ impl SqliteIssueRepository {
                 .execute(&self.pool)
                 .await?;
         }
+        let traces_sql = include_str!("../../../migrations/0003_add_traces.sql");
+        sqlx::raw_sql(traces_sql).execute(&self.pool).await?;
         Ok(())
     }
 }
