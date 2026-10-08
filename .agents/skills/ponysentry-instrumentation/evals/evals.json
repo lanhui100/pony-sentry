@@ -1,0 +1,26 @@
+{
+  "skill_name": "ponysentry-instrumentation",
+  "evals": [
+    {
+      "id": 1,
+      "name": "vue-spa-error-instrumentation",
+      "prompt": "我的 Vue 3 SPA 项目经常有未捕获的 Promise 拒绝和组件报错，帮我接入 PonySentry 埋点：全局错误捕获 + 路由导航面包屑 + 用户操作轨迹，上报到 https://sentry.ponyjob.top，注意脱敏。项目入口在 src/main.js，路由在 src/router.js。",
+      "expected_output": "生成 src/telemetry.js 与 main.js 接入代码：errorHandler + unhandledrejection + window error 三路捕获；router.afterEach 面包屑；fetch 上报含 platform/release/environment/exception/breadcrumbs；深度脱敏（token/password/路径）",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "rust-cli-panic-hook",
+      "prompt": "我的 Rust CLI 工具（cargo package，版本从 env CARGO_PKG_VERSION 读）偶尔 panic 崩溃，用户没法反馈。帮我接入崩溃收集：panic hook 上报 + 少量 breadcrumb（比如关键输入参数，脱敏后）+ release 标记，debug 时我想用 curl 查已上报的 issue 和堆栈。",
+      "expected_output": "生成 panic hook 代码（platform=rust，release=CARGO_PKG_VERSION）；fire-and-forget 上报；curl 查询命令展示如何查看 issues 与 events；脱敏关键输入",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "debug-query-windows-issues",
+      "prompt": "我是 Tauri 桌面端开发者，windows 端 v1.2.0 版本用户反馈有崩溃。帮我查 PonySentry 里 tauri 平台 unresolved 状态的 issue，看看最近的崩溃堆栈和 breadcrumbs，评估是否同一个 bug，然后认领它标记 in_progress 分配给 agent-1。",
+      "expected_output": "给出查询命令与结果分析：按 platform=tauri&status=unresolved&release=v1.2.0 查询；读取 events 堆栈与 breadcrumbs；聚类判断是否同源；PATCH 认领 in_progress 分配 agent-1",
+      "files": []
+    }
+  ]
+}
