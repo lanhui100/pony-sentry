@@ -24,6 +24,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             platform,
             Some("v1.0.0"),
             Some("production"),
+            None,
             json!({"trace": "stack info"}),
         )
         .await
@@ -42,6 +43,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             platform,
             Some("v1.0.0"),
             Some("production"),
+            None,
             json!({"trace": "stack info 2"}),
         )
         .await
@@ -74,6 +76,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             platform,
             Some("v1.0.1"),
             Some("production"),
+            None,
             json!({"trace": "stack info 3"}),
         )
         .await
@@ -93,4 +96,84 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .expect("List issues should succeed");
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, issue.id);
+}
+
+/// 项目维度：写入、按项目筛选、候选列表，以及首报归属不被后续上报覆盖。
+#[tokio::test]
+async fn test_project_dimension_persists_and_filters() {
+    let pool = create_pool("sqlite::memory:")
+        .await
+        .expect("Failed to create memory pool");
+    let repo = SqliteIssueRepository::new(pool);
+    repo.migrate().await.expect("Failed to run migrations");
+
+    let repo_ref = &repo;
+    let report = |fp: &'static str, project: &'static str| async move {
+        repo_ref
+            .record_event_and_upsert_issue(
+                fp,
+                "TypeError: cannot read token",
+                Some("src/views/Dashboard.vue in mounted"),
+                "vue",
+                Some("v1.0.0"),
+                Some("production"),
+                Some(project),
+                json!({ "project_path": format!("/home/dev/{project}") }),
+            )
+            .await
+            .expect("Report should succeed")
+            .0
+    };
+
+    let shop = report("fp_shop", "shop-web").await;
+    let blog = report("fp_blog", "blog-web").await;
+    assert_eq!(shop.project.as_deref(), Some("shop-web"));
+    assert_eq!(blog.project.as_deref(), Some("blog-web"));
+
+    // 按项目筛选只命中该项目下的 issue
+    let only_shop = repo
+        .list_issues(IssueFilter {
+            project: Some("shop-web".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("Filter by project should succeed");
+    assert_eq!(only_shop.len(), 1);
+    assert_eq!(only_shop[0].id, shop.id);
+
+    // 筛选下拉的候选集合：去重且不含 NULL 项目
+    let projects = repo.list_projects().await.expect("List projects");
+    assert_eq!(
+        projects,
+        vec!["blog-web".to_string(), "shop-web".to_string()]
+    );
+
+    // 首报归属：同指纹的后续上报不改写 issue 的项目标签
+    let still_shop = report("fp_shop", "other-project").await;
+    assert_eq!(
+        still_shop.project.as_deref(),
+        Some("shop-web"),
+        "issue 的项目标签必须以首报工作区为准，否则筛选结果会随最后一次上报漂移"
+    );
+
+    // 未注入工作区的事件不污染项目候选集合
+    let no_workspace = repo
+        .record_event_and_upsert_issue(
+            "fp_noname",
+            "GenericError: boom",
+            None,
+            "python",
+            Some("v1.0.0"),
+            Some("production"),
+            None,
+            json!({}),
+        )
+        .await
+        .expect("Report without workspace should succeed")
+        .0;
+    assert_eq!(no_workspace.project, None);
+    assert_eq!(
+        repo.list_projects().await.expect("List projects"),
+        vec!["blog-web".to_string(), "shop-web".to_string()]
+    );
 }

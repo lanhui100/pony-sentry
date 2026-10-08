@@ -8,6 +8,7 @@
 // src/telemetry.js
 const INGEST_URL = import.meta.env.VITE_PONYSENTRY_INGEST_URL || 'https://sentry.ponyjob.top';
 const CLIENT_TOKEN = import.meta.env.VITE_PONYSENTRY_CLIENT_TOKEN || ''; // 服务端配置了才填
+const PROJECT_PATH = import.meta.env.VITE_PROJECT_PATH || ''; // 供 DSH 定位前端工程工作区
 const SAMPLE_RATE = 1.0; // 错误 100% 上报；面包屑可在高流量端下调
 
 // ---- 零信任脱敏（与服务端 sanitizer 对齐）----
@@ -69,7 +70,7 @@ export function reportError({ errorType, message, stackFrames = [], extra = {}, 
       })),
     },
     tags: deepSanitize(tags),
-    extra: deepSanitize(extra),
+    extra: deepSanitize({ project_path: PROJECT_PATH, ...extra }),
     breadcrumbs: breadcrumbs.splice(0), // 上报后清空
   };
 

@@ -10,7 +10,7 @@ use pony_sentry_core::{
     repository::{IssueFilter, IssueRepository},
 };
 use pony_sentry_fingerprint::FingerprintEngine;
-use pony_sentry_ingest::{RawEvent, SanitizationPipeline};
+use pony_sentry_ingest::{project_name_from_extra, RawEvent, SanitizationPipeline};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +50,7 @@ pub struct IssueQuery {
     pub status: Option<String>,
     pub platform: Option<String>,
     pub release: Option<String>,
+    pub project: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -81,16 +82,21 @@ pub fn create_app_with_state(state: AppState) -> Router {
     // 3. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
     let admin_routes = Router::new()
         .route("/api/v1/issues", get(handle_list_issues))
+        .route("/api/v1/projects", get(handle_list_projects))
         .route("/api/v1/issues/:id", get(handle_get_issue))
-        .route("/api/v1/issues/:id", patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)))
+        .route(
+            "/api/v1/issues/:id",
+            patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/v1/issues/:id/events", get(handle_get_issue_events));
 
     let html_content = include_str!("../../../web/dist/index.html");
 
     Router::new()
-        .route("/", get(move || async move {
-            axum::response::Html(html_content)
-        }))
+        .route(
+            "/",
+            get(move || async move { axum::response::Html(html_content) }),
+        )
         .route("/healthz", get(|| async { "OK" }))
         .merge(ingest_routes)
         .merge(admin_routes)
@@ -117,7 +123,12 @@ async fn handle_ingest(
 
         match provided {
             Some(t) if t.trim() == expected_token => {}
-            _ => return Err((StatusCode::UNAUTHORIZED, "Invalid or missing client token".into())),
+            _ => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid or missing client token".into(),
+                ))
+            }
         }
     }
     let raw_event = RawEvent {
@@ -137,14 +148,14 @@ async fn handle_ingest(
     // 2. 计算指纹与提取核心信息
     let (error_type, culprit, title) = if let Some(ref ex) = sanitized.exception {
         let cul = ex.stacktrace.as_ref().and_then(|frames| {
-            frames.first().and_then(|f| {
-                match (&f.filename, &f.function) {
+            frames
+                .first()
+                .and_then(|f| match (&f.filename, &f.function) {
                     (Some(file), Some(func)) => Some(format!("{} in {}", file, func)),
                     (Some(file), None) => Some(file.clone()),
                     (None, Some(func)) => Some(func.clone()),
                     _ => None,
-                }
-            })
+                })
         });
         (
             ex.error_type.clone(),
@@ -155,7 +166,10 @@ async fn handle_ingest(
         (
             "GenericError".to_string(),
             None,
-            sanitized.message.clone().unwrap_or_else(|| "Unknown error".to_string()),
+            sanitized
+                .message
+                .clone()
+                .unwrap_or_else(|| "Unknown error".to_string()),
         )
     };
 
@@ -165,7 +179,10 @@ async fn handle_ingest(
         &sanitized.platform,
     );
 
-    // 3. 持久化与状态机流转
+    // 3. 项目维度：工作区路径的末段即项目名（脱敏后的 [USER_HOME] 前缀不影响末段）
+    let project = project_name_from_extra(sanitized.extra.as_ref());
+
+    // 4. 持久化与状态机流转
     let payload_json = serde_json::to_value(&sanitized)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -178,16 +195,21 @@ async fn handle_ingest(
             &sanitized.platform,
             sanitized.release.as_deref(),
             sanitized.environment.as_deref(),
+            project.as_deref(),
             payload_json,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 4. 若为新问题或回归复现，异步分发 Webhook
+    // 5. 若为新问题或回归复现，异步分发 Webhook
     if issue.count == 1 || issue.status == IssueStatus::Regression {
         if let Some(ref webhook_url) = state.webhook_url {
             let webhook_url = webhook_url.clone();
-            let event_type = if issue.count == 1 { "issue.created" } else { "issue.regression" };
+            let event_type = if issue.count == 1 {
+                "issue.created"
+            } else {
+                "issue.regression"
+            };
             let webhook_payload = serde_json::json!({
                 "event_type": event_type,
                 "timestamp": chrono::Utc::now().timestamp(),
@@ -214,7 +236,11 @@ async fn handle_ingest(
                     .timeout(Duration::from_secs(5))
                     .build();
                 if let Ok(client) = client {
-                    let _ = client.post(&webhook_url).json(&webhook_payload).send().await;
+                    let _ = client
+                        .post(&webhook_url)
+                        .json(&webhook_payload)
+                        .send()
+                        .await;
                 }
             });
         }
@@ -238,6 +264,7 @@ async fn handle_list_issues(
         status: status_enum,
         platform: q.platform,
         release: q.release,
+        project: q.project,
         limit: q.limit,
         offset: q.offset,
     };
@@ -251,20 +278,28 @@ async fn handle_list_issues(
     Ok(Json(issues))
 }
 
+async fn handle_list_projects(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let projects = state
+        .repo
+        .list_projects()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(projects))
+}
+
 async fn handle_get_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let issue = state
-        .repo
-        .get_issue(&id)
-        .await
-        .map_err(|e| match e {
-            pony_sentry_core::RepositoryError::NotFound(_) => {
-                (StatusCode::NOT_FOUND, "Issue not found".into())
-            }
-            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
-        })?;
+    let issue = state.repo.get_issue(&id).await.map_err(|e| match e {
+        pony_sentry_core::RepositoryError::NotFound(_) => {
+            (StatusCode::NOT_FOUND, "Issue not found".into())
+        }
+        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+    })?;
 
     Ok(Json(issue))
 }
@@ -275,9 +310,15 @@ async fn handle_update_issue(
     Json(body): Json<UpdateIssueRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let status = match body.status {
-        Some(s) => s.parse::<IssueStatus>().map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        Some(s) => s
+            .parse::<IssueStatus>()
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
         None => {
-            let current = state.repo.get_issue(&id).await.map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+            let current = state
+                .repo
+                .get_issue(&id)
+                .await
+                .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
             current.status
         }
     };

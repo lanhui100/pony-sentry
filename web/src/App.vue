@@ -64,9 +64,24 @@
             </div>
           </div>
 
+          <!-- 项目筛选 -->
+          <div class="relative">
+            <select
+              v-model="filterProject"
+              @change="fetchIssues"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8"
+            >
+              <option value="">全部项目 (All)</option>
+              <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
+            </select>
+            <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+            </div>
+          </div>
+
           <!-- 刷新按钮 -->
           <button
-            @click="fetchIssues"
+            @click="refreshAll"
             class="bg-slate-800 hover:bg-slate-700/90 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/70 transition flex items-center space-x-1.5 active:scale-95 shadow-sm"
           >
             <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -89,6 +104,7 @@
             <tr class="border-b border-slate-800 text-slate-400 text-[11px] font-medium uppercase tracking-wider bg-slate-900/90">
               <th class="py-3 px-4">缺陷摘要 / 根因定位 (Issue)</th>
               <th class="py-3 px-4 w-28">上报来源</th>
+              <th class="py-3 px-4 w-32">项目</th>
               <th class="py-3 px-4 w-32">当前状态</th>
               <th class="py-3 px-4 w-24 text-center">频次</th>
               <th class="py-3 px-4 w-40">诊断修复 Agent</th>
@@ -97,7 +113,7 @@
           </thead>
           <tbody class="divide-y divide-slate-800/60 text-sm">
             <tr v-if="issues.length === 0">
-              <td colspan="6" class="py-12 text-center text-slate-500">
+              <td colspan="7" class="py-12 text-center text-slate-500">
                 <div class="flex flex-col items-center justify-center space-y-2">
                   <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
@@ -127,6 +143,16 @@
                 <span class="inline-flex px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700/60">
                   {{ issue.platform }}
                 </span>
+              </td>
+
+              <!-- 项目（工作区路径末段） -->
+              <td class="py-3.5 px-4">
+                <span
+                  v-if="issue.project"
+                  class="font-mono text-[11px] text-indigo-300/90"
+                  :title="issue.project"
+                >{{ issue.project }}</span>
+                <span v-else class="text-slate-600 text-[11px] font-mono">未上报</span>
               </td>
 
               <!-- 状态 -->
@@ -183,57 +209,58 @@
             </button>
           </div>
 
-          <!-- 抽屉主体 (占据剩余空间，支持自适应布局) -->
-          <div class="space-y-4 flex-1 flex flex-col min-h-0 pt-4">
-            <!-- 核心出错源 (紧凑固定) -->
+          <!-- 抽屉主体 (占据剩余空间；内容区一律无底色、无边框，仅靠字号/字色/字重分级) -->
+          <div class="space-y-6 flex-1 flex flex-col min-h-0 pt-6">
+            <!-- 核心出错源 -->
             <div class="shrink-0">
-              <h3 class="text-xs font-medium text-slate-400 mb-1 flex items-center space-x-1">
-                <span>核心出错位置 (Culprit)</span>
+              <h3 class="text-[11px] uppercase tracking-widest font-medium text-slate-500">
+                核心出错位置 · Culprit
               </h3>
-              <p class="bg-slate-950 p-2.5 rounded-lg font-mono text-xs text-rose-300 border border-slate-800/90 break-all select-all">
+              <p class="mt-2 font-mono text-[13px] leading-relaxed text-rose-300/90 break-all select-all">
                 {{ selected.culprit || '未获取到确切位置' }}
               </p>
             </div>
 
-            <!-- 统计信息 (紧凑固定) -->
-            <div class="grid grid-cols-4 gap-3 bg-slate-950/40 p-3 rounded-lg border border-slate-800/80 shrink-0">
+            <!-- 统计信息 -->
+            <div class="grid grid-cols-4 gap-x-4 gap-y-3 shrink-0">
               <div>
-                <span class="text-[11px] text-slate-400">首次发生</span>
-                <p class="text-xs font-mono text-slate-300 mt-0.5">{{ formatDate(selected.first_seen_at) }}</p>
+                <span class="block text-[11px] tracking-wide text-slate-500">首次发生</span>
+                <p class="mt-1 text-xs font-mono text-slate-300">{{ formatDate(selected.first_seen_at) }}</p>
               </div>
               <div>
-                <span class="text-[11px] text-slate-400">累计发生</span>
-                <p class="text-xs font-mono text-indigo-400 font-semibold mt-0.5">{{ selected.count }} 次</p>
+                <span class="block text-[11px] tracking-wide text-slate-500">累计发生</span>
+                <p class="mt-1 text-base font-mono text-indigo-300 font-semibold leading-none">{{ selected.count }}</p>
               </div>
               <div>
-                <span class="text-[11px] text-slate-400">关联版本</span>
-                <p class="text-xs font-mono text-slate-300 mt-0.5">{{ selected.last_release || '未知版本' }}</p>
+                <span class="block text-[11px] tracking-wide text-slate-500">关联版本</span>
+                <p class="mt-1 text-xs font-mono text-slate-300">{{ selected.last_release || '未知版本' }}</p>
               </div>
               <div>
-                <span class="text-[11px] text-slate-400">诊断修复 Agent</span>
-                <p class="text-xs font-mono mt-0.5">
-                  <span v-if="selected.assigned_to" :class="agentBadgeClass(selected.assigned_to)">
-                    {{ selected.assigned_to }}
-                  </span>
-                  <span v-else class="text-slate-500">未指派</span>
+                <span class="block text-[11px] tracking-wide text-slate-500">诊断修复 Agent</span>
+                <p class="mt-1 text-xs font-mono text-slate-300 truncate">
+                  <span v-if="selected.assigned_to">{{ selected.assigned_to }}</span>
+                  <span v-else class="text-slate-600">未指派</span>
                 </p>
               </div>
             </div>
 
             <!-- 事件明细 (占满所有剩余高度，超出视口可滚动且隐藏滚动条) -->
             <div class="flex-1 flex flex-col min-h-0">
-              <div class="flex items-center justify-between mb-2 shrink-0">
-                <h3 class="text-xs font-medium text-slate-400">近期原始上报事件 (Recent Events)</h3>
-                <span class="text-[11px] text-slate-500 font-mono">已脱敏保留</span>
+              <div class="flex items-baseline justify-between mb-1 shrink-0">
+                <h3 class="text-[11px] uppercase tracking-widest font-medium text-slate-500">
+                  近期原始上报事件 · Recent Events
+                </h3>
+                <span class="text-[11px] text-slate-600 font-mono">已脱敏保留</span>
               </div>
-              <div class="flex-1 overflow-y-auto no-scrollbar space-y-3 pr-0.5">
-                <div v-for="ev in selectedEvents" :key="ev.id" class="bg-slate-950 p-3.5 rounded-lg border border-slate-800 text-xs space-y-2">
-                  <div class="flex justify-between items-center text-slate-400 border-b border-slate-800/60 pb-1.5">
-                    <span class="font-mono text-[11px]">事件ID: {{ ev.id }}</span>
-                    <span class="font-mono text-[11px]">{{ formatDate(ev.created_at) }}</span>
+              <div class="flex-1 overflow-y-auto no-scrollbar pr-0.5 space-y-6">
+                <p v-if="selectedEvents.length === 0" class="py-6 text-xs text-slate-600">暂无事件明细</p>
+                <article v-for="ev in selectedEvents" :key="ev.id">
+                  <div class="flex justify-between items-baseline text-[11px] font-mono text-slate-500">
+                    <span>事件ID {{ ev.id }}</span>
+                    <span>{{ formatDate(ev.created_at) }}</span>
                   </div>
-                  <pre class="overflow-x-auto no-scrollbar text-slate-300 p-2.5 bg-slate-900/70 rounded border border-slate-800/50 font-mono text-[11px] leading-relaxed">{{ JSON.stringify(ev.payload, null, 2) }}</pre>
-                </div>
+                  <pre class="mt-2 overflow-x-auto no-scrollbar font-mono text-[11px] leading-relaxed text-slate-400 whitespace-pre-wrap break-all">{{ JSON.stringify(ev.payload, null, 2) }}</pre>
+                </article>
               </div>
             </div>
           </div>
@@ -261,15 +288,18 @@
 import { ref, onMounted } from 'vue'
 
 const issues = ref([])
+const projects = ref([])
 const selected = ref(null)
 const selectedEvents = ref([])
 const filterStatus = ref('')
 const filterPlatform = ref('')
+const filterProject = ref('')
 
 const fetchIssues = async () => {
   let url = '/api/v1/issues?'
   if (filterStatus.value) url += `status=${filterStatus.value}&`
   if (filterPlatform.value) url += `platform=${filterPlatform.value}&`
+  if (filterProject.value) url += `project=${encodeURIComponent(filterProject.value)}&`
   try {
     const res = await fetch(url)
     if (res.ok) {
@@ -278,6 +308,22 @@ const fetchIssues = async () => {
   } catch (e) {
     console.error('加载缺陷列表失败', e)
   }
+}
+
+const fetchProjects = async () => {
+  try {
+    const res = await fetch('/api/v1/projects')
+    if (res.ok) {
+      projects.value = await res.json()
+    }
+  } catch (e) {
+    console.error('加载项目列表失败', e)
+  }
+}
+
+// 候选列表只随显式刷新重取：筛选过程中重建下拉会让已选项被冲掉
+const refreshAll = async () => {
+  await Promise.all([fetchProjects(), fetchIssues()])
 }
 
 const updateStatus = async (id, status) => {
@@ -371,6 +417,6 @@ const agentBadgeClass = (agent) => {
 }
 
 onMounted(() => {
-  fetchIssues()
+  refreshAll()
 })
 </script>

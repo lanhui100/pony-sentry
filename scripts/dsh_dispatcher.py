@@ -69,25 +69,66 @@ def send_wechat_work_notification(message: str, user_id: Optional[str] = None) -
         return False
 
 
-def run_dsh_diagnosis(workspace_path: str, issue_info: Dict[str, Any]) -> Dict[str, Any]:
+def attach_session_to_workspace(session_id: str, workspace_path: str) -> None:
+    """自动将由无头任务派生的 session_id 附加到 DSH workspace.json 的对应工作区下"""
+    storage_file = os.path.expanduser("~/.dsh/storages/workspace.json")
+    if not os.path.exists(storage_file):
+        return
+    try:
+        real_workspace = os.path.realpath(workspace_path)
+        with open(storage_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        attached = False
+        tables = data.get("tables", {}).get("workspaces", {})
+        for wid, ws in tables.items():
+            if os.path.realpath(ws.get("path", "")) == real_workspace:
+                session_ids = ws.get("sessionIds", [])
+                if session_id not in session_ids:
+                    session_ids.insert(0, session_id)
+                    ws["sessionIds"] = session_ids
+                    ws["updatedAt"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+                    attached = True
+                break
+
+        if attached:
+            with open(storage_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"会话 {session_id} 已成功附加到工作区 {real_workspace}")
+    except Exception as e:
+        logger.warning(f"附加会话到工作区失败: {e}")
+
+
+def run_dsh_diagnosis(workspace_path: str, issue_info: Dict[str, Any], resume_session_id: Optional[str] = None) -> Dict[str, Any]:
     title = issue_info.get("title", "Unknown Error")
     culprit = issue_info.get("culprit", "Unknown Culprit")
     stacktrace = issue_info.get("stacktrace", "")
 
-    prompt = (
-        f"【PonySentry 故障诊断任务】\n"
-        f"发现错误: {title}\n"
-        f"出错位置: {culprit}\n"
-        f"堆栈信息:\n{stacktrace}\n\n"
-        f"请基于 dev-team 流程对该错误进行根因诊断，并给出修复建议及测试用例草案。\n"
-        f"注意：仅输出诊断分析报告与建议方案，绝对严禁直接修改或提交任何代码，等待用户在 Web 页面中审核确认。"
-    )
+    if resume_session_id:
+        prompt = (
+            "检测到诊断在工具执行阶段曾被中断（或未完成）。"
+            "若前序为只读探测操作（如 read/grep/glob），请直接继续完成根因分析，并输出最终诊断报告及修复建议草案。"
+        )
+        cmd = ["dsh", "headless", "--json", "--session-id", resume_session_id, prompt]
+        logger.info(f"在工作区 {workspace_path} 中续跑中断的 DSH 诊断会话 {resume_session_id}...")
+    else:
+        prompt = (
+            f"【PonySentry 故障诊断任务】\n"
+            f"发现错误: {title}\n"
+            f"出错位置: {culprit}\n"
+            f"堆栈信息:\n{stacktrace}\n\n"
+            f"请基于 dev-team 流程对该错误进行根因诊断，并给出修复建议及测试用例草案。\n"
+            f"执行规范：\n"
+            f"1. 仅针对出错代码路径执行只读勘查（read/grep/glob），严禁执行超长耗时操作；\n"
+            f"2. 若遇到只读工具被中断（interrupted）提示，直接基于已有线索继续或重试只读操作；\n"
+            f"3. 仅输出诊断分析报告与建议方案，绝对严禁直接修改或提交任何代码，等待用户在 Web 页面中审核确认。"
+        )
+        cmd = ["dsh", "headless", "--json", prompt]
+        logger.info(f"在工作区 {workspace_path} 中启动 DSH 诊断任务...")
 
-    cmd = ["dsh", "headless", "--json", prompt]
-    logger.info(f"在工作区 {workspace_path} 中启动 DSH 诊断任务...")
-
-    session_id = None
+    session_id = resume_session_id
     final_text = ""
+    last_assistant_text = ""
 
     try:
         proc = subprocess.Popen(
@@ -108,21 +149,32 @@ def run_dsh_diagnosis(workspace_path: str, issue_info: Dict[str, Any]) -> Dict[s
                 if event_type == "session" and not session_id:
                     session_id = event.get("sessionId")
                     logger.info(f"捕获到 DSH Session ID: {session_id}")
+                    # 将该会话自动附加到对应 workspace，确保在 DSH Web 工作区树下而非未分组中显示
+                    attach_session_to_workspace(session_id, workspace_path)
                 elif event_type == "final":
                     final_text = event.get("text", "")
+                elif event_type == "event":
+                    inner_event = event.get("event", {})
+                    if inner_event.get("type") == "assistant/message":
+                        msg = inner_event.get("data", {}).get("message", {})
+                        content = msg.get("content", [])
+                        text_chunks = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        if text_chunks:
+                            last_assistant_text = "".join(text_chunks)
             except json.JSONDecodeError:
                 continue
 
         proc.wait()
+        summary = final_text or last_assistant_text
         return {
             "session_id": session_id,
-            "summary": final_text,
+            "summary": summary,
             "exit_code": proc.returncode,
         }
     except Exception as e:
         logger.error(f"DSH 调度失败: {e}")
         return {
-            "session_id": None,
+            "session_id": session_id,
             "summary": f"执行失败: {e}",
             "exit_code": -1,
         }
@@ -133,6 +185,10 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
     latest_event = event_payload.get("latest_event", {})
 
     workspace_path = issue.get("project_path")
+    if workspace_path and "[USER_HOME]" in workspace_path:
+        home_dir = os.path.expanduser("~")
+        workspace_path = workspace_path.replace("[USER_HOME]", home_dir)
+
     if not workspace_path or not os.path.exists(workspace_path):
         logger.warning(f"工作区路径未指定或不存在 ({workspace_path})，尝试回退使用当前工作目录...")
         workspace_path = os.getcwd()
@@ -145,8 +201,18 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
 
     result = run_dsh_diagnosis(workspace_path, issue_info)
     session_id = result.get("session_id")
-    summary = result.get("summary", "无详细诊断内容")
+    summary = result.get("summary", "")
+    exit_code = result.get("exit_code", 0)
 
+    # 自愈重试策略：若非 0 退出且已捕获 session_id，并且没有产出有效诊断，自动在原会话续跑 1 次
+    if (exit_code != 0 or not summary) and session_id:
+        logger.warning(f"诊断会话 {session_id} 退出码异常 (exit_code={exit_code}) 或未输出结论，尝试自动续跑自愈...")
+        retry_result = run_dsh_diagnosis(workspace_path, issue_info, resume_session_id=session_id)
+        if retry_result.get("summary"):
+            summary = retry_result.get("summary", "")
+            result = retry_result
+
+    summary = summary or "诊断会话执行结束，详情请登录 Web 查看。"
     session_link = f"{web_base_url}/?session={session_id}" if session_id else "无法获取"
 
     msg = (

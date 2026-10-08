@@ -18,8 +18,12 @@ description: 何时用：用户开发应用时需要接入错误/崩溃埋点（
 ## 步骤
 
 1. **确认上报端点与鉴权**（靠 review）：
-   - 读取环境/配置，确认 ingest 基址（默认 `https://sentry.ponyjob.top`）与是否配置了 `CLIENT_TOKEN`（有则所有上报请求必须带 `X-Client-Token` 或 `Authorization: Bearer`，否则 401）。
-   - 端点契约：`POST /api/v1/ingest`，Content-Type: `application/json`。
+   - 公网 ingest 端点：`https://sentry.ponyjob.top/api/v1/ingest`，Content-Type: `application/json`。
+   - 鉴权机制：生产集群（k3s）已强制开启 `CLIENT_TOKEN`。未携带合法 Token 时直接返回 `401 Unauthorized ("Invalid or missing client token")`。
+   - 环境变量与客户端配置规范：
+     - **后端/桌面端（Node/Python/Rust/Tauri）**：从环境读取 `PONYSENTRY_CLIENT_TOKEN`，必须通过私有变量或构建注入注入 Token，请求附带 `X-Client-Token: <token>` 或 `Authorization: Bearer <token>`。
+     - **纯浏览器前端（SPA 如 Vue/React）**：若需直连公网上报，需通过构建环境（如 `VITE_PONYSENTRY_CLIENT_TOKEN`）注入该 Token；或由同构后端/网关代理转发以防公网暴露。
+   - 生产当前 Client Token 可通过 k8s secret `pony-sentry-secrets` 获取。
 
 2. **识别目标端与入口文件**（靠 review）：
    - Rust 库/CLI：`src/main.rs` / `src/lib.rs` → 参考 `references/rust-tauri.md`
@@ -30,6 +34,7 @@ description: 何时用：用户开发应用时需要接入错误/崩溃埋点（
 3. **生成埋点接入代码**：按对应 `references/<lang>.md` 模板生成，必须包含（Sentry 最佳实践）：
    - **全局错误捕获**：Rust panic hook / Tauri `std::panic` + window error / Vue `errorHandler` + `unhandledrejection` / FastAPI 异常中间件；
    - **结构化 payload**：`platform`、`release`、`environment`、`exception`（error_type + value + stacktrace）；
+   - **定位工作区（重要）**：必须在 `extra` 中注入 `project_path`（例如 Node/Python/Rust 服务端取当前工作区绝对路径 `process.cwd()` / `os.getcwd()` / `std::env::current_dir()`；前端取项目根目录或部署约定的工作区标识），确保服务端触发 Webhook 调度 DSH Headless 时，能精准在对应工作区拉起修复会话；
    - **breadcrumbs**：关键用户操作 / HTTP 请求 / 路由导航 / 数据库操作，`category` + `message` + `data`；
    - **user context**（可选，脱敏后）：仅存 id/role，禁止 username/email/password 等 PII；
    - **release 标记**：必须与部署版本一致（回归检测依赖该字段）；

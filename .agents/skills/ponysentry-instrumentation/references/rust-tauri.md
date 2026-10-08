@@ -133,7 +133,7 @@ fn install_panic_hook() {
                 }]),
             }),
             tags: None,
-            extra: None,
+            extra: std::env::current_dir().ok().map(|p| serde_json::json!({ "project_path": p.to_string_lossy() })),
             breadcrumbs: telemetry::take_breadcrumbs(), // 全局面包屑队列
         };
 

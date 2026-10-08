@@ -11,7 +11,11 @@ async fn test_ingest_and_agent_api_flow() {
     let repo = Arc::new(SqliteIssueRepository::new(pool));
     repo.migrate().await.unwrap();
 
-    let state = AppState { repo: repo.clone(), client_token: None, webhook_url: None };
+    let state = AppState {
+        repo: repo.clone(),
+        client_token: None,
+        webhook_url: None,
+    };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -65,7 +69,9 @@ async fn test_ingest_and_agent_api_flow() {
     res_vue.assert_status(StatusCode::OK);
 
     // 3. Agent 调用 REST API 查询待处理的 Rust issues
-    let list_res = server.get("/api/v1/issues?platform=rust&status=unresolved").await;
+    let list_res = server
+        .get("/api/v1/issues?platform=rust&status=unresolved")
+        .await;
     list_res.assert_status(StatusCode::OK);
     let issues: Vec<serde_json::Value> = list_res.json();
     assert_eq!(issues.len(), 1);
@@ -110,7 +116,11 @@ async fn test_ingest_requires_client_token_when_configured() {
     repo.migrate().await.unwrap();
 
     // 配置了 CLIENT_TOKEN 时必须校验
-    let state = AppState { repo: repo.clone(), client_token: Some("test-secret-token".into()), webhook_url: None };
+    let state = AppState {
+        repo: repo.clone(),
+        client_token: Some("test-secret-token".into()),
+        webhook_url: None,
+    };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -146,7 +156,11 @@ async fn test_sql_injection_is_safely_parametrized() {
     let repo = Arc::new(SqliteIssueRepository::new(pool));
     repo.migrate().await.unwrap();
 
-    let state = AppState { repo: repo.clone(), client_token: None, webhook_url: None };
+    let state = AppState {
+        repo: repo.clone(),
+        client_token: None,
+        webhook_url: None,
+    };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -170,10 +184,92 @@ async fn test_sql_injection_is_safely_parametrized() {
         .await;
     inject_res.assert_status(StatusCode::OK);
     let issues: Vec<serde_json::Value> = inject_res.json();
-    assert_eq!(issues.len(), 0, "SQL injection attempt must not return data");
+    assert_eq!(
+        issues.len(),
+        0,
+        "SQL injection attempt must not return data"
+    );
 
     // 负分页参数应被钳制而非报错
     let neg_res = server.get("/api/v1/issues?limit=-5&offset=-10").await;
     neg_res.assert_status(StatusCode::OK);
 }
 
+/// 项目维度端到端：extra.project_path → issue.project → 筛选与候选列表。
+#[tokio::test]
+async fn test_project_path_is_surfaced_and_filterable() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        client_token: None,
+        webhook_url: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    let server_ref = &server;
+    let report = |error_type: &'static str, workspace: &'static str| async move {
+        server_ref
+            .post("/api/v1/ingest")
+            .json(&json!({
+                "platform": "vue",
+                "release": "v1.0.0",
+                "environment": "production",
+                "message": error_type,
+                "exception": {
+                    "error_type": error_type,
+                    "value": "boom",
+                    "stacktrace": [{
+                        "filename": "src/views/Dashboard.vue",
+                        "function": "mounted",
+                        "lineno": 45,
+                        "in_app": true
+                    }]
+                },
+                "extra": { "project_path": workspace }
+            }))
+            .await
+    };
+
+    report("ReferenceErrorA", "/home/dev/shop-web")
+        .await
+        .assert_status(StatusCode::OK);
+    report("ReferenceErrorB", "/home/dev/blog-web")
+        .await
+        .assert_status(StatusCode::OK);
+
+    // issue.project 暴露的是项目名（工作区末段），而非会随机器变化的绝对路径
+    let issues: Vec<serde_json::Value> = server.get("/api/v1/issues").await.json();
+    let mut projects: Vec<&str> = issues
+        .iter()
+        .map(|i| i["project"].as_str().expect("project must be present"))
+        .collect();
+    // 列表按 last_seen_at DESC 排序，同毫秒写入时次序不定，这里只校验集合
+    projects.sort_unstable();
+    assert_eq!(projects, vec!["blog-web", "shop-web"]);
+
+    // 筛选只返回目标项目
+    let filtered: Vec<serde_json::Value> =
+        server.get("/api/v1/issues?project=shop-web").await.json();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["project"], "shop-web");
+
+    // 下拉候选：去重排序
+    let candidates: Vec<String> = server.get("/api/v1/projects").await.json();
+    assert_eq!(
+        candidates,
+        vec!["blog-web".to_string(), "shop-web".to_string()]
+    );
+
+    // 无工作区注入的事件不进入候选列表
+    server
+        .post("/api/v1/ingest")
+        .json(&json!({ "platform": "python", "message": "no workspace here" }))
+        .await
+        .assert_status(StatusCode::OK);
+    let after: Vec<String> = server.get("/api/v1/projects").await.json();
+    assert_eq!(after, vec!["blog-web".to_string(), "shop-web".to_string()]);
+}

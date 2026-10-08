@@ -1,5 +1,7 @@
-pub mod sanitizer;
 pub mod parser;
+pub mod project;
+pub mod sanitizer;
 
-pub use parser::{RawEvent, Frame, Exception};
+pub use parser::{Exception, Frame, RawEvent};
+pub use project::project_name_from_extra;
 pub use sanitizer::SanitizationPipeline;

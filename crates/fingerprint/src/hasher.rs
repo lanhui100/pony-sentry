@@ -3,11 +3,7 @@ use sha2::{Digest, Sha256};
 pub struct FingerprintEngine;
 
 impl FingerprintEngine {
-    pub fn compute_fingerprint(
-        error_type: &str,
-        culprit: Option<&str>,
-        platform: &str,
-    ) -> String {
+    pub fn compute_fingerprint(error_type: &str, culprit: Option<&str>, platform: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(platform.trim().to_lowercase().as_bytes());
         hasher.update(b":");

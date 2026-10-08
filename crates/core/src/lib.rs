@@ -9,5 +9,3 @@ pub use models::{Event, Issue, IssueStatus, Platform};
 pub use pg_repository::PgIssueRepository;
 pub use repository::{IssueFilter, IssueRepository, RepositoryError};
 pub use sqlite_repository::SqliteIssueRepository;
-
-

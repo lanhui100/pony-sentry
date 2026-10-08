@@ -72,8 +72,5 @@ fn test_deep_zero_trust_sanitization() {
 
     // 4. Breadcrumbs 递归脱敏
     let crumbs_out = sanitized.breadcrumbs.unwrap();
-    assert_eq!(
-        crumbs_out[0]["data"]["authorization"],
-        "[REDACTED_SECRET]"
-    );
+    assert_eq!(crumbs_out[0]["data"]["authorization"], "[REDACTED_SECRET]");
 }

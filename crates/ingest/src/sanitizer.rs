@@ -155,6 +155,8 @@ impl SanitizationPipeline {
     }
 
     pub fn sanitize_path(input: &str) -> String {
-        USER_PATH_REGEX.replace_all(input, "[USER_HOME]").to_string()
+        USER_PATH_REGEX
+            .replace_all(input, "[USER_HOME]")
+            .to_string()
     }
 }

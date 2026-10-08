@@ -137,6 +137,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         message=str(exc),
         traceback_str=traceback.format_exc(),
         extra={
+            "project_path": os.getcwd(),
             "url": str(request.url),
             "method": request.method,
             # 注意：request.headers 必须先脱敏再入 extra（含 Authorization/Cookie）

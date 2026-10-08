@@ -65,3 +65,45 @@ def test_process_webhook_event(mock_run_dsh, mock_send_wechat, tmp_path):
     assert "session-12345" in msg
     assert "ZeroDivisionError" in msg
     assert "修复待确认" in msg
+
+
+@patch("scripts.dsh_dispatcher.send_wechat_work_notification")
+@patch("scripts.dsh_dispatcher.run_dsh_diagnosis")
+def test_process_webhook_event_interrupted_auto_recovery(mock_run_dsh, mock_send_wechat, tmp_path):
+    # 模拟第一次执行因工具中断或超时导致退出码异常 (exit_code=-1 或无 summary)，随后触发一次自动续跑恢复
+    mock_run_dsh.side_effect = [
+        {
+            "session_id": "session-interrupted-001",
+            "summary": "",
+            "exit_code": -1,
+        },
+        {
+            "session_id": "session-interrupted-001",
+            "summary": "自愈成功：继续执行后定位到空指针错误",
+            "exit_code": 0,
+        },
+    ]
+
+    event = {
+        "issue": {
+            "title": "NullPointerPanic",
+            "culprit": "handler.rs:42",
+            "project_path": str(tmp_path),
+        },
+        "latest_event": {
+            "stacktrace": "panic: unexpected null pointer",
+        },
+    }
+
+    process_webhook_event(event)
+
+    # 验证触发了 2 次 run_dsh_diagnosis 调用（初次启动 + 续跑恢复）
+    assert mock_run_dsh.call_count == 2
+    retry_call = mock_run_dsh.call_args_list[1]
+    assert retry_call.kwargs.get("resume_session_id") == "session-interrupted-001"
+
+    # 验证最终通知携带了自愈成功后的诊断摘要
+    mock_send_wechat.assert_called_once()
+    msg = mock_send_wechat.call_args[0][0]
+    assert "session-interrupted-001" in msg
+    assert "自愈成功" in msg

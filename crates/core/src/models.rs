@@ -83,6 +83,8 @@ pub struct Issue {
     pub assigned_to: Option<String>,
     pub count: i64,
     pub last_release: Option<String>,
+    /// 项目名（上报事件 `extra.project_path` 的末段），见 pony_sentry_ingest::project_name_from_extra。
+    pub project: Option<String>,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
 }
