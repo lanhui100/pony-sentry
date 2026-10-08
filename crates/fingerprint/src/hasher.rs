@@ -4,6 +4,15 @@ pub struct FingerprintEngine;
 
 impl FingerprintEngine {
     pub fn compute_fingerprint(error_type: &str, culprit: Option<&str>, platform: &str) -> String {
+        Self::compute_fingerprint_with_discriminator(error_type, culprit, platform, None)
+    }
+
+    pub fn compute_fingerprint_with_discriminator(
+        error_type: &str,
+        culprit: Option<&str>,
+        platform: &str,
+        discriminator: Option<&str>,
+    ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(platform.trim().to_lowercase().as_bytes());
         hasher.update(b":");
@@ -13,6 +22,12 @@ impl FingerprintEngine {
             let clean_culprit = Self::clean_culprit(c);
             hasher.update(b":");
             hasher.update(clean_culprit.as_bytes());
+        } else if let Some(disc) = discriminator {
+            let clean_disc = disc.trim();
+            if !clean_disc.is_empty() {
+                hasher.update(b":");
+                hasher.update(clean_disc.as_bytes());
+            }
         }
         hex::encode(hasher.finalize())
     }

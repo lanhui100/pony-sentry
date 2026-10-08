@@ -173,14 +173,35 @@ async fn handle_ingest(
         )
     };
 
-    let fingerprint = FingerprintEngine::compute_fingerprint(
+    // 若 culprit 为空，从 tags 或 extra 提取区分标识（如 requested_model / model）
+    let discriminator = if culprit.is_none() {
+        sanitized
+            .tags
+            .as_ref()
+            .and_then(|t| t.get("requested_model").or_else(|| t.get("model")).map(|s| s.as_str()))
+            .or_else(|| {
+                sanitized
+                    .extra
+                    .as_ref()
+                    .and_then(|e| e.get("requested_model").or_else(|| e.get("model")).and_then(|v| v.as_str()))
+            })
+    } else {
+        None
+    };
+
+    let fingerprint = FingerprintEngine::compute_fingerprint_with_discriminator(
         &error_type,
         culprit.as_deref(),
         &sanitized.platform,
+        discriminator,
     );
 
-    // 3. 项目维度：工作区路径的末段即项目名（脱敏后的 [USER_HOME] 前缀不影响末段）
-    let project = project_name_from_extra(sanitized.extra.as_ref());
+    // 3. 项目维度：优先 extra.project / tags.project，再回退 extra.project_path
+    let project = sanitized
+        .tags
+        .as_ref()
+        .and_then(|t| t.get("project").cloned())
+        .or_else(|| project_name_from_extra(sanitized.extra.as_ref()));
 
     // 4. 持久化与状态机流转
     let payload_json = serde_json::to_value(&sanitized)
@@ -221,6 +242,7 @@ async fn handle_ingest(
                     "platform": issue.platform,
                     "count": issue.count,
                     "status": issue.status,
+                    "project": issue.project,
                     "project_path": sanitized.extra.as_ref().and_then(|x| x.get("project_path")).and_then(|v| v.as_str()),
                 },
                 "latest_event": {
@@ -228,6 +250,8 @@ async fn handle_ingest(
                     "message": sanitized.message,
                     "exception": sanitized.exception,
                     "breadcrumbs": sanitized.breadcrumbs,
+                    "tags": sanitized.tags,
+                    "extra": sanitized.extra,
                 }
             });
 

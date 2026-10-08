@@ -103,6 +103,8 @@ def run_dsh_diagnosis(workspace_path: str, issue_info: Dict[str, Any], resume_se
     title = issue_info.get("title", "Unknown Error")
     culprit = issue_info.get("culprit", "Unknown Culprit")
     stacktrace = issue_info.get("stacktrace", "")
+    workspace = issue_info.get("workspace") or workspace_path
+    project = issue_info.get("project") or os.path.basename(os.path.normpath(workspace))
 
     if resume_session_id:
         prompt = (
@@ -114,6 +116,8 @@ def run_dsh_diagnosis(workspace_path: str, issue_info: Dict[str, Any], resume_se
     else:
         prompt = (
             f"【PonySentry 故障诊断任务】\n"
+            f"所属项目: {project}\n"
+            f"工作区路径: {workspace}\n"
             f"发现错误: {title}\n"
             f"出错位置: {culprit}\n"
             f"堆栈信息:\n{stacktrace}\n\n"
@@ -189,6 +193,14 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
         home_dir = os.path.expanduser("~")
         workspace_path = workspace_path.replace("[USER_HOME]", home_dir)
 
+    project_name = issue.get("project")
+    # 若无直接 project_path，但有已知项目名，尝试自动匹配本地标准工作区
+    if (not workspace_path or not os.path.exists(workspace_path)) and project_name:
+        candidate = os.path.expanduser(f"~/{project_name}")
+        if os.path.exists(candidate):
+            workspace_path = candidate
+            logger.info(f"根据项目名 {project_name} 自动匹配工作区路径: {workspace_path}")
+
     if not workspace_path or not os.path.exists(workspace_path):
         logger.warning(f"工作区路径未指定或不存在 ({workspace_path})，尝试回退使用当前工作目录...")
         workspace_path = os.getcwd()
@@ -197,6 +209,8 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
         "title": issue.get("title"),
         "culprit": issue.get("culprit"),
         "stacktrace": latest_event.get("stacktrace", ""),
+        "workspace": workspace_path,
+        "project": project_name or os.path.basename(os.path.normpath(workspace_path)),
     }
 
     result = run_dsh_diagnosis(workspace_path, issue_info)
@@ -217,6 +231,8 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
 
     msg = (
         f"🚨【PonySentry 故障诊断已就绪】\n"
+        f"● 所属项目：{issue_info['project']}\n"
+        f"● 工作区路径：{issue_info['workspace']}\n"
         f"● 缺陷标题：{issue_info['title']}\n"
         f"● 出错位置：{issue_info['culprit']}\n"
         f"● 诊断会话：{session_link}\n"

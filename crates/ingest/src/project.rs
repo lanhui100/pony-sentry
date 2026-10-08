@@ -13,6 +13,16 @@ const PROJECT_PATH_KEY: &str = "project_path";
 /// 返回 `None` 的情形：未注入 `extra.project_path`、值非字符串、或末段为空
 /// （例如工作区就是根目录 `/`）。
 pub fn project_name_from_extra(extra: Option<&Value>) -> Option<String> {
+    // 1. 优先读取显式 project / project_name
+    if let Some(extra_val) = extra {
+        if let Some(p) = extra_val.get("project").or_else(|| extra_val.get("project_name")).and_then(|v| v.as_str()) {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
     let path = extra?.get(PROJECT_PATH_KEY)?.as_str()?.trim();
     if path.is_empty() {
         return None;
@@ -34,6 +44,18 @@ pub fn project_name_from_extra(extra: Option<&Value>) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn extracts_explicit_project_or_project_name() {
+        assert_eq!(
+            project_name_from_extra(Some(&json!({ "project": "ponyllm" }))).as_deref(),
+            Some("ponyllm")
+        );
+        assert_eq!(
+            project_name_from_extra(Some(&json!({ "project_name": "job_copilot" }))).as_deref(),
+            Some("job_copilot")
+        );
+    }
 
     #[test]
     fn extracts_basename_of_posix_workspace() {

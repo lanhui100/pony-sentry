@@ -65,6 +65,70 @@ def test_process_webhook_event(mock_run_dsh, mock_send_wechat, tmp_path):
     assert "session-12345" in msg
     assert "ZeroDivisionError" in msg
     assert "修复待确认" in msg
+    assert str(tmp_path) in msg
+
+
+@patch("scripts.dsh_dispatcher.send_wechat_work_notification")
+@patch("scripts.dsh_dispatcher.run_dsh_diagnosis")
+def test_process_webhook_event_matches_project_candidate(mock_run_dsh, mock_send_wechat, tmp_path, monkeypatch):
+    mock_run_dsh.return_value = {
+        "session_id": "session-proj-001",
+        "summary": "诊断成功",
+        "exit_code": 0,
+    }
+    mock_send_wechat.return_value = True
+
+    # 模拟 ~ 下有 ponyllm 目录
+    fake_home = tmp_path / "fake_home"
+    fake_proj = fake_home / "ponyllm"
+    fake_proj.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    event = {
+        "issue": {
+            "title": "GatewayExhaustedError",
+            "culprit": None,
+            "project": "ponyllm",
+            # 没有 project_path
+        },
+        "latest_event": {
+            "stacktrace": "upstream 403",
+        },
+    }
+
+    process_webhook_event(event)
+
+    mock_run_dsh.assert_called_once()
+    called_ws, called_info = mock_run_dsh.call_args[0]
+    assert called_ws == str(fake_proj)
+    assert called_info["workspace"] == str(fake_proj)
+    assert called_info["project"] == "ponyllm"
+
+
+@patch("scripts.dsh_dispatcher.subprocess.Popen")
+@patch("scripts.dsh_dispatcher.attach_session_to_workspace")
+def test_run_dsh_diagnosis_prompt_contains_workspace(mock_attach, mock_popen):
+    from scripts.dsh_dispatcher import run_dsh_diagnosis
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = ['{"type":"session","sessionId":"sess-123"}\n', '{"type":"final","text":"done"}\n']
+    mock_proc.returncode = 0
+    mock_proc.wait.return_value = 0
+    mock_popen.return_value = mock_proc
+
+    issue_info = {
+        "title": "ReleaseProbe: post-deploy check",
+        "culprit": "src/verify.rs in probe",
+        "stacktrace": "test stack",
+        "workspace": "/home/dm/job_copilot",
+        "project": "job_copilot",
+    }
+    run_dsh_diagnosis("/home/dm/job_copilot", issue_info)
+
+    called_cmd = mock_popen.call_args[0][0]
+    prompt_arg = called_cmd[3]
+    assert "工作区路径: /home/dm/job_copilot" in prompt_arg
+    assert "所属项目: job_copilot" in prompt_arg
 
 
 @patch("scripts.dsh_dispatcher.send_wechat_work_notification")
