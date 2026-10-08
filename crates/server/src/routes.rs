@@ -21,6 +21,7 @@ use tower_http::timeout::TimeoutLayer;
 pub struct AppState {
     pub repo: Arc<dyn IssueRepository>,
     pub client_token: Option<String>,
+    pub webhook_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,6 +182,43 @@ async fn handle_ingest(
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 4. 若为新问题或回归复现，异步分发 Webhook
+    if issue.count == 1 || issue.status == IssueStatus::Regression {
+        if let Some(ref webhook_url) = state.webhook_url {
+            let webhook_url = webhook_url.clone();
+            let event_type = if issue.count == 1 { "issue.created" } else { "issue.regression" };
+            let webhook_payload = serde_json::json!({
+                "event_type": event_type,
+                "timestamp": chrono::Utc::now().timestamp(),
+                "issue": {
+                    "id": issue.id,
+                    "fingerprint": issue.fingerprint,
+                    "title": issue.title,
+                    "culprit": issue.culprit,
+                    "platform": issue.platform,
+                    "count": issue.count,
+                    "status": issue.status,
+                    "project_path": sanitized.extra.as_ref().and_then(|x| x.get("project_path")).and_then(|v| v.as_str()),
+                },
+                "latest_event": {
+                    "id": event.id,
+                    "message": sanitized.message,
+                    "exception": sanitized.exception,
+                    "breadcrumbs": sanitized.breadcrumbs,
+                }
+            });
+
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build();
+                if let Ok(client) = client {
+                    let _ = client.post(&webhook_url).json(&webhook_payload).send().await;
+                }
+            });
+        }
+    }
 
     Ok(Json(IngestResponse {
         issue_id: issue.id,

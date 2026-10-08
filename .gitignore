@@ -9,3 +9,8 @@ Thumbs.db
 # __pycache__/    # Python
 target/
 .agents/skills/ponysentry-instrumentation/evals/workspace/
+node_modules/
+*.crt
+*.key
+__pycache__/
+.pytest_cache/

@@ -11,7 +11,7 @@ async fn test_ingest_and_agent_api_flow() {
     let repo = Arc::new(SqliteIssueRepository::new(pool));
     repo.migrate().await.unwrap();
 
-    let state = AppState { repo: repo.clone(), client_token: None };
+    let state = AppState { repo: repo.clone(), client_token: None, webhook_url: None };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -110,7 +110,7 @@ async fn test_ingest_requires_client_token_when_configured() {
     repo.migrate().await.unwrap();
 
     // 配置了 CLIENT_TOKEN 时必须校验
-    let state = AppState { repo: repo.clone(), client_token: Some("test-secret-token".into()) };
+    let state = AppState { repo: repo.clone(), client_token: Some("test-secret-token".into()), webhook_url: None };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
@@ -146,7 +146,7 @@ async fn test_sql_injection_is_safely_parametrized() {
     let repo = Arc::new(SqliteIssueRepository::new(pool));
     repo.migrate().await.unwrap();
 
-    let state = AppState { repo: repo.clone(), client_token: None };
+    let state = AppState { repo: repo.clone(), client_token: None, webhook_url: None };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
