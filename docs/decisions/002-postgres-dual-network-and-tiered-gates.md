@@ -23,7 +23,7 @@ PonySentry 初始基于 SQLite 单文件运行。现需在 k3s 集群进行单�
    - 新增 `migrations/postgres/0001_init.sql`。
 2. **k3s 双网络接入拓扑**（最终实现）：
    - **公网加密入口 (Public Ingest)**：`sentry.ponyjob.top`（A 记录 → 101.37.23.94），Traefik Ingress 挂载 `letsencrypt-prod`（HTTP-01 已签发 Ready），仅路由 `/api/v1/ingest` 与 `/healthz`（Exact），叠加 HTTPS 重定向 + 限流 + 请求体缓冲中间件；
-   - **私网控制台 (Tailscale Private Web)**：不暴露任何公网 DNS/Ingress。PonySentry Service 以 NodePort 31000 暴露，Tailscale 设备经 **MagicDNS**（`http://devserver.taildb165c.ts.net:31000`）访问，WireGuard 内加密；公网无法路由 Tailscale CGNAT 网段且无对应公网记录，天然隔离。*实现沿革：曾尝试 `sentry-internal.ponyjob.top` + Traefik ipAllowList(100.64/10)，因集群 externalTrafficPolicy=Cluster 的 SNAT 丢失真实源 IP 导致 403，弃用该路径。*
+   - **私网控制台 (Tailscale Private Web)**：不暴露任何公网 DNS/Ingress。PonySentry Service 以 NodePort 31000 暴露，Tailscale 设备经 **MagicDNS**（`http://devserver.taildb165c.ts.net:31000`，需设备开启 MagicDNS）或 **Tailscale IP 直连**（`http://100.95.193.103:31000`）访问，WireGuard 内加密；公网无法路由 Tailscale CGNAT 网段且无对应公网记录，天然隔离。*实现沿革：曾尝试 `sentry-internal.ponyjob.top` + Traefik ipAllowList(100.64/10)，因集群 externalTrafficPolicy=Cluster 的 SNAT 丢失真实源 IP 导致 403 弃用；曾尝试 `tailscale serve` 443 免端口，因本机 443 被环境既有服务（`tokens.ponyjob.top`）占用且 serve 端口跨节点受 tailnet 限制，最终维持 MagicDNS + NodePort。*
 3. **Ponygo 三层门禁与开源安全发布体系**：
    - **Layer 1: Pre-commit 门禁**：本地极速运行，包括 `cargo fmt --check`、基于正则与特定模式的敏感凭据（Token/Secret/Private Key）扫描防泄露检查。
    - **Layer 2: Pre-push 门禁**：本地中成本运行，包含 `cargo check`、`cargo test --workspace` 与 `ponygo status` 机械合规自检。
