@@ -164,7 +164,7 @@ async fn handle_ingest(
     let payload_json = serde_json::to_value(&sanitized)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let (issue, event) = state
+    let res = state
         .repo
         .record_event_and_upsert_issue(
             &fingerprint,
@@ -179,11 +179,14 @@ async fn handle_ingest(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // 5. 若为新问题或回归复现，异步分发 Webhook
-    if issue.count == 1 || issue.status == IssueStatus::Regression {
+    let issue = res.issue;
+    let event = res.event;
+
+    // 5. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
+    if res.is_new || res.is_regression_trigger {
         if let Some(ref webhook_url) = state.webhook_url {
             let webhook_url = webhook_url.clone();
-            let event_type = if issue.count == 1 {
+            let event_type = if res.is_new {
                 "issue.created"
             } else {
                 "issue.regression"

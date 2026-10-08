@@ -1,8 +1,8 @@
 use crate::{
     db::DatabasePool,
-    models::{Event, Issue, IssueStatus},
+    models::{EvalStatus, Event, Issue, IssueStatus, TraceFilter, TraceRecord},
     reindex::{plan_reindex, FingerprintOut, ReindexSummary},
-    repository::{IssueFilter, IssueRepository, RepositoryError},
+    repository::{IssueFilter, IssueRepository, RepositoryError, TraceRepository},
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -51,7 +51,7 @@ impl IssueRepository for SqliteIssueRepository {
         environment: Option<&str>,
         project: Option<&str>,
         payload: serde_json::Value,
-    ) -> Result<(Issue, Event), RepositoryError> {
+    ) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
         let now = Utc::now();
         let existing = sqlx::query(
             "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues WHERE fingerprint = ?"
@@ -59,6 +59,9 @@ impl IssueRepository for SqliteIssueRepository {
         .bind(fingerprint)
         .fetch_optional(&self.pool)
         .await?;
+
+        let mut is_new = false;
+        let mut is_regression_trigger = false;
 
         let issue = match existing {
             Some(row) => {
@@ -75,9 +78,10 @@ impl IssueRepository for SqliteIssueRepository {
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or(now);
 
-                // 核心状态机：若处于 Resolved，新事件触发 Regression 重开
+                // 核心状态机：仅当首次处于 Resolved 且新事件再次出现时，才触发一次 Regression 状态跃迁
                 if status == IssueStatus::Resolved {
                     status = IssueStatus::Regression;
+                    is_regression_trigger = true;
                 }
 
                 let new_count = current_count + 1;
@@ -112,6 +116,7 @@ impl IssueRepository for SqliteIssueRepository {
                 }
             }
             None => {
+                is_new = true;
                 let id = Uuid::new_v4().to_string();
                 let status = IssueStatus::Unresolved;
                 sqlx::query(
@@ -170,7 +175,12 @@ impl IssueRepository for SqliteIssueRepository {
             created_at: now,
         };
 
-        Ok((issue, event))
+        Ok(crate::repository::UpsertIssueResult {
+            issue,
+            event,
+            is_new,
+            is_regression_trigger,
+        })
     }
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError> {
@@ -453,5 +463,181 @@ impl IssueRepository for SqliteIssueRepository {
             events_moved: plan.assignments.len(),
             events_skipped: plan.skipped_events,
         })
+    }
+}
+
+#[async_trait]
+impl TraceRepository for SqliteIssueRepository {
+    async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
+        let payload_str = serde_json::to_string(&trace.payload).unwrap_or_else(|_| "{}".to_string());
+        sqlx::query(
+            "INSERT INTO traces (
+                id, session_id, run_id, turn_id, environment, release,
+                eval_status, payload, total_input_tokens, total_output_tokens,
+                total_duration_ms, reported_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&trace.id)
+        .bind(&trace.session_id)
+        .bind(&trace.run_id)
+        .bind(&trace.turn_id)
+        .bind(&trace.environment)
+        .bind(&trace.release)
+        .bind(trace.eval_status.to_string())
+        .bind(payload_str)
+        .bind(trace.total_input_tokens)
+        .bind(trace.total_output_tokens)
+        .bind(trace.total_duration_ms)
+        .bind(trace.reported_at.to_rfc3339())
+        .bind(trace.created_at.to_rfc3339())
+        .bind(trace.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(trace)
+    }
+
+    async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, session_id, run_id, turn_id, environment, release,
+                    eval_status, payload, total_input_tokens, total_output_tokens,
+                    total_duration_ms, reported_at, created_at, updated_at
+             FROM traces WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| RepositoryError::TraceNotFound(id.to_string()))?;
+
+        let eval_status_str: String = row.get("eval_status");
+        let eval_status = eval_status_str
+            .parse::<EvalStatus>()
+            .unwrap_or(EvalStatus::Unreviewed);
+        let payload_str: String = row.get("payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({}));
+        let reported_at_str: String = row.get("reported_at");
+        let created_at_str: String = row.get("created_at");
+        let updated_at_str: String = row.get("updated_at");
+
+        Ok(TraceRecord {
+            id: row.get("id"),
+            session_id: row.get("session_id"),
+            run_id: row.get("run_id"),
+            turn_id: row.get("turn_id"),
+            environment: row.get("environment"),
+            release: row.get("release"),
+            eval_status,
+            payload,
+            total_input_tokens: row.get("total_input_tokens"),
+            total_output_tokens: row.get("total_output_tokens"),
+            total_duration_ms: row.get("total_duration_ms"),
+            reported_at: chrono::DateTime::parse_from_rfc3339(&reported_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+        })
+    }
+
+    async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
+        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release,
+                                eval_status, payload, total_input_tokens, total_output_tokens,
+                                total_duration_ms, reported_at, created_at, updated_at
+                         FROM traces WHERE 1=1".to_string();
+        let mut binds: Vec<String> = Vec::new();
+
+        if let Some(session_id) = &filter.session_id {
+            query.push_str(" AND session_id = ?");
+            binds.push(session_id.clone());
+        }
+        if let Some(eval_status) = &filter.eval_status {
+            query.push_str(" AND eval_status = ?");
+            binds.push(eval_status.to_string());
+        }
+        if let Some(environment) = &filter.environment {
+            query.push_str(" AND environment = ?");
+            binds.push(environment.clone());
+        }
+        if let Some(release) = &filter.release {
+            query.push_str(" AND release = ?");
+            binds.push(release.clone());
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        let limit = filter.limit.unwrap_or(50);
+        let offset = filter.offset.unwrap_or(0);
+        query.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+
+        let mut q = sqlx::query(&query);
+        for b in binds {
+            q = q.bind(b);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut traces = Vec::new();
+        for row in rows {
+            let eval_status_str: String = row.get("eval_status");
+            let eval_status = eval_status_str
+                .parse::<EvalStatus>()
+                .unwrap_or(EvalStatus::Unreviewed);
+            let payload_str: String = row.get("payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({}));
+            let reported_at_str: String = row.get("reported_at");
+            let created_at_str: String = row.get("created_at");
+            let updated_at_str: String = row.get("updated_at");
+
+            traces.push(TraceRecord {
+                id: row.get("id"),
+                session_id: row.get("session_id"),
+                run_id: row.get("run_id"),
+                turn_id: row.get("turn_id"),
+                environment: row.get("environment"),
+                release: row.get("release"),
+                eval_status,
+                payload,
+                total_input_tokens: row.get("total_input_tokens"),
+                total_output_tokens: row.get("total_output_tokens"),
+                total_duration_ms: row.get("total_duration_ms"),
+                reported_at: chrono::DateTime::parse_from_rfc3339(&reported_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            });
+        }
+
+        Ok(traces)
+    }
+
+    async fn update_trace_eval_status(
+        &self,
+        id: &str,
+        status: EvalStatus,
+    ) -> Result<TraceRecord, RepositoryError> {
+        let now = Utc::now();
+        let rows_affected = sqlx::query("UPDATE traces SET eval_status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.to_string())
+            .bind(now.to_rfc3339())
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(RepositoryError::TraceNotFound(id.to_string()));
+        }
+
+        self.get_trace(id).await
     }
 }

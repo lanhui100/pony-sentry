@@ -273,3 +273,84 @@ async fn test_project_path_is_surfaced_and_filterable() {
     let after: Vec<String> = server.get("/api/v1/projects").await.json();
     assert_eq!(after, vec!["blog-web".to_string(), "shop-web".to_string()]);
 }
+
+#[tokio::test]
+async fn test_webhook_anti_avalanche_on_regression() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use axum::routing::post;
+    use axum::Router;
+
+    static WEBHOOK_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    // 启动本地 mock webhook 接收服务器
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_port = mock_listener.local_addr().unwrap().port();
+    let mock_app = Router::new().route("/webhook", post(|| async {
+        WEBHOOK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+        StatusCode::OK
+    }));
+
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock_app).await.unwrap();
+    });
+
+    let webhook_url = format!("http://127.0.0.1:{mock_port}/webhook");
+
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        client_token: None,
+        webhook_url: Some(webhook_url),
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    let payload = json!({
+        "platform": "rust",
+        "message": "test panic for webhook avalanche prevention",
+        "exception": {
+            "error_type": "AvalanchePanic",
+            "value": "boom",
+            "stacktrace": []
+        }
+    });
+
+    // 1. 首次上报：触发 1 次 issue.created Webhook
+    let res = server.post("/api/v1/ingest").json(&payload).await;
+    res.assert_status(StatusCode::OK);
+    let body: serde_json::Value = res.json();
+    let issue_id = body["issue_id"].as_str().unwrap().to_string();
+    assert_eq!(body["count"], 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 1, "初次创建应触发 1 次 Webhook");
+
+    // 2. 第二次上报：count=2，处于 unresolved，不触发 Webhook
+    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 1, "未解决的后续事件不应重复触发 Webhook");
+
+    // 3. 将 issue 标记为 resolved
+    pony_sentry_core::IssueRepository::update_issue_status(
+        repo.as_ref(),
+        &issue_id,
+        pony_sentry_core::models::IssueStatus::Resolved,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 4. 第三次上报：状态由 resolved 回归为 regression，必须触发第 2 次 Webhook
+    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 2, "从 resolved 回归时必须触发 1 次 issue.regression Webhook");
+
+    // 5. 第四、五次上报：已处于 regression 状态，绝对不得再次触发 Webhook（防止雪崩）
+    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 2, "在已回归状态下的持续涌入事件严禁重复触发 Webhook 雪崩");
+}

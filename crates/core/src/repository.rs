@@ -1,4 +1,4 @@
-use crate::models::{Event, Issue, IssueStatus};
+use crate::models::{EvalStatus, Event, Issue, IssueStatus, TraceFilter, TraceRecord};
 use crate::reindex::FingerprintOut;
 use async_trait::async_trait;
 
@@ -8,6 +8,8 @@ pub enum RepositoryError {
     Database(#[from] sqlx::Error),
     #[error("Issue not found: {0}")]
     NotFound(String),
+    #[error("Trace not found: {0}")]
+    TraceNotFound(String),
     #[error("Invalid state transition from {from} to {to}")]
     InvalidTransition { from: String, to: String },
 }
@@ -20,6 +22,14 @@ pub struct IssueFilter {
     pub project: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertIssueResult {
+    pub issue: Issue,
+    pub event: Event,
+    pub is_new: bool,
+    pub is_regression_trigger: bool,
 }
 
 #[async_trait]
@@ -35,7 +45,7 @@ pub trait IssueRepository: Send + Sync {
         environment: Option<&str>,
         project: Option<&str>,
         payload: serde_json::Value,
-    ) -> Result<(Issue, Event), RepositoryError>;
+    ) -> Result<UpsertIssueResult, RepositoryError>;
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError>;
 
@@ -64,4 +74,19 @@ pub trait IssueRepository: Send + Sync {
         &self,
         fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
     ) -> Result<crate::reindex::ReindexSummary, RepositoryError>;
+}
+
+#[async_trait]
+pub trait TraceRepository: Send + Sync {
+    async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError>;
+
+    async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError>;
+
+    async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError>;
+
+    async fn update_trace_eval_status(
+        &self,
+        id: &str,
+        status: EvalStatus,
+    ) -> Result<TraceRecord, RepositoryError>;
 }

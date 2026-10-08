@@ -16,7 +16,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
     let platform = "rust";
 
     // 1. 首次上报：状态为 unresolved, count = 1
-    let (issue, event) = repo
+    let res = repo
         .record_event_and_upsert_issue(
             fp,
             title,
@@ -30,12 +30,17 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .await
         .expect("First report should succeed");
 
+    let issue = res.issue;
+    let event = res.event;
+    assert!(res.is_new);
+    assert!(!res.is_regression_trigger);
+
     assert_eq!(issue.status, IssueStatus::Unresolved);
     assert_eq!(issue.count, 1);
     assert_eq!(event.issue_id, issue.id);
 
     // 2. 重复上报：count = 2
-    let (issue2, _) = repo
+    let res2 = repo
         .record_event_and_upsert_issue(
             fp,
             title,
@@ -49,6 +54,9 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .await
         .expect("Second report should succeed");
 
+    let issue2 = res2.issue;
+    assert!(!res2.is_new);
+    assert!(!res2.is_regression_trigger);
     assert_eq!(issue2.id, issue.id);
     assert_eq!(issue2.count, 2);
     assert_eq!(issue2.status, IssueStatus::Unresolved);
@@ -67,8 +75,8 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .expect("Resolve should succeed");
     assert_eq!(resolved.status, IssueStatus::Resolved);
 
-    // 4. 新版本再度出现该错误：自动触发 Regression
-    let (regressed, _) = repo
+    // 4. 新版本再度出现该错误：自动触发 Regression，且 is_regression_trigger = true
+    let res3 = repo
         .record_event_and_upsert_issue(
             fp,
             title,
@@ -82,9 +90,30 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .await
         .expect("Regression report should succeed");
 
+    let regressed = res3.issue;
+    assert!(!res3.is_new);
+    assert!(res3.is_regression_trigger, "初次回归必须触发 is_regression_trigger");
     assert_eq!(regressed.status, IssueStatus::Regression);
     assert_eq!(regressed.count, 3);
     assert_eq!(regressed.last_release.as_deref(), Some("v1.0.1"));
+
+    // 4.1 再次上报：此时已处于 Regression，必须 is_regression_trigger = false（防止雪崩）
+    let res4 = repo
+        .record_event_and_upsert_issue(
+            fp,
+            title,
+            Some("worker::run"),
+            platform,
+            Some("v1.0.1"),
+            Some("production"),
+            None,
+            json!({"trace": "stack info 4"}),
+        )
+        .await
+        .expect("Follow-up report in regression should succeed");
+    assert!(!res4.is_new);
+    assert!(!res4.is_regression_trigger, "已在回归状态的后续事件不得再次触发 regression 跃迁");
+    assert_eq!(res4.issue.count, 4);
 
     // 5. 过滤查询
     let list = repo
@@ -122,7 +151,7 @@ async fn test_project_dimension_persists_and_filters() {
             )
             .await
             .expect("Report should succeed")
-            .0
+            .issue
     };
 
     let shop = report("fp_shop", "shop-web").await;
@@ -170,7 +199,7 @@ async fn test_project_dimension_persists_and_filters() {
         )
         .await
         .expect("Report without workspace should succeed")
-        .0;
+        .issue;
     assert_eq!(no_workspace.project, None);
     assert_eq!(
         repo.list_projects().await.expect("List projects"),

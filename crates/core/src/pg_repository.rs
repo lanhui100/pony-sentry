@@ -41,7 +41,7 @@ impl IssueRepository for PgIssueRepository {
         environment: Option<&str>,
         project: Option<&str>,
         payload: serde_json::Value,
-    ) -> Result<(Issue, Event), RepositoryError> {
+    ) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
         let now = Utc::now();
         let existing = sqlx::query(
             "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues WHERE fingerprint = $1"
@@ -49,6 +49,9 @@ impl IssueRepository for PgIssueRepository {
         .bind(fingerprint)
         .fetch_optional(&self.pool)
         .await?;
+
+        let mut is_new = false;
+        let mut is_regression_trigger = false;
 
         let issue = match existing {
             Some(row) => {
@@ -64,6 +67,7 @@ impl IssueRepository for PgIssueRepository {
 
                 if status == IssueStatus::Resolved {
                     status = IssueStatus::Regression;
+                    is_regression_trigger = true;
                 }
 
                 let new_count = current_count + 1;
@@ -97,6 +101,7 @@ impl IssueRepository for PgIssueRepository {
                 }
             }
             None => {
+                is_new = true;
                 let id = Uuid::new_v4().to_string();
                 let status = IssueStatus::Unresolved;
                 sqlx::query(
@@ -155,7 +160,12 @@ impl IssueRepository for PgIssueRepository {
             created_at: now,
         };
 
-        Ok((issue, event))
+        Ok(crate::repository::UpsertIssueResult {
+            issue,
+            event,
+            is_new,
+            is_regression_trigger,
+        })
     }
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError> {
