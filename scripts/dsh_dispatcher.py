@@ -194,6 +194,14 @@ def process_webhook_event(event_payload: Dict[str, Any], web_base_url: str = "ht
         workspace_path = workspace_path.replace("[USER_HOME]", home_dir)
 
     project_name = issue.get("project")
+    title = issue.get("title", "")
+    culprit = issue.get("culprit", "")
+
+    # 特殊特征映射：若 title/culprit 包含明显的网关耗尽或 ponyllm 上游特征，且无明确 project，自动推导到 ponyllm
+    if not project_name:
+        if "GatewayExhaustedError" in title or "ponyllm" in culprit:
+            project_name = "ponyllm"
+
     # 若无直接 project_path，但有已知项目名，尝试自动匹配本地标准工作区
     if (not workspace_path or not os.path.exists(workspace_path)) and project_name:
         candidate = os.path.expanduser(f"~/{project_name}")

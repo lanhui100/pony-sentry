@@ -105,6 +105,41 @@ def test_process_webhook_event_matches_project_candidate(mock_run_dsh, mock_send
     assert called_info["project"] == "ponyllm"
 
 
+@patch("scripts.dsh_dispatcher.send_wechat_work_notification")
+@patch("scripts.dsh_dispatcher.run_dsh_diagnosis")
+def test_process_webhook_event_infers_ponyllm_from_gateway_exhausted_error(mock_run_dsh, mock_send_wechat, tmp_path, monkeypatch):
+    mock_run_dsh.return_value = {
+        "session_id": "session-gw-001",
+        "summary": "诊断成功",
+        "exit_code": 0,
+    }
+    mock_send_wechat.return_value = True
+
+    fake_home = tmp_path / "fake_home"
+    fake_proj = fake_home / "ponyllm"
+    fake_proj.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # 没有 project，也没有 project_path，但 title 为 GatewayExhaustedError
+    event = {
+        "issue": {
+            "title": "GatewayExhaustedError: Chat completions failed",
+            "culprit": None,
+        },
+        "latest_event": {
+            "stacktrace": "upstream 503",
+        },
+    }
+
+    process_webhook_event(event)
+
+    mock_run_dsh.assert_called_once()
+    called_ws, called_info = mock_run_dsh.call_args[0]
+    assert called_ws == str(fake_proj)
+    assert called_info["workspace"] == str(fake_proj)
+    assert called_info["project"] == "ponyllm"
+
+
 @patch("scripts.dsh_dispatcher.subprocess.Popen")
 @patch("scripts.dsh_dispatcher.attach_session_to_workspace")
 def test_run_dsh_diagnosis_prompt_contains_workspace(mock_attach, mock_popen):
