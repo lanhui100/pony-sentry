@@ -1,7 +1,7 @@
 use crate::{
-    models::{Event, Issue, IssueStatus},
+    models::{EvalStatus, Event, Issue, IssueStatus, TraceFilter, TraceRecord},
     reindex::{plan_reindex, FingerprintOut, ReindexSummary},
-    repository::{IssueFilter, IssueRepository, RepositoryError},
+    repository::{IssueFilter, IssueRepository, RepositoryError, TraceRepository},
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -417,6 +417,155 @@ impl IssueRepository for PgIssueRepository {
             issues_deleted: plan.delete_ids.len(),
             events_moved: plan.assignments.len(),
             events_skipped: plan.skipped_events,
+        })
+    }
+}
+
+#[async_trait]
+impl TraceRepository for PgIssueRepository {
+    async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
+        let payload_str = serde_json::to_string(&trace.payload).unwrap_or_else(|_| "{}".to_string());
+        sqlx::query(
+            "INSERT INTO traces (
+                id, session_id, run_id, turn_id, environment, release,
+                eval_status, payload, total_input_tokens, total_output_tokens,
+                total_duration_ms, reported_at, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)"
+        )
+        .bind(&trace.id)
+        .bind(&trace.session_id)
+        .bind(&trace.run_id)
+        .bind(&trace.turn_id)
+        .bind(&trace.environment)
+        .bind(&trace.release)
+        .bind(trace.eval_status.to_string())
+        .bind(payload_str)
+        .bind(trace.total_input_tokens)
+        .bind(trace.total_output_tokens)
+        .bind(trace.total_duration_ms)
+        .bind(trace.reported_at)
+        .bind(trace.created_at)
+        .bind(trace.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(trace)
+    }
+
+    async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, session_id, run_id, turn_id, environment, release,
+                    eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
+                    total_duration_ms, reported_at, created_at, updated_at
+             FROM traces WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| RepositoryError::TraceNotFound(id.to_string()))?;
+
+        Self::trace_from_row(row)
+    }
+
+    async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
+        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release,
+                                eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
+                                total_duration_ms, reported_at, created_at, updated_at
+                         FROM traces WHERE 1=1".to_string();
+        let mut binds: Vec<String> = Vec::new();
+        let mut bind_index = 1;
+
+        if let Some(session_id) = &filter.session_id {
+            query.push_str(&format!(" AND session_id = ${bind_index}"));
+            binds.push(session_id.clone());
+            bind_index += 1;
+        }
+        if let Some(eval_status) = &filter.eval_status {
+            query.push_str(&format!(" AND eval_status = ${bind_index}"));
+            binds.push(eval_status.to_string());
+            bind_index += 1;
+        }
+        if let Some(environment) = &filter.environment {
+            query.push_str(&format!(" AND environment = ${bind_index}"));
+            binds.push(environment.clone());
+            bind_index += 1;
+        }
+        if let Some(release) = &filter.release {
+            query.push_str(&format!(" AND release = ${bind_index}"));
+            binds.push(release.clone());
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        let limit = filter.limit.unwrap_or(50);
+        let offset = filter.offset.unwrap_or(0);
+        query.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+
+        let mut q = sqlx::query(&query);
+        for b in binds {
+            q = q.bind(b);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut traces = Vec::new();
+        for row in rows {
+            traces.push(Self::trace_from_row(row)?);
+        }
+
+        Ok(traces)
+    }
+
+    async fn update_trace_eval_status(
+        &self,
+        id: &str,
+        status: EvalStatus,
+    ) -> Result<TraceRecord, RepositoryError> {
+        let now = Utc::now();
+        let rows_affected = sqlx::query("UPDATE traces SET eval_status = $1, updated_at = $2 WHERE id = $3")
+            .bind(status.to_string())
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(RepositoryError::TraceNotFound(id.to_string()));
+        }
+
+        self.get_trace(id).await
+    }
+}
+
+impl PgIssueRepository {
+    fn trace_from_row(
+        row: sqlx::postgres::PgRow,
+    ) -> Result<TraceRecord, RepositoryError> {
+        use sqlx::Row;
+
+        let eval_status_str: String = row.get("eval_status");
+        let eval_status = eval_status_str
+            .parse::<EvalStatus>()
+            .unwrap_or(EvalStatus::Unreviewed);
+        let payload_str: String = row.get("payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({}));
+
+        Ok(TraceRecord {
+            id: row.get("id"),
+            session_id: row.get("session_id"),
+            run_id: row.get("run_id"),
+            turn_id: row.get("turn_id"),
+            environment: row.get("environment"),
+            release: row.get("release"),
+            eval_status,
+            payload,
+            total_input_tokens: row.get("total_input_tokens"),
+            total_output_tokens: row.get("total_output_tokens"),
+            total_duration_ms: row.get("total_duration_ms"),
+            reported_at: row.get("reported_at"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         })
     }
 }
