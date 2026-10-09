@@ -1,0 +1,17 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "web/src/App.vue",
+      "line": 1182,
+      "rule": "abort-scope-collision（刷新全量 abort 误伤 in-flight 交互写请求，静默丢失状态变更）",
+      "counterexample": "refreshAll() 首行执行 abortAllFetches()（1182 → 979-982），而 activeControllers 收纳的是全部 apiFetch 调用，并非仅\"旧的刷新请求\"：交互写请求 updateStatus 的 PATCH /api/v1/issues/{id}（1195）、updateTraceStatus 的 PATCH /api/v1/traces/{id}（1055）、selectIssue 的事件明细 GET（1217）都在集合内。反例时序：用户点击「标记已解决」后 PATCH 尚在 in-flight（≤3000ms 窗口内），随即按 R 热键或点「刷新/重试」→ abortAllFetches() 对 PATCH controller 执行 abort → updateStatus 的 catch 命中 `if (e.name === 'AbortError') return`（1207）静默吞掉，且行 1205 的 `fetchIssues()` 重拉位于被 await 的 PATCH 之后、不会执行 → 服务端可能已落库的状态变更在 UI 上完全丢失，列表/抽屉保持陈旧直至下个轮询周期；updateTraceStatus（1070）、selectIssue（1221）与并发 refresh 同构受创。显式证据：abort 动作与交互请求共享同一全局集合，无任何\"仅 abort 刷新系请求\"的隔离。"
+    },
+    {
+      "file": "web/src/App.vue",
+      "line": 973,
+      "rule": "timeout-only-covers-headers（3000ms 超时在收头后解除，res.json() 响应体读取无保护，isRefreshing/initialLoading 可永久卡死）",
+      "counterexample": "apiFetch 的 finally `clearTimeout(timeoutId)`（973-976）在 fetch() 一收到响应头即解除 3000ms abort，随后各 fetcher 的 `await res.json()`（traces 1040 / issues 1158 / projects 1171 / updateTraceStatus 1061 / updateStatus 1201 / selectIssue 1219）处于无 AbortSignal、无独立超时的裸读。反例时序：/api/v1/traces 返回响应头后响应体停滞 → res.json() 永不 settle → refreshAll 的 `await Promise.all([...])`（1184）永不 settle → finally（1187-1190）永不执行 → isRefreshing 恒 true（旋转图标永转）、initialLoading 恒 true（1189 未跑 → 骨架屏永驻）。这与代码自身注释\"全部请求挂 AbortSignal（超时 ≤3000ms）\"（947）及契约 §7\"全部 fetch 挂 AbortSignal ≤ 3000ms / NFR external_call_timeout_ms=3000 已覆盖\"的声明不符：超时只覆盖请求头阶段，不覆盖响应体阶段。"
+    }
+  ]
+}

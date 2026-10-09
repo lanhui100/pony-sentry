@@ -1,0 +1,188 @@
+test_00_journey_issues_list (__main__.TestWebUIAcceptance.test_00_journey_issues_list)
+旅程 1：Issues 列表渲染 + 截图（关键旅程物理收据载体）；本旅程 Console Error == 0。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1272634) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_01_journey_issues_drawer (__main__.TestWebUIAcceptance.test_01_journey_issues_drawer)
+旅程 2：抽出详情抽屉 + 截图；本旅程 Console Error == 0。 ... ok
+test_02_journey_traces_view (__main__.TestWebUIAcceptance.test_02_journey_traces_view)
+旅程 3：Traces 视图 + 截图；本旅程 Console Error == 0。 ... ok
+test_10_t1_1_gateway_status_testid (__main__.TestWebUIAcceptance.test_10_t1_1_gateway_status_testid)
+T1.1 REQ：gateway-status 恰好 1 个且 data-state ∈ {checking,ready,degraded}。 ... ok
+test_11_t1_2_load_error_banner (__main__.TestWebUIAcceptance.test_11_t1_2_load_error_banner)
+T1.2 REQ：load-error 横幅存在；正常态不可见；真实故障（断网 TypeError）下可见且文案区分加载失败/无数据。 ... ok
+test_12_t1_3_rel_time_on_rows (__main__.TestWebUIAcceptance.test_12_t1_3_rel_time_on_rows)
+T1.3 REQ：Traces 每行含 [data-testid="rel-time"]；Issues '最后上报' 列行同要求。 ... ok
+test_20_t2_1_issues_rows_keyboard (__main__.TestWebUIAcceptance.test_20_t2_1_issues_rows_keyboard)
+T2.1 REQ：Issues 可点击行 tabindex=0 + role=button；Enter/Space 触发打开抽屉。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1309438) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_21_t2_2_traces_cards_keyboard (__main__.TestWebUIAcceptance.test_21_t2_2_traces_cards_keyboard)
+T2.2 REQ：Traces 可点击卡片 tabindex=0 + role=button；Enter/Space 生效。 ... ok
+test_22_t2_3_aria_labels (__main__.TestWebUIAcceptance.test_22_t2_3_aria_labels)
+T2.3 REQ：icon-only 按钮（无可见文本/仅符号图标）与筛选 select 必须带非空 aria-label。 ... ok
+test_23_t2_4_drawer_role_dialog (__main__.TestWebUIAcceptance.test_23_t2_4_drawer_role_dialog)
+T2.4 REQ：抽屉面板 role=dialog + aria-modal=true + 非空 aria-label（Issues 与 Traces 双抽屉）。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1329053) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_30_t3_trace_row_padding (__main__.TestWebUIAcceptance.test_30_t3_trace_row_padding)
+T3 REQ（动态主判据）：每条 Trace 行四轴 computed padding ≥ 8px（p-4.5 已废除）。 ... ok
+test_31_t3_static_no_p45_class (__main__.TestWebUIAcceptance.test_31_t3_static_no_p45_class)
+T3 静态门禁 @review：源码不含非法类 p-4.5（契约给定非零退出命令）。 ... ok
+test_40_t4_1_rel_time_text_relative (__main__.TestWebUIAcceptance.test_40_t4_1_rel_time_text_relative)
+T4.1 REQ：rel-time 文本必须匹配 ^\d+\s*(分钟|小时|天)前$（不接受绝对时间/刚刚）。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1342667) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_41_t4_2_rel_time_title_iso (__main__.TestWebUIAcceptance.test_41_t4_2_rel_time_title_iso)
+T4.2 REQ：rel-time 元素携带 title 绝对时间（ISO8601 可解析）且与相对值一致（±2min）。 ... ok
+test_50_t5_1_issues_drawer_bg_click_closes (__main__.TestWebUIAcceptance.test_50_t5_1_issues_drawer_bg_click_closes)
+T5.1 REQ：Issues 抽屉点击面板外背景遮罩区域 → 1s 内关闭（@click.self 语义）。 ... [open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1264972) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1266285) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1268695) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1281884) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1287184) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1294321) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1295512) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1301614) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1303085) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1308009) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[session-recycle] 第 8 个用例后已回收浏览器会话
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1317465) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1322524) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1324163) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1335375) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1336468) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1340888) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1344757) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1348696) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1350210) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1356190) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=ok
+test_51_t5_2_esc_closes_drawer_exactly_once (__main__.TestWebUIAcceptance.test_51_t5_2_esc_closes_drawer_exactly_once)
+T5.2 REQ：无焦点时 Esc 关闭抽屉且恰好一次（Issues 与 Traces 同规则，统一全局兜底）。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1375018) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_52_t5_3_panel_click_keeps_drawer_open (__main__.TestWebUIAcceptance.test_52_t5_3_panel_click_keeps_drawer_open)
+T5.3 REQ：点击抽屉面板内部不得关闭抽屉（背景关闭仅对遮罩生效）。 ... ok
+test_60_t6_1_healthz_requested_on_load (__main__.TestWebUIAcceptance.test_60_t6_1_healthz_requested_on_load)
+T6.1 REQ：页面加载后 3s 内网络日志出现 GET /healthz（同源）。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1394925) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_61_t6_2_health_badge_state_matches (__main__.TestWebUIAcceptance.test_61_t6_2_health_badge_state_matches)
+T6.2 REQ：data-state 与真实响应一致——200→ready；真实断网(TypeError)→degraded→恢复 ready。 ... skipped '[SKIP-FLAKY] agent-browser open 连续 4 次失败（会话劣化），本用例跳过降噪: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1407061) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.\n(Use `node --trace-warnings ...` to show where the warning was created)\n✗ Operation timed out. The page may still be loading or the element may not exist.\n out='
+test_62_t6_3_initial_state_checking (__main__.TestWebUIAcceptance.test_62_t6_3_initial_state_checking)
+T6.3 REQ：初始渲染状态为 checking（灰），随后按响应迁移（中间态机器断言）。 ... ok
+test_63_t6_4_healthz_poll_interval (__main__.TestWebUIAcceptance.test_63_t6_4_healthz_poll_interval)
+T6.4 REQ：轮询间隔常数 15000ms（契约允许源码级 @review 核验其一即足）。 ... ok
+test_64_t6_5_healthz_abort_timeout (__main__.TestWebUIAcceptance.test_64_t6_5_healthz_abort_timeout)
+T6.5 REQ：/healthz fetch 挂 abort 信号且超时 ≤ 3000ms（源码级核验）。 ... ok
+test_65_t6_6_unmount_cleanup_source (__main__.TestWebUIAcceptance.test_65_t6_6_unmount_cleanup_source)
+T6.6 REQ @review：卸载时清理轮询 timer 与全局监听器（clearInterval/onUnmounted）。 ... ok
+test_70_t7_nfr_baseline_json (__main__.TestWebUIAcceptance.test_70_t7_nfr_baseline_json)
+T7：NFR 基准 JSON 物理校验（Exit Code 0 + NFR_JSON_OK / NFR_SCHEMA_OK）。 ... ok
+test_90_console_errors_zero_across_journeys (__main__.TestWebUIAcceptance.test_90_console_errors_zero_across_journeys)
+硬门禁 a：关键旅程 Console Error == 0 的最终物理收据（全新独立会话隔离判定）。 ... ok
+test_91_physical_screenshots_landed (__main__.TestWebUIAcceptance.test_91_physical_screenshots_landed)
+硬门禁 b：三个关键旅程（Issues 列表/详情抽屉/Traces 视图）各有一张非空物理截图。 ... ok
+
+----------------------------------------------------------------------
+Ran 26 tests in 1361.245s
+
+OK (skipped=7)
+
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1360792) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1366891) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1368295) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1370602) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[session-recycle] 第 16 个用例后已回收浏览器会话
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1376444) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1381296) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1387631) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1388852) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1393624) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #1/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1399545) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #2/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1400825) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[open-retry] agent-browser open 瞬态失败 #3/3，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:1402387) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=
+[session-recycle] 第 24 个用例后已回收浏览器会话

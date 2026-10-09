@@ -1,0 +1,13 @@
+test_90_console_errors_zero_across_journeys (__main__.TestWebUIAcceptance.test_90_console_errors_zero_across_journeys)
+硬门禁 a：关键旅程 Console Error == 0 的最终物理收据（全新独立会话隔离判定）。 ... ok
+test_91_physical_screenshots_landed (__main__.TestWebUIAcceptance.test_91_physical_screenshots_landed)
+硬门禁 b：三个关键旅程（Issues 列表/详情抽屉/Traces 视图）各有一张非空物理截图。 ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 118.743s
+
+OK
+[open-retry] agent-browser open 瞬态失败 #1/1，已 close 会话并重开，原因: agent-browser open http://127.0.0.1:3000 失败 rc=1 err=(node:744656) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✗ Operation timed out. The page may still be loading or the element may not exist.
+ out=

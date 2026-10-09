@@ -1,0 +1,19 @@
+test_00_journey_issues_list (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_00_journey_issues_list)
+旅程 1：Issues 列表渲染 + 截图（关键旅程物理收据载体）；本旅程 Console Error == 0。 ... ok
+test_20_t2_1_issues_rows_keyboard (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_20_t2_1_issues_rows_keyboard)
+T2.1 REQ：Issues 可点击行 tabindex=0 + role=button；Enter/Space 触发打开抽屉。 ... ok
+test_23_t2_4_drawer_role_dialog (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_23_t2_4_drawer_role_dialog)
+T2.4 REQ：抽屉面板 role=dialog + aria-modal=true + 非空 aria-label（Issues 与 Traces 双抽屉）。 ... ok
+test_40_t4_1_rel_time_text_relative (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_40_t4_1_rel_time_text_relative)
+T4.1 REQ：rel-time 文本必须匹配 ^\d+\s*(分钟|小时|天)前$（不接受绝对时间/刚刚）。 ... ok
+test_51_t5_2_esc_closes_drawer_exactly_once (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_51_t5_2_esc_closes_drawer_exactly_once)
+T5.2 REQ：无焦点时 Esc 关闭抽屉且恰好一次（Issues 与 Traces 同规则，统一全局兜底）。 ... ok
+test_60_t6_1_healthz_requested_on_load (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_60_t6_1_healthz_requested_on_load)
+T6.1 REQ：页面加载后 3s 内网络日志出现 GET /healthz（同源）。 ... ok
+test_61_t6_2_health_badge_state_matches (tests.web.test_web_ui_acceptance.TestWebUIAcceptance.test_61_t6_2_health_badge_state_matches)
+T6.2 REQ：data-state 与真实响应一致——200→ready；真实断网(TypeError)→degraded→恢复 ready。 ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 55.827s
+
+OK

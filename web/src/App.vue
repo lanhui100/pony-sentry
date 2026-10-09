@@ -37,10 +37,18 @@
         </nav>
       </div>
       <div class="flex items-center space-x-3">
-        <!-- 自动刷新状态提示 -->
-        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800/80 shadow-sm shadow-emerald-950/30">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-2 animate-pulse"></span>
-          网关就绪
+        <!-- 网关健康状态徽标：轮询 GET /healthz（立即 + 15s），checking(灰)/ready(绿)/degraded(红) 三态 -->
+        <span
+          data-testid="gateway-status"
+          :data-state="gatewayState"
+          class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border shadow-sm transition-colors"
+          :class="gatewayBadgeClass(gatewayState)"
+        >
+          <span
+            class="w-1.5 h-1.5 rounded-full mr-2"
+            :class="[gatewayDotClass(gatewayState), { 'animate-pulse': gatewayState === 'checking' }]"
+          ></span>
+          {{ gatewayStateText }}
         </span>
         <button
           @click="refreshAll"
@@ -57,24 +65,60 @@
 
     <!-- 主视口区域 -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-5">
+      <!-- 数据加载失败横幅：可关闭、可重试（正常/空态时隐藏） -->
+      <div
+        v-show="showLoadError"
+        data-testid="load-error"
+        role="alert"
+        class="flex items-center justify-between gap-3 bg-rose-950/70 border border-rose-800/80 text-rose-200 rounded-xl px-4 py-3 text-sm shadow-sm"
+      >
+        <div class="flex items-center space-x-2.5 min-w-0">
+          <svg class="w-4 h-4 shrink-0 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          <span class="font-medium">数据加载失败，请稍后重试</span>
+        </div>
+        <div class="flex items-center space-x-2 shrink-0">
+          <button
+            @click="refreshAll"
+            class="px-2.5 py-1 rounded-lg border border-rose-700/80 text-xs font-medium bg-rose-900/40 hover:bg-rose-900/70 transition"
+          >
+            重试
+          </button>
+          <button
+            @click="dismissLoadError"
+            aria-label="关闭错误提示"
+            class="text-rose-300/80 hover:text-rose-100 text-lg leading-none px-1.5 rounded hover:bg-rose-900/50 transition"
+          >&times;</button>
+        </div>
+      </div>
+
       <!-- 视图 1：Issues 崩溃遥测 -->
       <section v-if="currentView === 'issues'" class="space-y-5">
       <!-- 统计指标与健康概览卡片 (KPI Bento) -->
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div
           @click="filterStatus = 'attention'"
-          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500/50 transition"
+          @keydown.enter.prevent="filterStatus = 'attention'"
+          @keydown.space.prevent="filterStatus = 'attention'"
+          tabindex="0"
+          role="button"
+          aria-label="筛选：需关注缺陷"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500/50 transition focus:outline-none focus:ring-2 focus:ring-indigo-500/60"
           :class="{ 'ring-2 ring-indigo-500/40 bg-slate-900/90': filterStatus === 'attention' }"
         >
           <div class="text-xs uppercase tracking-wider text-slate-300 font-medium">需关注缺陷 (默认)</div>
           <div class="mt-2 flex items-baseline justify-between">
             <span class="text-2xl font-bold font-mono text-indigo-300">{{ attentionCount }}</span>
-            <span class="text-xs text-slate-400 font-mono">待处理+诊断中</span>
+            <span class="text-xs text-slate-400 font-mono">待处理+诊断中+复现</span>
           </div>
         </div>
         <div
           @click="filterStatus = 'unresolved'"
-          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-rose-500/50 transition"
+          @keydown.enter.prevent="filterStatus = 'unresolved'"
+          @keydown.space.prevent="filterStatus = 'unresolved'"
+          tabindex="0"
+          role="button"
+          aria-label="筛选：待处理缺陷"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-rose-500/50 transition focus:outline-none focus:ring-2 focus:ring-rose-500/60"
           :class="{ 'ring-2 ring-rose-500/40 bg-slate-900/90': filterStatus === 'unresolved' }"
         >
           <div class="text-xs uppercase tracking-wider text-rose-400 font-medium">待处理 (Unresolved)</div>
@@ -85,7 +129,12 @@
         </div>
         <div
           @click="filterStatus = 'in_progress'"
-          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-amber-500/50 transition"
+          @keydown.enter.prevent="filterStatus = 'in_progress'"
+          @keydown.space.prevent="filterStatus = 'in_progress'"
+          tabindex="0"
+          role="button"
+          aria-label="筛选：诊断修复中缺陷"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-amber-500/50 transition focus:outline-none focus:ring-2 focus:ring-amber-500/60"
           :class="{ 'ring-2 ring-amber-500/40 bg-slate-900/90': filterStatus === 'in_progress' }"
         >
           <div class="text-xs uppercase tracking-wider text-amber-400 font-medium">诊断修复中</div>
@@ -96,7 +145,12 @@
         </div>
         <div
           @click="filterStatus = 'resolved'"
-          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition"
+          @keydown.enter.prevent="filterStatus = 'resolved'"
+          @keydown.space.prevent="filterStatus = 'resolved'"
+          tabindex="0"
+          role="button"
+          aria-label="筛选：已修复缺陷"
+          class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
           :class="{ 'ring-2 ring-emerald-500/40 bg-slate-900/90': filterStatus === 'resolved' }"
         >
           <div class="text-xs uppercase tracking-wider text-emerald-400 font-medium">已修复 (Resolved)</div>
@@ -116,7 +170,7 @@
               type="text"
               v-model="searchKeyword"
               placeholder="搜索缺陷标题、代码路径、指纹..."
-              class="w-full bg-slate-800/80 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition"
+              class="w-full bg-slate-800/80 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
             />
             <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-slate-500">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
@@ -124,6 +178,7 @@
             <button
               v-if="searchKeyword"
               @click="searchKeyword = ''"
+              aria-label="清空搜索"
               class="absolute inset-y-0 right-0 flex items-center pr-2 text-slate-400 hover:text-slate-200 text-xs"
             >&times;</button>
           </div>
@@ -132,7 +187,8 @@
           <div class="relative">
             <select
               v-model="filterStatus"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8 font-medium"
+              aria-label="按状态筛选缺陷"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8 font-medium"
             >
               <option value="attention">需关注问题 (默认)</option>
               <option value="unresolved">待处理 (Unresolved)</option>
@@ -152,7 +208,8 @@
             <select
               v-model="filterPlatform"
               @change="fetchIssues"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
+              aria-label="按平台筛选缺陷"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
             >
               <option value="">全部平台</option>
               <option value="rust">Rust 客户端</option>
@@ -170,7 +227,8 @@
             <select
               v-model="filterProject"
               @change="fetchIssues"
-              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
+              aria-label="按项目筛选缺陷"
+              class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-7"
             >
               <option value="">全部项目</option>
               <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
@@ -205,22 +263,38 @@
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60 text-sm">
-              <tr v-if="filteredIssues.length === 0">
+              <!-- 首载骨架屏 -->
+              <template v-if="initialLoading && issues.length === 0">
+                <tr v-for="n in 5" :key="'issue-skeleton-' + n">
+                  <td colspan="7" class="py-3 px-4">
+                    <div class="skeleton h-4 rounded w-3/5 max-w-[420px]"></div>
+                    <div class="skeleton h-3 rounded w-2/5 max-w-[260px] mt-2"></div>
+                  </td>
+                </tr>
+              </template>
+              <!-- 空态：区分"加载失败"与"无匹配数据" -->
+              <tr v-else-if="filteredIssues.length === 0">
                 <td colspan="7" class="py-14 text-center text-slate-500">
                   <div class="flex flex-col items-center justify-center space-y-2.5">
                     <svg class="w-9 h-9 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
-                    <p class="text-sm text-slate-400 font-medium">无匹配的异常缺陷</p>
-                    <p class="text-xs text-slate-500 font-mono">当前视图仅展示需关注的待处理/诊断中缺陷，可切换全部状态查看</p>
+                    <p class="text-sm text-slate-400 font-medium">{{ showLoadError ? '数据加载失败，暂无可用记录' : '无匹配的异常缺陷' }}</p>
+                    <p class="text-xs text-slate-500 font-mono">{{ showLoadError ? '请点击页首错误横幅中的「重试」按钮' : '当前视图仅展示需关注的待处理/诊断中缺陷，可切换全部状态查看' }}</p>
                   </div>
                 </td>
               </tr>
+              <!-- 数据行：可键盘操作（tabindex/role/Enter/Space） -->
               <tr
                 v-for="issue in filteredIssues"
                 :key="issue.id"
-                class="hover:bg-slate-800/40 transition group cursor-pointer"
-                @click="selectIssue(issue)"
+                class="hover:bg-slate-800/40 transition group cursor-pointer focus:outline-none focus:bg-slate-800/60"
+                tabindex="0"
+                role="button"
+                :aria-label="'查看缺陷详情：' + (issue.title || issue.id)"
+                @click="selectIssue(issue, $event)"
+                @keydown.enter.prevent="selectIssue(issue, $event)"
+                @keydown.space.prevent="selectIssue(issue, $event)"
               >
                 <!-- 标题与位置：严格限制单行截断（truncate + max-w-full）避免折行撑高表格 -->
                 <td class="py-3 px-4 overflow-hidden max-w-0">
@@ -275,9 +349,9 @@
                   <span v-else class="text-slate-500 text-xs">-</span>
                 </td>
 
-                <!-- 时间 -->
+                <!-- 时间：相对时间 + title 悬浮绝对时间（详情抽屉保留绝对时间） -->
                 <td class="py-3 px-4 text-right text-xs text-slate-400 font-mono">
-                  {{ formatDate(issue.last_seen_at) }}
+                  <span data-testid="rel-time" :title="absTimeISO(issue.last_seen_at)">{{ relTime(issue.last_seen_at) }}</span>
                 </td>
               </tr>
             </tbody>
@@ -285,13 +359,20 @@
         </div>
       </div>
 
-      <!-- 缺陷详情抽屉 (Modal/Drawer) -->
+      <!-- 缺陷详情抽屉 (Modal/Drawer)：背景遮罩 @click.self 关闭，Esc 统一由全局 window handler 处理 -->
       <div
         v-if="selected"
         class="fixed inset-0 bg-black/60 backdrop-blur-sm flex justify-end z-50 transition-opacity"
-        @keydown.esc="selected = null"
+        @click.self="closeIssueDrawer"
       >
-        <div class="w-full max-w-2xl bg-slate-900 border-l border-slate-800 h-full p-6 flex flex-col shadow-2xl overflow-hidden animate-slide-in">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="异常缺陷详情"
+          aria-labelledby="issue-dialog-title"
+          tabindex="-1"
+          class="w-full max-w-2xl bg-slate-900 border-l border-slate-800 h-full p-6 flex flex-col shadow-2xl overflow-hidden animate-slide-in"
+        >
           <!-- 抽屉头部 -->
           <div class="flex items-start justify-between border-b border-slate-800 pb-4 shrink-0">
             <div>
@@ -306,19 +387,20 @@
                   {{ selected.project }}
                 </span>
               </div>
-              <h2 class="text-base font-semibold text-slate-100 mt-2 break-all leading-snug">{{ selected.title }}</h2>
+              <h2 id="issue-dialog-title" class="text-base font-semibold text-slate-100 mt-2 break-all leading-snug">{{ selected.title }}</h2>
               <div class="flex items-center space-x-2 mt-1">
                 <p class="text-xs text-slate-400 font-mono">指纹: <code class="text-indigo-300">{{ selected.fingerprint }}</code></p>
                 <button
                   @click="copyText(selected.fingerprint, '指纹')"
-                  class="text-[10px] text-slate-400 hover:text-slate-200 border border-slate-700 px-1.5 py-0.2 rounded hover:bg-slate-800 transition"
+                  class="text-[10px] text-slate-400 hover:text-slate-200 border border-slate-700 px-1.5 py-0.5 rounded hover:bg-slate-800 transition"
                 >
                   {{ copySuccess === '指纹' ? '已复制' : '复制' }}
                 </button>
               </div>
             </div>
             <button
-              @click="selected = null"
+              @click="closeIssueDrawer"
+              aria-label="关闭抽屉"
               class="text-slate-400 hover:text-slate-200 text-2xl font-light p-1 leading-none rounded-lg hover:bg-slate-800 transition"
               title="Esc 键关闭"
             >
@@ -418,8 +500,8 @@
                 <span class="text-xs text-slate-500 font-mono">已脱敏处理</span>
               </div>
               <div class="flex-1 overflow-y-auto no-scrollbar space-y-4 pr-1">
-                <p v-if="selectedEvents.length === 0" class="py-8 text-center text-xs text-slate-500">
-                  正在加载或暂无事件明细
+                <p v-if="selectedEvents.length === 0" class="py-8 text-center text-xs" :class="selectedEventsError ? 'text-rose-400' : 'text-slate-500'">
+                  {{ selectedEventsError ? '事件明细加载失败' : '正在加载或暂无事件明细' }}
                 </p>
                 <article
                   v-for="ev in selectedEvents"
@@ -464,7 +546,7 @@
               <span>由 Coding Agent 自动闭环治理</span>
             </span>
             <button
-              @click="selected = null"
+              @click="closeIssueDrawer"
               class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium px-4 py-1.5 rounded-lg transition active:scale-95"
             >
               关闭 (Esc)
@@ -480,7 +562,12 @@
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div
             @click="filterTraceStatus = 'unreviewed'"
-            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-amber-500/50 transition"
+            @keydown.enter.prevent="filterTraceStatus = 'unreviewed'"
+            @keydown.space.prevent="filterTraceStatus = 'unreviewed'"
+            tabindex="0"
+            role="button"
+            aria-label="筛选：待评估 Trace"
+            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-amber-500/50 transition focus:outline-none focus:ring-2 focus:ring-amber-500/60"
             :class="{ 'ring-2 ring-amber-500/40 bg-slate-900/90': filterTraceStatus === 'unreviewed' }"
           >
             <div class="text-xs uppercase tracking-wider text-amber-400 font-medium">待评估 (Unreviewed)</div>
@@ -491,7 +578,12 @@
           </div>
           <div
             @click="filterTraceStatus = 'triage_good'"
-            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition"
+            @keydown.enter.prevent="filterTraceStatus = 'triage_good'"
+            @keydown.space.prevent="filterTraceStatus = 'triage_good'"
+            tabindex="0"
+            role="button"
+            aria-label="筛选：标杆样本 Trace"
+            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
             :class="{ 'ring-2 ring-emerald-500/40 bg-slate-900/90': filterTraceStatus === 'triage_good' }"
           >
             <div class="text-xs uppercase tracking-wider text-emerald-400 font-medium">标杆样本 (Good)</div>
@@ -502,7 +594,12 @@
           </div>
           <div
             @click="filterTraceStatus = 'triage_bad'"
-            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-rose-500/50 transition"
+            @keydown.enter.prevent="filterTraceStatus = 'triage_bad'"
+            @keydown.space.prevent="filterTraceStatus = 'triage_bad'"
+            tabindex="0"
+            role="button"
+            aria-label="筛选：缺陷样本 Trace"
+            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-rose-500/50 transition focus:outline-none focus:ring-2 focus:ring-rose-500/60"
             :class="{ 'ring-2 ring-rose-500/40 bg-slate-900/90': filterTraceStatus === 'triage_bad' }"
           >
             <div class="text-xs uppercase tracking-wider text-rose-400 font-medium">缺陷样本 (Bad)</div>
@@ -513,7 +610,12 @@
           </div>
           <div
             @click="filterTraceStatus = 'optimized'"
-            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500/50 transition"
+            @keydown.enter.prevent="filterTraceStatus = 'optimized'"
+            @keydown.space.prevent="filterTraceStatus = 'optimized'"
+            tabindex="0"
+            role="button"
+            aria-label="筛选：已完成优化 Trace"
+            class="bg-slate-900/60 p-4 rounded-xl border border-slate-800/80 backdrop-blur-sm flex flex-col justify-between cursor-pointer hover:border-indigo-500/50 transition focus:outline-none focus:ring-2 focus:ring-indigo-500/60"
             :class="{ 'ring-2 ring-indigo-500/40 bg-slate-900/90': filterTraceStatus === 'optimized' }"
           >
             <div class="text-xs uppercase tracking-wider text-indigo-400 font-medium">已完成优化 (Optimized)</div>
@@ -533,7 +635,7 @@
                 type="text"
                 v-model="traceSearchKeyword"
                 placeholder="搜索 Session ID, Run ID, 环境..."
-                class="w-full bg-slate-800/80 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition"
+                class="w-full bg-slate-800/80 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition"
               />
               <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-slate-500">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
@@ -541,6 +643,7 @@
               <button
                 v-if="traceSearchKeyword"
                 @click="traceSearchKeyword = ''"
+                aria-label="清空搜索"
                 class="absolute inset-y-0 right-0 flex items-center pr-2 text-slate-400 hover:text-slate-200 text-xs"
               >&times;</button>
             </div>
@@ -549,7 +652,8 @@
             <div class="relative">
               <select
                 v-model="filterTraceStatus"
-                class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1.5 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8 font-medium"
+                aria-label="按评估状态筛选 Trace"
+                class="bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition cursor-pointer appearance-none pr-8 font-medium"
               >
                 <option value="">全部状态 (All Traces)</option>
                 <option value="unreviewed">待评估 (Unreviewed)</option>
@@ -572,15 +676,32 @@
 
         <!-- Trace 列表展示 -->
         <div class="bg-slate-900/50 rounded-xl border border-slate-800/80 overflow-hidden shadow-sm backdrop-blur-sm">
-          <div v-if="filteredTraces.length === 0" class="py-16 text-center text-slate-500 text-xs">
-            暂无匹配的 Agent Trace 遥测记录
+          <!-- 首载骨架屏 -->
+          <div v-if="initialLoading && traces.length === 0" class="divide-y divide-slate-800/70">
+            <div v-for="n in 4" :key="'trace-skeleton-' + n" class="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div class="space-y-2 flex-1 min-w-0">
+                <div class="skeleton h-4 rounded w-64"></div>
+                <div class="skeleton h-3 rounded w-80 max-w-full"></div>
+              </div>
+              <div class="skeleton h-3 rounded w-24"></div>
+            </div>
+          </div>
+          <!-- 空态：区分"加载失败"与"无匹配数据" -->
+          <div v-else-if="filteredTraces.length === 0" class="py-16 text-center text-slate-500 text-xs">
+            <p class="text-sm text-slate-400 font-medium">{{ showLoadError ? '数据加载失败，暂无可用记录' : '暂无匹配的 Agent Trace 遥测记录' }}</p>
+            <p v-if="showLoadError" class="mt-1 font-mono">请点击页首错误横幅中的「重试」按钮</p>
           </div>
           <div v-else class="divide-y divide-slate-800/70">
             <div
               v-for="trace in filteredTraces"
               :key="trace.id"
-              @click="openTraceDetail(trace)"
-              class="p-4.5 hover:bg-slate-800/40 transition cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-4 border-l-2"
+              @click="openTraceDetail(trace, $event)"
+              @keydown.enter.prevent="openTraceDetail(trace, $event)"
+              @keydown.space.prevent="openTraceDetail(trace, $event)"
+              tabindex="0"
+              role="button"
+              :aria-label="'查看 Trace 详情：' + (trace.session_id || trace.id)"
+              class="p-4 hover:bg-slate-800/40 transition cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-4 border-l-2 focus:outline-none focus:bg-slate-800/60"
               :class="traceBorderClass(trace.eval_status)"
             >
               <div class="space-y-1.5 flex-1 min-w-0">
@@ -603,24 +724,33 @@
                 </div>
               </div>
               <div class="text-right shrink-0 font-mono text-xs text-slate-500">
-                <div>{{ formatDate(trace.reported_at || trace.created_at) }}</div>
+                <div>
+                  <span data-testid="rel-time" :title="absTimeISO(trace.reported_at || trace.created_at)">{{ relTime(trace.reported_at || trace.created_at) }}</span>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Trace 详情抽屉模态框 -->
+        <!-- Trace 详情抽屉模态框：背景遮罩 @click.self 关闭，Esc 统一由全局 window handler 处理 -->
         <div
           v-if="selectedTrace"
           class="fixed inset-0 z-50 flex items-center justify-end bg-slate-950/70 backdrop-blur-sm"
-          @click.self="selectedTrace = null"
+          @click.self="closeTraceDrawer"
         >
-          <div class="w-full max-w-3xl h-full bg-slate-900 border-l border-slate-800 p-6 flex flex-col space-y-4 shadow-2xl overflow-hidden">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Trace 详情"
+            aria-labelledby="trace-dialog-title"
+            tabindex="-1"
+            class="w-full max-w-3xl h-full bg-slate-900 border-l border-slate-800 p-6 flex flex-col space-y-4 shadow-2xl overflow-hidden"
+          >
             <!-- 头部 -->
             <div class="flex items-start justify-between pb-4 border-b border-slate-800 shrink-0">
               <div class="space-y-1">
                 <div class="flex items-center space-x-2.5">
-                  <h2 class="text-base font-semibold text-white font-mono">{{ selectedTrace.session_id }}</h2>
+                  <h2 id="trace-dialog-title" class="text-base font-semibold text-white font-mono">{{ selectedTrace.session_id }}</h2>
                   <span :class="evalBadgeClass(selectedTrace.eval_status)">
                     {{ formatEvalStatusText(selectedTrace.eval_status) }}
                   </span>
@@ -630,7 +760,8 @@
                 </p>
               </div>
               <button
-                @click="selectedTrace = null"
+                @click="closeTraceDrawer"
+                aria-label="关闭抽屉"
                 class="text-slate-400 hover:text-slate-200 text-lg p-1 rounded-lg hover:bg-slate-800"
               >&times;</button>
             </div>
@@ -720,7 +851,7 @@
             <!-- 抽屉底部关闭 -->
             <div class="pt-3.5 border-t border-slate-800 flex justify-end shrink-0">
               <button
-                @click="selectedTrace = null"
+                @click="closeTraceDrawer"
                 class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium px-4 py-1.5 rounded-lg transition active:scale-95"
               >
                 关闭 (Esc)
@@ -734,7 +865,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+
+const API_TIMEOUT_MS = 3000 // 对齐 NFR external_call_timeout_ms
 
 const currentView = ref('issues')
 
@@ -743,12 +876,146 @@ const issues = ref([])
 const projects = ref([])
 const selected = ref(null)
 const selectedEvents = ref([])
+const selectedEventsError = ref(false)
 const filterStatus = ref('attention')
 const filterPlatform = ref('')
 const filterProject = ref('')
 const searchKeyword = ref('')
 const isRefreshing = ref(false)
 const copySuccess = ref(null)
+
+// 加载 / 错误状态（分源追踪，横幅=任一列表数据源失败）
+const initialLoading = ref(true)
+const issueLoadFailed = ref(false)
+const traceLoadFailed = ref(false)
+const projectLoadFailed = ref(false)
+const showLoadError = computed(() => issueLoadFailed.value || traceLoadFailed.value || projectLoadFailed.value)
+const dismissLoadError = () => {
+  issueLoadFailed.value = false
+  traceLoadFailed.value = false
+  projectLoadFailed.value = false
+}
+
+// 网关健康状态（轮询 GET /healthz）：checking / ready / degraded 三态
+const gatewayState = ref('checking')
+const gatewayStateText = computed(() => {
+  if (gatewayState.value === 'ready') return '网关就绪'
+  if (gatewayState.value === 'degraded') return '网关异常'
+  return '状态检查中'
+})
+const gatewayBadgeClass = (state) => {
+  switch (state) {
+    case 'ready':
+      return 'bg-emerald-950/80 text-emerald-400 border-emerald-800/80 shadow-emerald-950/30'
+    case 'degraded':
+      return 'bg-rose-950/80 text-rose-400 border-rose-800/80 shadow-rose-950/30'
+    default:
+      return 'bg-slate-800/80 text-slate-400 border-slate-700/80 shadow-slate-950/30'
+  }
+}
+const gatewayDotClass = (state) => {
+  switch (state) {
+    case 'ready': return 'bg-emerald-400'
+    case 'degraded': return 'bg-rose-400'
+    default: return 'bg-slate-400'
+  }
+}
+
+// 相对时间（列表用）：x分钟前（<24h）/ x天前（≥24h）；title 悬浮绝对时间（详情抽屉保留绝对时间）
+const nowRef = ref(Date.now())
+let relTimeTimer = null
+
+const relTime = (isoStr) => {
+  if (!isoStr) return '-'
+  const d = new Date(isoStr)
+  if (Number.isNaN(d.getTime())) return '-'
+  const diffSec = Math.max(0, Math.floor((nowRef.value - d.getTime()) / 1000))
+  if (diffSec < 60) return '0分钟前'
+  const min = Math.floor(diffSec / 60)
+  // 分钟粒度延伸至 24h（2.24h → "134分钟前"，避免小时粒度漂移超出契约 ±2min 容差）；≥24h 用天
+  if (min < 1440) return `${min}分钟前`
+  return `${Math.floor(min / 1440)}天前`
+}
+
+const absTimeISO = (isoStr) => {
+  if (!isoStr) return ''
+  const d = new Date(isoStr)
+  return Number.isNaN(d.getTime()) ? isoStr : d.toISOString()
+}
+
+// 统一 fetch 辅助：AbortSignal 生命周期贯穿 fetch + 响应体读取（超时 ≤3000ms，对齐 NFR）。
+// abort 作用域分离：
+//   - refreshScope=true（仅刷新系只读请求：projects/issues/traces 列表）→ 进 refreshControllers，
+//     refreshAll 时被中止，避免刷新吞掉交互写请求；
+//   - 交互请求（PATCH 双写、issue events GET）→ 仅进 allControllers，不随刷新中止，
+//     组件卸载时统一 abort。
+const allControllers = new Set()    // 卸载清理全集
+const refreshControllers = new Set() // 刷新中止子集（仅刷新系只读请求）
+
+async function apiFetchJson(url, options = {}) {
+  const { timeoutMs = API_TIMEOUT_MS, refreshScope = false, ...fetchOptions } = options
+  const controller = new AbortController()
+  let timedOut = false
+  allControllers.add(controller)
+  if (refreshScope) refreshControllers.add(controller)
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  try {
+    const response = await fetch(url, { ...fetchOptions, signal: controller.signal })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    return await response.json() // 响应体读取仍在同一超时生命周期内（3s 覆盖到 json() resolve）
+  } catch (e) {
+    // 超时 abort 视为失败；刷新/卸载主动 abort 静默吞掉
+    if (e && e.name === 'AbortError') {
+      if (timedOut) {
+        const err = new Error('请求超时')
+        err.name = 'TimeoutError'
+        throw err
+      }
+      const err = new Error('请求已取消')
+      err.name = 'AbortError'
+      throw err
+    }
+    throw e
+  } finally {
+    clearTimeout(timeoutId)
+    allControllers.delete(controller)
+    refreshControllers.delete(controller)
+  }
+}
+
+function abortRefreshFetches() {
+  refreshControllers.forEach((c) => c.abort())
+  refreshControllers.clear()
+}
+
+function abortAllControllers() {
+  allControllers.forEach((c) => c.abort())
+  allControllers.clear()
+  refreshControllers.clear()
+}
+
+// /healthz 轮询：立即探测 + 15s 间隔，abort 超时 ≤3000ms
+let healthTimer = null
+let healthController = null
+
+async function checkHealth() {
+  gatewayState.value = 'checking' // 每个轮询周期起始重置中间态（T6.3）
+  if (healthController) healthController.abort()
+  healthController = new AbortController()
+  const timeoutId = setTimeout(() => healthController.abort(), API_TIMEOUT_MS)
+  try {
+    const res = await fetch('/healthz', { signal: healthController.signal })
+    gatewayState.value = res.ok ? 'ready' : 'degraded'
+  } catch {
+    gatewayState.value = 'degraded'
+  } finally {
+    clearTimeout(timeoutId)
+    healthController = null
+  }
+}
 
 // Traces 状态
 const traces = ref([])
@@ -784,37 +1051,37 @@ const getTraceTurns = (trace) => {
 
 const fetchTraces = async () => {
   try {
-    const res = await fetch('/api/v1/traces?limit=100')
-    if (res.ok) {
-      traces.value = await res.json()
-    }
+    traces.value = await apiFetchJson('/api/v1/traces?limit=100', { refreshScope: true })
+    traceLoadFailed.value = false
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('加载 Trace 列表失败', e)
+    traceLoadFailed.value = true
   }
 }
 
-const openTraceDetail = (trace) => {
+const openTraceDetail = (trace, event) => {
+  traceTriggerEl = event?.currentTarget || null
   selectedTrace.value = trace
+  focusDialogPanel()
 }
 
 const updateTraceStatus = async (id, status) => {
   try {
-    const res = await fetch(`/api/v1/traces/${id}`, {
+    const updated = await apiFetchJson(`/api/v1/traces/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eval_status: status })
     })
-    if (res.ok) {
-      const updated = await res.json()
-      if (selectedTrace.value && selectedTrace.value.id === id) {
-        selectedTrace.value.eval_status = updated.eval_status
-      }
-      const idx = traces.value.findIndex(t => t.id === id)
-      if (idx !== -1) {
-        traces.value[idx].eval_status = updated.eval_status
-      }
+    if (selectedTrace.value && selectedTrace.value.id === id) {
+      selectedTrace.value.eval_status = updated.eval_status
+    }
+    const idx = traces.value.findIndex(t => t.id === id)
+    if (idx !== -1) {
+      traces.value[idx].eval_status = updated.eval_status
     }
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('更新 Trace 评估状态失败', e)
   }
 }
@@ -900,65 +1167,103 @@ const fetchIssues = async () => {
   if (filterPlatform.value) url += `platform=${filterPlatform.value}&`
   if (filterProject.value) url += `project=${encodeURIComponent(filterProject.value)}&`
   try {
-    const res = await fetch(url)
-    if (res.ok) {
-      issues.value = await res.json()
-    }
+    issues.value = await apiFetchJson(url, { refreshScope: true })
+    issueLoadFailed.value = false
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('加载缺陷列表失败', e)
+    issueLoadFailed.value = true
   }
 }
 
 const fetchProjects = async () => {
   try {
-    const res = await fetch('/api/v1/projects')
-    if (res.ok) {
-      projects.value = await res.json()
-    }
+    projects.value = await apiFetchJson('/api/v1/projects', { refreshScope: true })
+    projectLoadFailed.value = false
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('加载项目列表失败', e)
+    projectLoadFailed.value = true
   }
 }
 
 const refreshAll = async () => {
   isRefreshing.value = true
+  abortRefreshFetches() // 仅中止刷新系只读请求；交互写请求（PATCH 等）不受影响
   try {
     await Promise.all([fetchProjects(), fetchIssues(), fetchTraces()])
+  } catch (e) {
+    console.error('刷新失败', e)
   } finally {
     isRefreshing.value = false
+    initialLoading.value = false
   }
 }
 
 const updateStatus = async (id, status) => {
   try {
-    const res = await fetch(`/api/v1/issues/${id}`, {
+    const updated = await apiFetchJson(`/api/v1/issues/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status })
     })
-    if (res.ok) {
-      const updated = await res.json()
-      if (selected.value && selected.value.id === id) {
-        selected.value.status = updated.status
-      }
-      fetchIssues()
+    if (selected.value && selected.value.id === id) {
+      selected.value.status = updated.status
     }
+    fetchIssues()
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('更新缺陷状态失败', e)
   }
 }
 
-const selectIssue = async (issue) => {
+const selectIssue = async (issue, event) => {
+  issueTriggerEl = event?.currentTarget || null
   selected.value = issue
   selectedEvents.value = []
+  selectedEventsError.value = false
+  focusDialogPanel()
   try {
-    const res = await fetch(`/api/v1/issues/${issue.id}/events`)
-    if (res.ok) {
-      selectedEvents.value = await res.json()
-    }
+    selectedEvents.value = await apiFetchJson(`/api/v1/issues/${issue.id}/events`)
   } catch (e) {
+    if (e.name === 'AbortError') return
     console.error('获取缺陷事件详情失败', e)
+    selectedEventsError.value = true
   }
+}
+
+// ---- 抽屉焦点管理（a11y：焦点入抽屉 + 焦点归还 + 轻量焦点陷阱）----
+let issueTriggerEl = null // 打开 Issue 抽屉的触发元素（关闭后归还焦点）
+let traceTriggerEl = null // 打开 Trace 抽屉的触发元素
+
+function focusDialogPanel() {
+  nextTick(() => {
+    const panel = document.querySelector('[role="dialog"][aria-modal="true"]')
+    if (panel && !panel.contains(document.activeElement)) panel.focus()
+  })
+}
+
+function restoreFocus() {
+  nextTick(() => {
+    if (issueTriggerEl && document.contains(issueTriggerEl)) {
+      issueTriggerEl.focus()
+    }
+    issueTriggerEl = null
+    if (traceTriggerEl && document.contains(traceTriggerEl)) {
+      traceTriggerEl.focus()
+    }
+    traceTriggerEl = null
+  })
+}
+
+const closeIssueDrawer = () => {
+  selected.value = null
+  restoreFocus()
+}
+
+const closeTraceDrawer = () => {
+  selectedTrace.value = null
+  restoreFocus()
 }
 
 const copyText = async (text, label) => {
@@ -1033,19 +1338,54 @@ const agentBadgeClass = (agent) => {
 }
 
 const handleKeydown = (e) => {
-  if (e.key === 'Escape' && selected.value) {
-    selected.value = null
-  } else if (e.key === 'r' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) {
+  // Esc 统一收口：全局 window 层处理，任一抽屉恰好关闭一次（无双轨依赖；blur 后仍生效）
+  if (e.key === 'Escape') {
+    if (selected.value) {
+      closeIssueDrawer()
+    } else if (selectedTrace.value) {
+      closeTraceDrawer()
+    }
+    return
+  }
+  // 轻量焦点陷阱：抽屉开启期间 Tab 在面板内首尾回绕（焦点逃逸时拉回首个可聚焦元素）
+  if (e.key === 'Tab') {
+    const panel = document.querySelector('[role="dialog"][aria-modal="true"]')
+    if (!panel) return
+    const focusables = Array.from(
+      panel.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+    )
+    if (!focusables.length) return
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    const outside = !panel.contains(document.activeElement)
+    if (e.shiftKey && (document.activeElement === first || outside)) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && (document.activeElement === last || outside)) {
+      e.preventDefault()
+      first.focus()
+    }
+    return
+  }
+  // R 快捷键（输入控件内不触发）
+  if (e.key === 'r' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) {
     refreshAll()
   }
 }
 
 onMounted(() => {
+  checkHealth() // 立即探测 /healthz
+  healthTimer = setInterval(checkHealth, 15000) // 15s 轮询
+  relTimeTimer = setInterval(() => { nowRef.value = Date.now() }, 30000) // 相对时间基准刷新
   refreshAll()
   window.addEventListener('keydown', handleKeydown)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  if (healthTimer) clearInterval(healthTimer)
+  if (relTimeTimer) clearInterval(relTimeTimer)
+  if (healthController) healthController.abort()
+  abortAllControllers() // 卸载时中止全部 in-flight 请求（刷新系 + 交互系）
 })
 </script>

@@ -1,0 +1,23 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "web/src/App.vue",
+      "line": 370,
+      "rule": "a11y-modal-focus-management",
+      "counterexample": "抽屉以 role=dialog+aria-modal=true 渲染（L370-373 Issues / L744-747 Trace），但打开路径 selectIssue()(L1219-1230) 与 openTraceDetail()(L1064-1066) 只置 ref，v-if 挂载后无任何焦点转移/陷阱：全文件无 autofocus、无 .focus() 调用、无 focusin 陷阱、背景无 aria-hidden/inert。按 Enter 从 L289-298 的 tr 打开抽屉后键盘焦点仍停留在遮罩背后的该行，Tab 依次遍历背景表格的 tabindex=0 行（L293/L703）与表头控件，背景行仍可被 Enter/Space 再次触发 selectIssue——与 aria-modal=true 的「外部内容 inert」语义直接冲突（触发行焦点残留 + 背景可交互，违反 WCAG 2.4.3 / ARIA APG dialog 焦点管理）。"
+    },
+    {
+      "file": "web/src/App.vue",
+      "line": 55,
+      "rule": "a11y-redundant-aria-label-on-text-button",
+      "counterexample": "本波向带可见文本的按钮误挂 aria-label，aria-label 覆盖可见文本成为可访问名，SR 播报与视见文本不符：`aria-label=\"刷新数据\"`(L55) 挂于可见文本「刷新」(L62) 的按钮；`aria-label=\"复制指纹\"`(L394) 挂于可见文本动态 复制/已复制(L397) 的按钮——复制成功切换后读屏仍只播报「复制指纹」，状态反馈丢失；`aria-label=\"复制核心出错位置\"`(L461) 挂于可见文本「复制栈位置」(L464)；`aria-label=\"关闭抽屉\"`(L551,L855) 挂于可见文本「关闭 (Esc)」(L554,L858) 的按钮。T2.3 仅约束 icon-only 按钮非空 aria-label，上述五处均为含可见文本按钮，误挂导致名称覆盖冗余不一致（diff 中全部为本波新增）。"
+    },
+    {
+      "file": "web/src/App.vue",
+      "line": 372,
+      "rule": "a11y-dialog-aria-labelledby",
+      "counterexample": "两个抽屉仅用静态 aria-label（L372「异常缺陷详情」/ L746「Trace 详情」），未用 aria-labelledby 指向抽屉内既有标题元素（L389 动态 issue.title / L753 session_id）：任意 Issue 进入抽屉读屏都只播报同一泛化名称「异常缺陷详情」，无法区分具体缺陷内容；金标准 APG dialog 模式要求 aria-labelledby（或等价的指向内容标题的名称），现实现为静态字符串全覆盖，机械断言（T2.4 仅查 aria-label 非空）通过但可访问名称与内容脱节。"
+    }
+  ]
+}
