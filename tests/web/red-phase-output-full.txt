@@ -1,0 +1,257 @@
+test_00_journey_issues_list (__main__.TestWebUIAcceptance.test_00_journey_issues_list)
+旅程 1：Issues 列表渲染 + 截图（关键旅程物理收据载体）。 ... FAIL
+test_01_journey_issues_drawer (__main__.TestWebUIAcceptance.test_01_journey_issues_drawer)
+旅程 2：抽出详情抽屉 + 截图。 ... FAIL
+test_02_journey_traces_view (__main__.TestWebUIAcceptance.test_02_journey_traces_view)
+旅程 3：Traces 视图 + 截图。 ... ok
+test_10_t1_1_gateway_status_testid (__main__.TestWebUIAcceptance.test_10_t1_1_gateway_status_testid)
+T1.1 REQ：gateway-status 恰好 1 个且 data-state ∈ {checking,ready,degraded}。 ... FAIL
+test_11_t1_2_load_error_banner (__main__.TestWebUIAcceptance.test_11_t1_2_load_error_banner)
+T1.2 REQ：load-error 横幅存在；数据接口失败时可见且文案区分加载失败/无数据。 ... FAIL
+test_12_t1_3_rel_time_on_rows (__main__.TestWebUIAcceptance.test_12_t1_3_rel_time_on_rows)
+T1.3 REQ：Traces 每行含 [data-testid="rel-time"]；Issues '最后上报' 列行同要求。 ... FAIL
+test_20_t2_1_issues_rows_keyboard (__main__.TestWebUIAcceptance.test_20_t2_1_issues_rows_keyboard)
+T2.1 REQ：Issues 可点击行 tabindex=0 + role=button；Enter/Space 触发打开抽屉。 ... FAIL
+test_21_t2_2_traces_cards_keyboard (__main__.TestWebUIAcceptance.test_21_t2_2_traces_cards_keyboard)
+T2.2 REQ：Traces 可点击卡片 tabindex=0 + role=button；Enter/Space 生效。 ... FAIL
+test_22_t2_3_aria_labels (__main__.TestWebUIAcceptance.test_22_t2_3_aria_labels)
+T2.3 REQ：icon-only 按钮（无可见文本/仅符号图标）与筛选 select 必须带非空 aria-label。 ... FAIL
+test_23_t2_4_drawer_role_dialog (__main__.TestWebUIAcceptance.test_23_t2_4_drawer_role_dialog)
+T2.4 REQ：抽屉面板 role=dialog + aria-modal=true + 非空 aria-label（Issues 与 Traces 双抽屉）。 ... FAIL
+test_30_t3_trace_row_padding (__main__.TestWebUIAcceptance.test_30_t3_trace_row_padding)
+T3 REQ（动态主判据）：每条 Trace 行四轴 computed padding ≥ 8px（p-4.5 已废除）。 ... FAIL
+test_31_t3_static_no_p45_class (__main__.TestWebUIAcceptance.test_31_t3_static_no_p45_class)
+T3 静态门禁 @review：源码不含非法类 p-4.5（契约给定非零退出命令）。 ... ok
+test_40_t4_1_rel_time_text_relative (__main__.TestWebUIAcceptance.test_40_t4_1_rel_time_text_relative)
+T4.1 REQ：rel-time 文本必须匹配 ^\d+\s*(分钟|小时|天)前$（不接受绝对时间/刚刚）。 ... FAIL
+test_41_t4_2_rel_time_title_iso (__main__.TestWebUIAcceptance.test_41_t4_2_rel_time_title_iso)
+T4.2 REQ：rel-time 元素携带 title 绝对时间（ISO8601 可解析）且与相对值一致（±2min）。 ... FAIL
+test_50_t5_1_issues_drawer_bg_click_closes (__main__.TestWebUIAcceptance.test_50_t5_1_issues_drawer_bg_click_closes)
+T5.1 REQ：Issues 抽屉点击面板外背景遮罩区域 → 1s 内关闭（@click.self 语义）。 ... FAIL
+test_51_t5_2_esc_closes_drawer_exactly_once (__main__.TestWebUIAcceptance.test_51_t5_2_esc_closes_drawer_exactly_once)
+T5.2 REQ：无焦点时 Esc 关闭抽屉且恰好一次（Issues 与 Traces 同规则，统一全局兜底）。 ... FAIL
+test_52_t5_3_panel_click_keeps_drawer_open (__main__.TestWebUIAcceptance.test_52_t5_3_panel_click_keeps_drawer_open)
+T5.3 REQ：点击抽屉面板内部不得关闭抽屉（背景关闭仅对遮罩生效）。 ... ok
+test_60_t6_1_healthz_requested_on_load (__main__.TestWebUIAcceptance.test_60_t6_1_healthz_requested_on_load)
+T6.1 REQ：页面加载后 3s 内网络日志出现 GET /healthz（同源）。 ... FAIL
+test_61_t6_2_health_badge_state_matches (__main__.TestWebUIAcceptance.test_61_t6_2_health_badge_state_matches)
+T6.2 REQ：data-state 与真实响应一致——200→ready；网络错误(abort)→degraded。 ... FAIL
+test_62_t6_3_initial_state_checking (__main__.TestWebUIAcceptance.test_62_t6_3_initial_state_checking)
+T6.3 REQ：初始渲染状态为 checking（灰），随后按响应迁移（中间态机器断言）。 ... FAIL
+test_63_t6_4_healthz_poll_interval (__main__.TestWebUIAcceptance.test_63_t6_4_healthz_poll_interval)
+T6.4 REQ：轮询间隔常数 15000ms（契约允许源码级 @review 核验其一即足）。 ... ok
+test_64_t6_5_healthz_abort_timeout (__main__.TestWebUIAcceptance.test_64_t6_5_healthz_abort_timeout)
+T6.5 REQ：/healthz fetch 挂 abort 信号且超时 ≤ 3000ms（源码级核验）。 ... ok
+test_65_t6_6_unmount_cleanup_source (__main__.TestWebUIAcceptance.test_65_t6_6_unmount_cleanup_source)
+T6.6 REQ @review：卸载时清理轮询 timer 与全局监听器（clearInterval/onUnmounted）。 ... ok
+test_70_t7_nfr_baseline_json (__main__.TestWebUIAcceptance.test_70_t7_nfr_baseline_json)
+T7：NFR 基准 JSON 物理校验（Exit Code 0 + NFR_JSON_OK / NFR_SCHEMA_OK）。 ... ok
+test_90_console_errors_zero_across_journeys (__main__.TestWebUIAcceptance.test_90_console_errors_zero_across_journeys)
+硬门禁 a：关键旅程全程浏览器 Console Error == 0（含未捕获异常）。 ... ok
+test_91_physical_screenshots_landed (__main__.TestWebUIAcceptance.test_91_physical_screenshots_landed)
+硬门禁 b：三个关键旅程（Issues 列表/详情抽屉/Traces 视图）各有一张非空物理截图。 ... ok
+
+======================================================================
+FAIL: test_00_journey_issues_list (__main__.TestWebUIAcceptance.test_00_journey_issues_list)
+旅程 1：Issues 列表渲染 + 截图（关键旅程物理收据载体）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 362, in test_00_journey_issues_list
+    shot = journey_issues_list()
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 289, in journey_issues_list
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 12 seconds）
+
+======================================================================
+FAIL: test_01_journey_issues_drawer (__main__.TestWebUIAcceptance.test_01_journey_issues_drawer)
+旅程 2：抽出详情抽屉 + 截图。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 367, in test_01_journey_issues_drawer
+    shot = journey_issues_drawer()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 298, in journey_issues_drawer
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 12 seconds）
+
+======================================================================
+FAIL: test_10_t1_1_gateway_status_testid (__main__.TestWebUIAcceptance.test_10_t1_1_gateway_status_testid)
+T1.1 REQ：gateway-status 恰好 1 个且 data-state ∈ {checking,ready,degraded}。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 383, in test_10_t1_1_gateway_status_testid
+    self.assertEqual(
+AssertionError: 0 != 1 : 契约 T1.1：健康徽标 [data-testid="gateway-status"] 必须恰好 1 个，实际 0 个（旧版硬编码徽标无 testid）
+
+======================================================================
+FAIL: test_11_t1_2_load_error_banner (__main__.TestWebUIAcceptance.test_11_t1_2_load_error_banner)
+T1.2 REQ：load-error 横幅存在；数据接口失败时可见且文案区分加载失败/无数据。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 406, in test_11_t1_2_load_error_banner
+    self.assertIsNotNone(
+AssertionError: unexpectedly None : 契约 T1.2：错误横幅 [data-testid="load-error"] 必须存在（旧版无错误横幅）
+
+======================================================================
+FAIL: test_12_t1_3_rel_time_on_rows (__main__.TestWebUIAcceptance.test_12_t1_3_rel_time_on_rows)
+T1.3 REQ：Traces 每行含 [data-testid="rel-time"]；Issues '最后上报' 列行同要求。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 448, in test_12_t1_3_rel_time_on_rows
+    self.assertEqual(
+AssertionError: Lists differ: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] != []
+
+First list contains 19 additional elements.
+First extra element 0:
+0
+
+- [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
++ [] : 契约 T1.3：Issues '最后上报' 单元格每行必须含 [data-testid="rel-time"]，缺失行索引: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]（旧版为绝对时间无 rel-time 元素）
+
+======================================================================
+FAIL: test_20_t2_1_issues_rows_keyboard (__main__.TestWebUIAcceptance.test_20_t2_1_issues_rows_keyboard)
+T2.1 REQ：Issues 可点击行 tabindex=0 + role=button；Enter/Space 触发打开抽屉。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 482, in test_20_t2_1_issues_rows_keyboard
+    self.assertEqual(
+AssertionError: Lists differ: ['row#0 tabindex=None role=None', 'row#1 t[589 chars]one'] != []
+
+First list contains 19 additional elements.
+First extra element 0:
+'row#0 tabindex=None role=None'
+
+Diff is 698 characters long. Set self.maxDiff to None to see it. : 契约 T2.1：每个可点击 Issue 行必须 tabindex="0" 且 role="button"，违规行: ['row#0 tabindex=None role=None', 'row#1 tabindex=None role=None', 'row#2 tabindex=None role=None', 'row#3 tabindex=None role=None', 'row#4 tabindex=None role=None', 'row#5 tabindex=None role=None', 'row#6 tabindex=None role=None', 'row#7 tabindex=None role=None', 'row#8 tabindex=None role=None', 'row#9 tabindex=None role=None']
+
+======================================================================
+FAIL: test_21_t2_2_traces_cards_keyboard (__main__.TestWebUIAcceptance.test_21_t2_2_traces_cards_keyboard)
+T2.2 REQ：Traces 可点击卡片 tabindex=0 + role=button；Enter/Space 生效。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 501, in test_21_t2_2_traces_cards_keyboard
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 12 seconds）
+
+======================================================================
+FAIL: test_22_t2_3_aria_labels (__main__.TestWebUIAcceptance.test_22_t2_3_aria_labels)
+T2.3 REQ：icon-only 按钮（无可见文本/仅符号图标）与筛选 select 必须带非空 aria-label。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 527, in test_22_t2_3_aria_labels
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 12 seconds）
+
+======================================================================
+FAIL: test_23_t2_4_drawer_role_dialog (__main__.TestWebUIAcceptance.test_23_t2_4_drawer_role_dialog)
+T2.4 REQ：抽屉面板 role=dialog + aria-modal=true + 非空 aria-label（Issues 与 Traces 双抽屉）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 596, in test_23_t2_4_drawer_role_dialog
+    self.assertEqual(problems, [], "契约 T2.4：{}".format("；".join(problems)))
+AssertionError: Lists differ: ['Issues 抽屉缺少 role="dialog"（旧版无 dialog 语义）', 'Traces 抽屉缺少 role="dialog"'] != []
+
+First list contains 2 additional elements.
+First extra element 0:
+'Issues 抽屉缺少 role="dialog"（旧版无 dialog 语义）'
+
+- ['Issues 抽屉缺少 role="dialog"（旧版无 dialog 语义）', 'Traces 抽屉缺少 role="dialog"']
++ [] : 契约 T2.4：Issues 抽屉缺少 role="dialog"（旧版无 dialog 语义）；Traces 抽屉缺少 role="dialog"
+
+======================================================================
+FAIL: test_30_t3_trace_row_padding (__main__.TestWebUIAcceptance.test_30_t3_trace_row_padding)
+T3 REQ（动态主判据）：每条 Trace 行四轴 computed padding ≥ 8px（p-4.5 已废除）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 624, in test_30_t3_trace_row_padding
+    self.assertEqual(
+AssertionError: Lists differ: ['row#0 pt=0 pr=0 pb=0 pl=0'] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+'row#0 pt=0 pr=0 pb=0 pl=0'
+
+- ['row#0 pt=0 pr=0 pb=0 pl=0']
++ [] : 契约 T3：Trace 行四轴内边距必须 ≥ 8px（p-4.5 非法类已废除，旧版 computed padding=0），违规行: ['row#0 pt=0 pr=0 pb=0 pl=0']
+
+======================================================================
+FAIL: test_40_t4_1_rel_time_text_relative (__main__.TestWebUIAcceptance.test_40_t4_1_rel_time_text_relative)
+T4.1 REQ：rel-time 文本必须匹配 ^\d+\s*(分钟|小时|天)前$（不接受绝对时间/刚刚）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 663, in test_40_t4_1_rel_time_text_relative
+    _wait_for(TRACE_ROW_COUNT_JS, 8, "Traces 视图数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Traces 视图数据行未渲染（8s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 10 seconds）
+
+======================================================================
+FAIL: test_41_t4_2_rel_time_title_iso (__main__.TestWebUIAcceptance.test_41_t4_2_rel_time_title_iso)
+T4.2 REQ：rel-time 元素携带 title 绝对时间（ISO8601 可解析）且与相对值一致（±2min）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 684, in test_41_t4_2_rel_time_title_iso
+    self.assertGreater(
+AssertionError: 0 not greater than 0 : 契约 T4.2：列表必须存在 [data-testid="rel-time"] 元素（旧版无 rel-time）
+
+======================================================================
+FAIL: test_50_t5_1_issues_drawer_bg_click_closes (__main__.TestWebUIAcceptance.test_50_t5_1_issues_drawer_bg_click_closes)
+T5.1 REQ：Issues 抽屉点击面板外背景遮罩区域 → 1s 内关闭（@click.self 语义）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 725, in test_50_t5_1_issues_drawer_bg_click_closes
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=eval-error: Command '['agent-browser', '--session', 'ponyt2', 'eval', '--stdin']' timed out after 12 seconds）
+
+======================================================================
+FAIL: test_51_t5_2_esc_closes_drawer_exactly_once (__main__.TestWebUIAcceptance.test_51_t5_2_esc_closes_drawer_exactly_once)
+T5.2 REQ：无焦点时 Esc 关闭抽屉且恰好一次（Issues 与 Traces 同规则，统一全局兜底）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 754, in test_51_t5_2_esc_closes_drawer_exactly_once
+    _wait_for(ISSUE_ROWS_JS, 10, "Issues 列表数据行未渲染")
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 185, in _wait_for
+    raise AssertionError("{}（{}s 内未满足，last={}）".format(msg, timeout, last))
+AssertionError: Issues 列表数据行未渲染（10s 内未满足，last=False）
+
+======================================================================
+FAIL: test_60_t6_1_healthz_requested_on_load (__main__.TestWebUIAcceptance.test_60_t6_1_healthz_requested_on_load)
+T6.1 REQ：页面加载后 3s 内网络日志出现 GET /healthz（同源）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 809, in test_60_t6_1_healthz_requested_on_load
+    self.assertGreaterEqual(
+AssertionError: 0 not greater than or equal to 1 : 契约 T6.1：加载后 3s 内必须发起 GET /healthz（旧版硬编码徽标无轮询，红相必失败）
+
+======================================================================
+FAIL: test_61_t6_2_health_badge_state_matches (__main__.TestWebUIAcceptance.test_61_t6_2_health_badge_state_matches)
+T6.2 REQ：data-state 与真实响应一致——200→ready；网络错误(abort)→degraded。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 818, in test_61_t6_2_health_badge_state_matches
+    self.assertEqual(
+AssertionError: 0 != 1 : 契约 T6.2：gateway-status 必须存在（旧版无此元素）
+
+======================================================================
+FAIL: test_62_t6_3_initial_state_checking (__main__.TestWebUIAcceptance.test_62_t6_3_initial_state_checking)
+T6.3 REQ：初始渲染状态为 checking（灰），随后按响应迁移（中间态机器断言）。
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/dm/pony-sentry/tests/web/test_web_ui_acceptance.py", line 846, in test_62_t6_3_initial_state_checking
+    self.assertEqual(
+AssertionError: 0 != 1 : 契约 T6.3：gateway-status 必须存在（旧版无此元素）
+
+----------------------------------------------------------------------
+Ran 26 tests in 552.784s
+
+FAILED (failures=17)
