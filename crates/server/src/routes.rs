@@ -107,6 +107,7 @@ pub struct TraceQuery {
     pub eval_status: Option<String>,
     pub environment: Option<String>,
     pub release: Option<String>,
+    pub project: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -129,11 +130,11 @@ pub fn create_app_with_state(state: AppState) -> Router {
             header::HeaderName::from_static("x-client-token"),
         ]);
 
-    // 2. 遥测上报路由 (强制挂载 512KB 请求体硬限制与专有 CORS)
+    // 2. 遥测上报路由 (强制挂载 2MB 请求体硬限制与专有 CORS)
     let ingest_routes = Router::new()
         .route("/api/v1/ingest", post(handle_ingest))
         .route("/api/v1/traces", post(handle_ingest_trace))
-        .layer(DefaultBodyLimit::max(512 * 1024))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(ingest_cors);
 
     // 3. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
@@ -327,11 +328,23 @@ async fn handle_list_issues(
 async fn handle_list_projects(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let projects = state
+    let mut projects = state
         .repo
         .list_projects()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 聚合 trace 维度的 project（issue 之外的 Agent trace 项目也能进筛选下拉）
+    if let Some(trace_repo) = &state.trace_repo {
+        let trace_projects = trace_repo
+            .list_projects()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        projects.extend(trace_projects);
+    }
+
+    projects.sort();
+    projects.dedup();
 
     Ok(Json(projects))
 }
@@ -434,6 +447,10 @@ async fn handle_ingest_trace(
     let raw_payload = serde_json::to_value(&payload)
         .unwrap_or_else(|_| serde_json::json!({}));
 
+    // 服务端二次脱敏：客户端 SDK 已脱敏一次，入库前按同一管道再扫一遍，
+    // 防止绕过客户端的敏感字段（token/secret/password 等）落库。
+    let sanitized_payload = SanitizationPipeline::sanitize_json_value(raw_payload, 0);
+
     let session_id = payload
         .session_id
         .clone()
@@ -451,8 +468,9 @@ async fn handle_ingest_trace(
         turn_id: payload.turn_id,
         environment: payload.environment.unwrap_or_else(|| "default".to_string()),
         release: payload.release.unwrap_or_else(|| "unknown".to_string()),
+        project: payload.project,
         eval_status: payload.eval_status.unwrap_or(EvalStatus::Unreviewed),
-        payload: raw_payload,
+        payload: sanitized_payload,
         total_input_tokens: payload.total_input_tokens,
         total_output_tokens: payload.total_output_tokens,
         total_duration_ms: payload.total_duration_ms,
@@ -488,6 +506,7 @@ async fn handle_list_traces(
         eval_status,
         environment: query.environment,
         release: query.release,
+        project: query.project,
         limit: query.limit,
         offset: query.offset,
     };

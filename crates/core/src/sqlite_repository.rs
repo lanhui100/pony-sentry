@@ -35,7 +35,35 @@ impl SqliteIssueRepository {
                 .await?;
         }
         let traces_sql = include_str!("../../../migrations/0003_add_traces.sql");
-        sqlx::raw_sql(traces_sql).execute(&self.pool).await?;
+        // 存量库可能已建过 traces 表（缺 project 列）：0003 的 CREATE TABLE IF NOT EXISTS
+        // 是 no-op，但其内的 idx_traces_project 依赖 project 列，缺列时建索引会报错，
+        // 因此先判断表是否存在：全新库整文件执行；存量库先补列（幂等）再建索引。
+        let traces_table_exists: Option<String> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'traces'",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| row.get("name"));
+
+        match traces_table_exists {
+            None => {
+                sqlx::raw_sql(traces_sql).execute(&self.pool).await?;
+            }
+            Some(_) => {
+                let has_trace_project: bool = sqlx::query("SELECT project FROM traces LIMIT 0")
+                    .fetch_all(&self.pool)
+                    .await
+                    .is_ok();
+                if !has_trace_project {
+                    sqlx::raw_sql("ALTER TABLE traces ADD COLUMN project TEXT;")
+                        .execute(&self.pool)
+                        .await?;
+                }
+                sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_traces_project ON traces(project);")
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }
@@ -471,18 +499,37 @@ impl IssueRepository for SqliteIssueRepository {
 #[async_trait]
 impl TraceRepository for SqliteIssueRepository {
     async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
-        let payload_str = serde_json::to_string(&trace.payload).unwrap_or_else(|_| "{}".to_string());
+        // 同 session_id 增量上报：先取旧 payload，按 turns 轮次去重合并（旧轮保留、新轮按序追加）。
+        let existing_payload: Option<String> = sqlx::query(
+            "SELECT payload FROM traces WHERE session_id = ?",
+        )
+        .bind(&trace.session_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| row.get("payload"));
+
+        let existing_json = existing_payload
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+        let merged_payload = match existing_json {
+            Some(old) => crate::trace_merge::merge_trace_payloads(&old, &trace.payload),
+            None => trace.payload.clone(),
+        };
+        let payload_str =
+            serde_json::to_string(&merged_payload).unwrap_or_else(|_| "{}".to_string());
+
         sqlx::query(
             "INSERT INTO traces (
-                id, session_id, run_id, turn_id, environment, release,
+                id, session_id, run_id, turn_id, environment, release, project,
                 eval_status, payload, total_input_tokens, total_output_tokens,
                 total_duration_ms, reported_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (session_id) DO UPDATE SET
                 run_id = excluded.run_id,
                 turn_id = excluded.turn_id,
                 environment = excluded.environment,
                 release = excluded.release,
+                project = excluded.project,
                 eval_status = CASE WHEN traces.eval_status != 'unreviewed' THEN traces.eval_status ELSE excluded.eval_status END,
                 payload = excluded.payload,
                 total_input_tokens = excluded.total_input_tokens,
@@ -497,6 +544,7 @@ impl TraceRepository for SqliteIssueRepository {
         .bind(&trace.turn_id)
         .bind(&trace.environment)
         .bind(&trace.release)
+        .bind(&trace.project)
         .bind(trace.eval_status.to_string())
         .bind(payload_str)
         .bind(trace.total_input_tokens)
@@ -508,12 +556,14 @@ impl TraceRepository for SqliteIssueRepository {
         .execute(&self.pool)
         .await?;
 
-        Ok(trace)
+        let mut saved = trace;
+        saved.payload = merged_payload;
+        Ok(saved)
     }
 
     async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError> {
         let row = sqlx::query(
-            "SELECT id, session_id, run_id, turn_id, environment, release,
+            "SELECT id, session_id, run_id, turn_id, environment, release, project,
                     eval_status, payload, total_input_tokens, total_output_tokens,
                     total_duration_ms, reported_at, created_at, updated_at
              FROM traces WHERE id = ?"
@@ -541,6 +591,7 @@ impl TraceRepository for SqliteIssueRepository {
             turn_id: row.get("turn_id"),
             environment: row.get("environment"),
             release: row.get("release"),
+            project: row.get("project"),
             eval_status,
             payload,
             total_input_tokens: row.get("total_input_tokens"),
@@ -559,7 +610,7 @@ impl TraceRepository for SqliteIssueRepository {
     }
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
-        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release,
+        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release, project,
                                 eval_status, payload, total_input_tokens, total_output_tokens,
                                 total_duration_ms, reported_at, created_at, updated_at
                          FROM traces WHERE 1=1".to_string();
@@ -580,6 +631,10 @@ impl TraceRepository for SqliteIssueRepository {
         if let Some(release) = &filter.release {
             query.push_str(" AND release = ?");
             binds.push(release.clone());
+        }
+        if let Some(project) = &filter.project {
+            query.push_str(" AND project = ?");
+            binds.push(project.clone());
         }
 
         query.push_str(" ORDER BY created_at DESC");
@@ -614,6 +669,7 @@ impl TraceRepository for SqliteIssueRepository {
                 turn_id: row.get("turn_id"),
                 environment: row.get("environment"),
                 release: row.get("release"),
+                project: row.get("project"),
                 eval_status,
                 payload,
                 total_input_tokens: row.get("total_input_tokens"),
@@ -653,5 +709,20 @@ impl TraceRepository for SqliteIssueRepository {
         }
 
         self.get_trace(id).await
+    }
+
+    async fn list_projects(&self) -> Result<Vec<String>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT project FROM traces
+             WHERE project IS NOT NULL AND project != ''
+             ORDER BY project ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("project"))
+            .collect())
     }
 }

@@ -527,6 +527,11 @@
               <option value="optimized">已优化</option>
               <option value="wontfix">已放弃</option>
             </Select>
+
+            <Select v-model="traceProjectFilter" @change="fetchTraces">
+              <option value="">全部项目</option>
+              <option v-for="p in traceProjectOptions" :key="p" :value="p">{{ p }}</option>
+            </Select>
           </div>
 
           <div class="text-xs text-stone-400 font-mono">
@@ -563,6 +568,7 @@
                   <Badge :variant="evalBadgeVariant(trace.eval_status)">
                     {{ formatEvalStatusText(trace.eval_status) }}
                   </Badge>
+                  <Badge variant="neutral">{{ trace.project || trace.payload?.project || 'unknown' }}</Badge>
                   <Badge variant="outline">{{ trace.environment }}</Badge>
                   <span class="text-[11px] font-mono text-stone-500">{{ trace.release }}</span>
                 </div>
@@ -600,14 +606,26 @@
               <!-- 头部 -->
               <div class="flex items-start justify-between border-b border-stone-800/80 pb-3.5 shrink-0">
                 <div class="space-y-1">
-                  <div class="flex items-center gap-2">
+                  <div class="flex items-center gap-2 flex-wrap">
                     <h2 class="text-sm font-semibold text-stone-100 font-mono">{{ selectedTrace.session_id }}</h2>
                     <Badge :variant="evalBadgeVariant(selectedTrace.eval_status)">
                       {{ formatEvalStatusText(selectedTrace.eval_status) }}
                     </Badge>
+                    <Badge v-if="selectedTrace.payload?.stats_incomplete === true" variant="warning">
+                      <AlertTriangle class="w-3 h-3" />
+                      部分轮次缺少 token 数据，统计不完整
+                    </Badge>
                   </div>
                   <p class="text-[11px] text-stone-500 font-mono">
                     ID: {{ selectedTrace.id }} · {{ formatDate(selectedTrace.reported_at) }}
+                  </p>
+                  <p
+                    v-if="selectedTrace.payload && (selectedTrace.payload.wall_clock_ms != null || selectedTrace.payload.inter_turn_pause_ms != null)"
+                    class="text-[11px] text-stone-400 font-mono"
+                  >
+                    <span v-if="selectedTrace.payload.wall_clock_ms != null">墙钟: {{ formatWallClockSeconds(selectedTrace.payload.wall_clock_ms) }}s</span>
+                    <span v-if="selectedTrace.payload.wall_clock_ms != null && selectedTrace.payload.inter_turn_pause_ms != null"> · </span>
+                    <span v-if="selectedTrace.payload.inter_turn_pause_ms != null">轮间停顿: {{ selectedTrace.payload.inter_turn_pause_ms }}ms</span>
                   </p>
                 </div>
                 <Button variant="ghost" size="icon" @click="closeTraceDrawer">
@@ -665,19 +683,45 @@
                 >
                   <div class="flex justify-between items-baseline font-mono text-[11px] border-b border-stone-800/60 pb-1">
                     <span class="font-semibold text-stone-300">
-                      {{ turn.step || ('Turn #' + (turn.sequence || idx + 1)) }}
+                      Turn #{{ idx + 1 }}
                       <span v-if="turn.phase" class="text-stone-500 font-normal">({{ turn.phase }})</span>
                     </span>
-                    <span class="text-stone-500">{{ turn.model || turn.node || '-' }} · {{ turn.duration_ms || 0 }}ms</span>
+                    <span class="text-stone-500">seq {{ turn.sequence ?? '-' }} · {{ turn.model || turn.node || turn.step || '-' }} · {{ turn.duration_ms || 0 }}ms</span>
                   </div>
                   <div v-if="turn.input_tokens || turn.output_tokens || turn.cache_hit_tokens" class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
                     <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
                     <span v-if="turn.output_tokens">输出: {{ turn.output_tokens }}</span>
                     <span v-if="turn.cache_hit_tokens">缓存: {{ turn.cache_hit_tokens }}</span>
                   </div>
-                  <div v-else-if="turn.input || turn.output" class="text-stone-400 font-mono text-[11px] space-y-1">
-                    <div v-if="turn.input" class="truncate text-stone-300"><span class="text-stone-500">输入:</span> {{ typeof turn.input === 'string' ? turn.input : JSON.stringify(turn.input) }}</div>
-                    <div v-if="turn.output" class="truncate text-stone-300"><span class="text-stone-500">输出:</span> {{ typeof turn.output === 'string' ? turn.output : JSON.stringify(turn.output) }}</div>
+
+                  <!-- 对话文本（input_text/output_text 或 langgraph input/output），工具调用之前 -->
+                  <div v-if="getTurnTextBlocks(turn).length" class="space-y-1.5 pt-0.5">
+                    <div
+                      v-for="(block, bIdx) in getTurnTextBlocks(turn)"
+                      :key="'txt-' + bIdx"
+                      class="bg-stone-950/50 border border-stone-800/60 rounded p-2"
+                    >
+                      <template v-if="!block.truncated">
+                        <div class="flex items-center gap-1.5 text-[10px] font-mono uppercase text-stone-500">
+                          <span>{{ block.kind }}</span>
+                          <span class="text-stone-600 normal-case">({{ block.text.length }} 字符)</span>
+                        </div>
+                        <pre class="mt-1 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all leading-relaxed">{{ block.text }}</pre>
+                      </template>
+                      <details v-else class="group">
+                        <summary class="cursor-pointer list-none select-none [&::-webkit-details-marker]:hidden">
+                          <div class="flex items-center gap-1.5 text-[10px] font-mono uppercase text-stone-500">
+                            <ChevronRight class="w-3 h-3 text-stone-500 transition-transform group-open:rotate-90" />
+                            <span>{{ block.kind }}</span>
+                            <span class="text-stone-600 normal-case">({{ block.text.length }} 字符, 截断至 500)</span>
+                          </div>
+                          <span class="block mt-1 font-mono text-[11px] text-stone-400 whitespace-pre-wrap break-all leading-relaxed">{{ block.preview }}<span class="text-stone-600"> …</span></span>
+                        </summary>
+                        <div class="mt-1.5 border-t border-stone-800/60 pt-1.5">
+                          <pre class="font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all leading-relaxed">{{ block.text }}</pre>
+                        </div>
+                      </details>
+                    </div>
                   </div>
 
                   <div v-if="turn.tool_calls && turn.tool_calls.length" class="space-y-1 pt-1">
@@ -721,7 +765,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { motion, AnimatePresence } from 'motion-v'
-import { RefreshCw, Search, X, Copy, AlertTriangle } from '@lucide/vue'
+import { RefreshCw, Search, X, Copy, AlertTriangle, ChevronRight } from '@lucide/vue'
 
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
@@ -899,6 +943,7 @@ async function checkHealth() {
 const traces = ref([])
 const selectedTrace = ref(null)
 const filterTraceStatus = ref('')
+const traceProjectFilter = ref('')
 const traceSearchKeyword = ref('')
 
 const traceUnreviewedCount = computed(() => traces.value.filter(t => t.eval_status === 'unreviewed').length)
@@ -906,10 +951,25 @@ const traceGoodCount = computed(() => traces.value.filter(t => t.eval_status ===
 const traceBadCount = computed(() => traces.value.filter(t => t.eval_status === 'triage_bad').length)
 const traceOptimizedCount = computed(() => traces.value.filter(t => t.eval_status === 'optimized').length)
 
+const traceProjectOptions = computed(() => {
+  const set = new Set()
+  for (const t of traces.value) {
+    const p = t.project || t.payload?.project
+    if (p) set.add(String(p))
+  }
+  for (const p of projects.value) {
+    if (p) set.add(String(p))
+  }
+  return Array.from(set).sort()
+})
+
 const filteredTraces = computed(() => {
   let list = traces.value
   if (filterTraceStatus.value) {
     list = list.filter(t => t.eval_status === filterTraceStatus.value)
+  }
+  if (traceProjectFilter.value) {
+    list = list.filter(t => (t.project || t.payload?.project) === traceProjectFilter.value)
   }
   if (!traceSearchKeyword.value.trim()) return list
   const kw = traceSearchKeyword.value.trim().toLowerCase()
@@ -932,9 +992,50 @@ const getTraceTurns = (trace) => {
   return []
 }
 
+const TEXT_PREVIEW_LIMIT = 500
+
+const turnTextValue = (turn, kind) => {
+  if (!turn) return null
+  if (kind === 'input') {
+    if (typeof turn.input_text === 'string' && turn.input_text) return turn.input_text
+    if (turn.input !== undefined && turn.input !== null && turn.input !== '') {
+      return typeof turn.input === 'string' ? turn.input : JSON.stringify(turn.input)
+    }
+    return null
+  }
+  if (typeof turn.output_text === 'string' && turn.output_text) return turn.output_text
+  if (turn.output !== undefined && turn.output !== null && turn.output !== '') {
+    return typeof turn.output === 'string' ? turn.output : JSON.stringify(turn.output)
+  }
+  return null
+}
+
+const getTurnTextBlocks = (turn) => {
+  const blocks = []
+  for (const kind of ['input', 'output']) {
+    const text = turnTextValue(turn, kind)
+    if (text == null) continue
+    blocks.push({
+      kind: kind === 'input' ? '输入' : '输出',
+      text: String(text),
+      truncated: String(text).length > TEXT_PREVIEW_LIMIT,
+      preview: String(text).slice(0, TEXT_PREVIEW_LIMIT)
+    })
+  }
+  return blocks
+}
+
+const formatWallClockSeconds = (ms) => {
+  const sec = Number(ms) / 1000
+  if (!Number.isFinite(sec)) return ms
+  return Math.round(sec * 10) / 10
+}
+
 const fetchTraces = async () => {
   try {
-    traces.value = await apiFetchJson('/api/v1/traces?limit=100', { refreshScope: true })
+    let url = '/api/v1/traces?limit=100'
+    if (traceProjectFilter.value) url += `&project=${encodeURIComponent(traceProjectFilter.value)}`
+    traces.value = await apiFetchJson(url, { refreshScope: true })
     traceLoadFailed.value = false
   } catch (e) {
     if (e.name === 'AbortError') return

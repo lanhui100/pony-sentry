@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS traces (
     turn_id TEXT,
     environment TEXT NOT NULL,
     release TEXT NOT NULL,
+    project TEXT,
     eval_status TEXT NOT NULL DEFAULT 'unreviewed',
     payload TEXT NOT NULL,
     total_input_tokens INTEGER,
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS traces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_traces_session_id ON traces(session_id);
+CREATE INDEX IF NOT EXISTS idx_traces_project ON traces(project);
 CREATE INDEX IF NOT EXISTS idx_traces_eval_status ON traces(eval_status);
 CREATE INDEX IF NOT EXISTS idx_traces_environment ON traces(environment);
 CREATE INDEX IF NOT EXISTS idx_traces_created_at ON traces(created_at);

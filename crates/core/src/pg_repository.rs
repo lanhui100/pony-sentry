@@ -424,18 +424,33 @@ impl IssueRepository for PgIssueRepository {
 #[async_trait]
 impl TraceRepository for PgIssueRepository {
     async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
-        let payload_str = serde_json::to_string(&trace.payload).unwrap_or_else(|_| "{}".to_string());
+        // 同 session_id 增量上报：先取旧 payload，按 turns 轮次去重合并（旧轮保留、新轮按序追加）。
+        let existing_payload: Option<serde_json::Value> =
+            sqlx::query("SELECT payload FROM traces WHERE session_id = $1")
+                .bind(&trace.session_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|row| row.get("payload"));
+
+        let merged_payload = match existing_payload {
+            Some(old) => crate::trace_merge::merge_trace_payloads(&old, &trace.payload),
+            None => trace.payload.clone(),
+        };
+        let payload_str =
+            serde_json::to_string(&merged_payload).unwrap_or_else(|_| "{}".to_string());
+
         sqlx::query(
             "INSERT INTO traces (
-                id, session_id, run_id, turn_id, environment, release,
+                id, session_id, run_id, turn_id, environment, release, project,
                 eval_status, payload, total_input_tokens, total_output_tokens,
                 total_duration_ms, reported_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (session_id) DO UPDATE SET
                 run_id = EXCLUDED.run_id,
                 turn_id = EXCLUDED.turn_id,
                 environment = EXCLUDED.environment,
                 release = EXCLUDED.release,
+                project = EXCLUDED.project,
                 eval_status = CASE WHEN traces.eval_status != 'unreviewed' THEN traces.eval_status ELSE EXCLUDED.eval_status END,
                 payload = EXCLUDED.payload,
                 total_input_tokens = EXCLUDED.total_input_tokens,
@@ -450,6 +465,7 @@ impl TraceRepository for PgIssueRepository {
         .bind(&trace.turn_id)
         .bind(&trace.environment)
         .bind(&trace.release)
+        .bind(&trace.project)
         .bind(trace.eval_status.to_string())
         .bind(payload_str)
         .bind(trace.total_input_tokens)
@@ -461,12 +477,14 @@ impl TraceRepository for PgIssueRepository {
         .execute(&self.pool)
         .await?;
 
-        Ok(trace)
+        let mut saved = trace;
+        saved.payload = merged_payload;
+        Ok(saved)
     }
 
     async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError> {
         let row = sqlx::query(
-            "SELECT id, session_id, run_id, turn_id, environment, release,
+            "SELECT id, session_id, run_id, turn_id, environment, release, project,
                     eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
                     total_duration_ms, reported_at, created_at, updated_at
              FROM traces WHERE id = $1"
@@ -480,7 +498,7 @@ impl TraceRepository for PgIssueRepository {
     }
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
-        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release,
+        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release, project,
                                 eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
                                 total_duration_ms, reported_at, created_at, updated_at
                          FROM traces WHERE 1=1".to_string();
@@ -505,6 +523,11 @@ impl TraceRepository for PgIssueRepository {
         if let Some(release) = &filter.release {
             query.push_str(&format!(" AND release = ${bind_index}"));
             binds.push(release.clone());
+            bind_index += 1;
+        }
+        if let Some(project) = &filter.project {
+            query.push_str(&format!(" AND project = ${bind_index}"));
+            binds.push(project.clone());
         }
 
         query.push_str(" ORDER BY created_at DESC");
@@ -547,6 +570,21 @@ impl TraceRepository for PgIssueRepository {
 
         self.get_trace(id).await
     }
+
+    async fn list_projects(&self) -> Result<Vec<String>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT project FROM traces
+             WHERE project IS NOT NULL AND project != ''
+             ORDER BY project ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("project"))
+            .collect())
+    }
 }
 
 impl PgIssueRepository {
@@ -570,6 +608,7 @@ impl PgIssueRepository {
             turn_id: row.get("turn_id"),
             environment: row.get("environment"),
             release: row.get("release"),
+            project: row.get("project"),
             eval_status,
             payload,
             total_input_tokens: row.get("total_input_tokens"),

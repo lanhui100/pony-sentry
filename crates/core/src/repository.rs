@@ -89,4 +89,8 @@ pub trait TraceRepository: Send + Sync {
         id: &str,
         status: EvalStatus,
     ) -> Result<TraceRecord, RepositoryError>;
+
+    /// Trace 维度已出现过的项目名去重排序列表（不含 NULL 与空串），
+    /// 供 Web 端项目筛选下拉与 `/api/v1/projects` 聚合使用。
+    async fn list_projects(&self) -> Result<Vec<String>, RepositoryError>;
 }

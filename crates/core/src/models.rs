@@ -147,6 +147,9 @@ pub struct TraceRecord {
     pub turn_id: Option<String>,
     pub environment: String,
     pub release: String,
+    /// 项目名（上报 `project` 字段），可空；用于项目维度聚合与筛选。
+    #[serde(default)]
+    pub project: Option<String>,
     pub eval_status: EvalStatus,
     pub payload: serde_json::Value,
     pub total_input_tokens: Option<i64>,
@@ -163,6 +166,7 @@ pub struct TraceFilter {
     pub eval_status: Option<EvalStatus>,
     pub environment: Option<String>,
     pub release: Option<String>,
+    pub project: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

@@ -4,6 +4,7 @@ pub mod pg_repository;
 pub mod reindex;
 pub mod repository;
 pub mod sqlite_repository;
+pub mod trace_merge;
 
 pub use db::{create_pool, DatabasePool};
 pub use models::{EvalStatus, Event, Issue, IssueStatus, Platform, TraceFilter, TraceRecord};

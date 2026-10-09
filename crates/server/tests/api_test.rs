@@ -425,3 +425,181 @@ async fn test_webhook_anti_avalanche_on_regression() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 2, "在已回归状态下的持续涌入事件严禁重复触发 Webhook 雪崩");
 }
+
+#[tokio::test]
+async fn test_traces_api_project_filter_and_aggregation() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 1. 上报带有 project="job_copilot" 的 Trace
+    let trace_copilot = json!({
+        "session_id": "sess-copilot-api-01",
+        "project": "job_copilot",
+        "turns": [
+            { "turn_id": "t1", "input": "find job" }
+        ]
+    });
+    let res_copilot = server.post("/api/v1/traces").json(&trace_copilot).await;
+    res_copilot.assert_status(StatusCode::CREATED);
+
+    // 2. 上报带有 project="pony-agent" 的 Trace
+    let trace_pony = json!({
+        "session_id": "sess-pony-api-01",
+        "project": "pony-agent",
+        "turns": [
+            { "turn_id": "t1", "input": "agent execute" }
+        ]
+    });
+    let res_pony = server.post("/api/v1/traces").json(&trace_pony).await;
+    res_pony.assert_status(StatusCode::CREATED);
+
+    // 3. 上报一个 issue，带 extra.project_path 属于 "blog-web" 项目
+    let issue_blog = json!({
+        "platform": "rust",
+        "message": "blog panic error",
+        "exception": { "error_type": "BlogError", "value": "test", "stacktrace": [] },
+        "extra": { "project_path": "/home/dev/blog-web" }
+    });
+    server.post("/api/v1/ingest").json(&issue_blog).await.assert_status(StatusCode::OK);
+
+    // 4. 测试 GET /api/v1/traces?project=job_copilot 过滤
+    let filtered: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?project=job_copilot")
+        .await
+        .json();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["session_id"], "sess-copilot-api-01");
+    assert_eq!(filtered[0]["project"], "job_copilot");
+
+    // 5. 测试 GET /api/v1/projects 聚合 issues 和 traces 的去重项目清单
+    let projects: Vec<String> = server.get("/api/v1/projects").await.json();
+    assert_eq!(
+        projects,
+        vec!["blog-web".to_string(), "job_copilot".to_string(), "pony-agent".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn test_traces_server_side_sanitization() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 上报含未脱敏路径与 token 的 payload
+    // 注意：SanitizationPipeline 中 SENSITIVE_KEYS 命中 key 时整字段替换为 [REDACTED_SECRET]；
+    // 字符串内正则命中 Bearer 也会替换为 [REDACTED_SECRET]。
+    let raw_payload = json!({
+        "session_id": "sess-sanitize-server-01",
+        "project": "security-test",
+        "turns": [
+            {
+                "turn_id": "t1",
+                "input_text": "read file /home/developer/secrets/app.key",
+                "token": "sk-secret-token-abcdef123456",
+                "note": "Authorization: Bearer secret-access-token"
+            }
+        ]
+    });
+
+    let resp = server.post("/api/v1/traces").json(&raw_payload).await;
+    resp.assert_status(StatusCode::CREATED);
+
+    // 查询落库后的 trace
+    let list: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=sess-sanitize-server-01")
+        .await
+        .json();
+    assert_eq!(list.len(), 1);
+    let stored_payload = &list[0]["payload"];
+
+    let turns = stored_payload["turns"].as_array().expect("turns array");
+    let turn = &turns[0];
+
+    // 断言敏感路径 /home/developer 经服务端 SanitizationPipeline 脱敏
+    let input = turn["input_text"].as_str().unwrap_or_default();
+    assert!(
+        !input.contains("/home/developer"),
+        "服务端脱敏后不应包含 /home/developer，实际值: {}",
+        input
+    );
+    assert!(
+        input.contains("[USER_HOME]"),
+        "路径应包含 [USER_HOME]，实际值: {}",
+        input
+    );
+
+    // 断言 token 字段被脱敏
+    let token_val = turn["token"].as_str().unwrap_or_default();
+    assert_eq!(
+        token_val, "[REDACTED_SECRET]",
+        "敏感 token 字段必须被脱敏为 [REDACTED_SECRET]"
+    );
+
+    // 断言 note 内的 Bearer token 经正则脱敏
+    let note = turn["note"].as_str().unwrap_or_default();
+    assert!(
+        !note.contains("secret-access-token"),
+        "Bearer token 必须被脱敏，实际值: {}",
+        note
+    );
+    assert!(
+        note.contains("[REDACTED_SECRET]"),
+        "Bearer token 必须脱敏为 [REDACTED_SECRET]，实际值: {}",
+        note
+    );
+}
+
+#[tokio::test]
+async fn test_traces_large_payload_limit_2mb() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 构造约 1.5MB 大小的合规 trace payload（> 512KB，< 2MB）
+    let large_string = "X".repeat(1_500_000);
+    let large_payload = json!({
+        "session_id": "sess-large-2mb-01",
+        "project": "large-test",
+        "turns": [
+            {
+                "turn_id": "t-large",
+                "output_text": large_string
+            }
+        ]
+    });
+
+    // 断言返回 HTTP 201 Created（未被老版本 512KB 限制截断/拦截）
+    let resp = server.post("/api/v1/traces").json(&large_payload).await;
+    resp.assert_status(StatusCode::CREATED);
+
+    let created: serde_json::Value = resp.json();
+    assert_eq!(created["session_id"], "sess-large-2mb-01");
+}
