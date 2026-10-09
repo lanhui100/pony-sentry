@@ -33,6 +33,7 @@ pub fn infer_project_name(
 
     if title_str.contains("GatewayExhaustedError")
         || title_str.contains("GatewayConnectionError")
+        || title_str.contains("StreamFailureError")
         || title_str.contains("AuthInvalid")
         || culprit_str.contains("ponyllm")
     {
@@ -152,6 +153,14 @@ mod tests {
         assert_eq!(
             project_name_from_extra(Some(&json!({ "project_path": "[USER_HOME]" }))),
             None
+        );
+    }
+
+    #[test]
+    fn infers_ponyllm_from_stream_failure_error() {
+        assert_eq!(
+            infer_project_name(None, None, Some("StreamFailureError: upstream transport error"), None),
+            Some("ponyllm".to_string())
         );
     }
 }
