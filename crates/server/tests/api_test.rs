@@ -396,7 +396,13 @@ async fn test_webhook_anti_avalanche_on_regression() {
     let issue_id = body["issue_id"].as_str().unwrap().to_string();
     assert_eq!(body["count"], 1);
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // 等待异步 webhook tokio::spawn 完成（重试轮询，避免单机高负载时 sleep(50ms) 竞态）
+    for _ in 0..20 {
+        if WEBHOOK_CALL_COUNT.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 1, "初次创建应触发 1 次 Webhook");
 
     // 2. 第二次上报：count=2，处于 unresolved，不触发 Webhook
