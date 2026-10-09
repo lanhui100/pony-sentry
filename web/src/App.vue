@@ -877,6 +877,8 @@ const projects = ref([])
 const selected = ref(null)
 const selectedEvents = ref([])
 const selectedEventsError = ref(false)
+let currentIssueEventsController = null
+let currentIssueEventsReqId = 0
 const filterStatus = ref('attention')
 const filterPlatform = ref('')
 const filterProject = ref('')
@@ -953,11 +955,22 @@ const allControllers = new Set()    // 卸载清理全集
 const refreshControllers = new Set() // 刷新中止子集（仅刷新系只读请求）
 
 async function apiFetchJson(url, options = {}) {
-  const { timeoutMs = API_TIMEOUT_MS, refreshScope = false, ...fetchOptions } = options
+  const { timeoutMs = API_TIMEOUT_MS, refreshScope = false, signal: externalSignal, ...fetchOptions } = options
   const controller = new AbortController()
   let timedOut = false
   allControllers.add(controller)
   if (refreshScope) refreshControllers.add(controller)
+
+  let onExternalAbort = null
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort()
+    } else {
+      onExternalAbort = () => controller.abort()
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+  }
+
   const timeoutId = setTimeout(() => {
     timedOut = true
     controller.abort()
@@ -981,6 +994,9 @@ async function apiFetchJson(url, options = {}) {
     throw e
   } finally {
     clearTimeout(timeoutId)
+    if (externalSignal && onExternalAbort) {
+      externalSignal.removeEventListener('abort', onExternalAbort)
+    }
     allControllers.delete(controller)
     refreshControllers.delete(controller)
   }
@@ -1000,9 +1016,18 @@ function abortAllControllers() {
 // /healthz 轮询：立即探测 + 15s 间隔，abort 超时 ≤3000ms
 let healthTimer = null
 let healthController = null
+let checkingDebounceTimer = null
 
 async function checkHealth() {
-  gatewayState.value = 'checking' // 每个轮询周期起始重置中间态（T6.3）
+  if (checkingDebounceTimer) {
+    clearTimeout(checkingDebounceTimer)
+    checkingDebounceTimer = null
+  }
+  // 延迟状态抖动：内网/本地毫秒级响应不灰闪；请求耗时超过 250ms 时切入 checking 态
+  checkingDebounceTimer = setTimeout(() => {
+    gatewayState.value = 'checking'
+  }, 250)
+
   if (healthController) healthController.abort()
   healthController = new AbortController()
   const timeoutId = setTimeout(() => healthController.abort(), API_TIMEOUT_MS)
@@ -1013,6 +1038,10 @@ async function checkHealth() {
     gatewayState.value = 'degraded'
   } finally {
     clearTimeout(timeoutId)
+    if (checkingDebounceTimer) {
+      clearTimeout(checkingDebounceTimer)
+      checkingDebounceTimer = null
+    }
     healthController = null
   }
 }
@@ -1223,12 +1252,31 @@ const selectIssue = async (issue, event) => {
   selectedEvents.value = []
   selectedEventsError.value = false
   focusDialogPanel()
+
+  if (currentIssueEventsController) {
+    currentIssueEventsController.abort()
+  }
+  const controller = new AbortController()
+  currentIssueEventsController = controller
+  const reqId = ++currentIssueEventsReqId
+
   try {
-    selectedEvents.value = await apiFetchJson(`/api/v1/issues/${issue.id}/events`)
+    const data = await apiFetchJson(`/api/v1/issues/${issue.id}/events`, {
+      signal: controller.signal
+    })
+    if (currentIssueEventsReqId === reqId && selected.value?.id === issue.id) {
+      selectedEvents.value = data
+    }
   } catch (e) {
     if (e.name === 'AbortError') return
-    console.error('获取缺陷事件详情失败', e)
-    selectedEventsError.value = true
+    if (currentIssueEventsReqId === reqId && selected.value?.id === issue.id) {
+      console.error('获取缺陷事件详情失败', e)
+      selectedEventsError.value = true
+    }
+  } finally {
+    if (currentIssueEventsController === controller) {
+      currentIssueEventsController = null
+    }
   }
 }
 
@@ -1257,7 +1305,14 @@ function restoreFocus() {
 }
 
 const closeIssueDrawer = () => {
+  if (currentIssueEventsController) {
+    currentIssueEventsController.abort()
+    currentIssueEventsController = null
+  }
+  currentIssueEventsReqId++
   selected.value = null
+  selectedEvents.value = []
+  selectedEventsError.value = false
   restoreFocus()
 }
 
@@ -1385,7 +1440,15 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
   if (healthTimer) clearInterval(healthTimer)
   if (relTimeTimer) clearInterval(relTimeTimer)
+  if (checkingDebounceTimer) {
+    clearTimeout(checkingDebounceTimer)
+    checkingDebounceTimer = null
+  }
   if (healthController) healthController.abort()
+  if (currentIssueEventsController) {
+    currentIssueEventsController.abort()
+    currentIssueEventsController = null
+  }
   abortAllControllers() // 卸载时中止全部 in-flight 请求（刷新系 + 交互系）
 })
 </script>
