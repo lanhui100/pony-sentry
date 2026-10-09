@@ -138,7 +138,13 @@ impl SanitizationPipeline {
 
     #[inline]
     fn is_sensitive_key(key: &str) -> bool {
-        let normalized = key.to_ascii_lowercase().replace(['-', '_'], "");
+        let lower = key.to_ascii_lowercase();
+        // 计量与度量指标白名单（LLM tokens 计量字段严禁误当作鉴权 token 脱敏）
+        if lower.ends_with("tokens") || lower.contains("token_count") || lower.contains("tokencount") {
+            return false;
+        }
+
+        let normalized = lower.replace(['-', '_'], "");
         if SENSITIVE_KEYS.contains(normalized.as_str()) {
             return true;
         }

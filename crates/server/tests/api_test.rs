@@ -516,10 +516,12 @@ async fn test_traces_server_side_sanitization() {
     let raw_payload = json!({
         "session_id": "sess-sanitize-server-01",
         "project": "security-test",
+        "total_input_tokens": 1200,
         "turns": [
             {
                 "turn_id": "t1",
                 "input_text": "read file /home/developer/secrets/app.key",
+                "input_tokens": 800,
                 "token": "sk-secret-token-abcdef123456",
                 "note": "Authorization: Bearer secret-access-token"
             }
@@ -553,12 +555,14 @@ async fn test_traces_server_side_sanitization() {
         input
     );
 
-    // 断言 token 字段被脱敏
+    // 断言 token 字段被脱敏，而 tokens 计量指标不受影响
     let token_val = turn["token"].as_str().unwrap_or_default();
     assert_eq!(
         token_val, "[REDACTED_SECRET]",
         "敏感 token 字段必须被脱敏为 [REDACTED_SECRET]"
     );
+    assert_eq!(stored_payload["total_input_tokens"], 1200, "total_input_tokens 计量指标严禁被误杀");
+    assert_eq!(turn["input_tokens"], 800, "turn.input_tokens 计量指标严禁被误杀");
 
     // 断言 note 内的 Bearer token 经正则脱敏
     let note = turn["note"].as_str().unwrap_or_default();
