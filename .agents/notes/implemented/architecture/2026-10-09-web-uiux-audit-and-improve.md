@@ -1,6 +1,6 @@
 # Agent Note: web console UI/UX audit and improvement wave
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
@@ -23,7 +23,7 @@ Web 控制台（`web/src/App.vue`，单文件 SPA）已完成功能覆盖（Issu
 8. **KPI 口径不一致**："需关注缺陷 (默认)" 副文案写"待处理+诊断中"，但 attention 口径实际含 regression；
    卡片标题与过滤语义脱节。
 
-## Proposal
+## Decision
 
 以 **B 级（跨文件多模块、涉设计 spec）** 编排一个实施波次，目标为最小闭环修复上述硬伤，
 **不**重构整体视觉风格（MiSans/深色/靛蓝方向保留）、不新增页面、不改后端 API 契约：
