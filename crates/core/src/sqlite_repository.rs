@@ -477,7 +477,19 @@ impl TraceRepository for SqliteIssueRepository {
                 id, session_id, run_id, turn_id, environment, release,
                 eval_status, payload, total_input_tokens, total_output_tokens,
                 total_duration_ms, reported_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (session_id) DO UPDATE SET
+                run_id = excluded.run_id,
+                turn_id = excluded.turn_id,
+                environment = excluded.environment,
+                release = excluded.release,
+                eval_status = CASE WHEN traces.eval_status != 'unreviewed' THEN traces.eval_status ELSE excluded.eval_status END,
+                payload = excluded.payload,
+                total_input_tokens = excluded.total_input_tokens,
+                total_output_tokens = excluded.total_output_tokens,
+                total_duration_ms = excluded.total_duration_ms,
+                reported_at = excluded.reported_at,
+                updated_at = excluded.updated_at"
         )
         .bind(&trace.id)
         .bind(&trace.session_id)

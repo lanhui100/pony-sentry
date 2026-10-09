@@ -279,6 +279,72 @@ async fn test_project_path_is_surfaced_and_filterable() {
 }
 
 #[tokio::test]
+async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 1. LangGraph / LangChain 客户端使用 thread_id 发送 Trace
+    let langgraph_payload = json!({
+        "thread_id": "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a",
+        "project": "job_copilot",
+        "environment": "production",
+        "release": "1.0.0",
+        "turns": [
+            { "step": "agent_node", "input": "搜索最新招聘" }
+        ],
+        "total_input_tokens": 1500,
+        "total_output_tokens": 300,
+        "total_duration_ms": 2500
+    });
+
+    let resp = server
+        .post("/api/v1/traces")
+        .json(&langgraph_payload)
+        .await;
+    resp.assert_status(StatusCode::CREATED);
+    let created: serde_json::Value = resp.json();
+    assert_eq!(created["session_id"], "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a");
+
+    // 2. 第二轮图执行完成后增量更新该 thread
+    let langgraph_update = json!({
+        "thread_id": "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a",
+        "project": "job_copilot",
+        "environment": "production",
+        "release": "1.0.0",
+        "turns": [
+            { "step": "agent_node", "input": "搜索最新招聘" },
+            { "step": "tool_node", "tool": "search_jobs" }
+        ],
+        "total_input_tokens": 3200,
+        "total_output_tokens": 800,
+        "total_duration_ms": 5000
+    });
+
+    server
+        .post("/api/v1/traces")
+        .json(&langgraph_update)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // 3. 验证幂等性：同一 thread_id 仅存在 1 条记录，且累积数据已刷新
+    let list: Vec<serde_json::Value> = server.get("/api/v1/traces").await.json();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["session_id"], "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a");
+    assert_eq!(list[0]["total_input_tokens"], 3200);
+    assert_eq!(list[0]["total_duration_ms"], 5000);
+}
+
+#[tokio::test]
 async fn test_webhook_anti_avalanche_on_regression() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use axum::routing::post;

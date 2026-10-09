@@ -664,13 +664,20 @@
                   class="bg-stone-900/50 p-3 rounded border border-stone-800/80 space-y-2"
                 >
                   <div class="flex justify-between items-baseline font-mono text-[11px] border-b border-stone-800/60 pb-1">
-                    <span class="font-semibold text-stone-300">Turn #{{ turn.sequence || idx + 1 }} ({{ turn.phase || 'act' }})</span>
-                    <span class="text-stone-500">{{ turn.model || '-' }} · {{ turn.duration_ms || 0 }}ms</span>
+                    <span class="font-semibold text-stone-300">
+                      {{ turn.step || ('Turn #' + (turn.sequence || idx + 1)) }}
+                      <span v-if="turn.phase" class="text-stone-500 font-normal">({{ turn.phase }})</span>
+                    </span>
+                    <span class="text-stone-500">{{ turn.model || turn.node || '-' }} · {{ turn.duration_ms || 0 }}ms</span>
                   </div>
-                  <div class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
-                    <span>输入: {{ turn.input_tokens || 0 }}</span>
-                    <span>输出: {{ turn.output_tokens || 0 }}</span>
-                    <span v-if="turn.cache_hit_tokens">缓存命中: {{ turn.cache_hit_tokens }}</span>
+                  <div v-if="turn.input_tokens || turn.output_tokens || turn.cache_hit_tokens" class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
+                    <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
+                    <span v-if="turn.output_tokens">输出: {{ turn.output_tokens }}</span>
+                    <span v-if="turn.cache_hit_tokens">缓存: {{ turn.cache_hit_tokens }}</span>
+                  </div>
+                  <div v-else-if="turn.input || turn.output" class="text-stone-400 font-mono text-[11px] space-y-1">
+                    <div v-if="turn.input" class="truncate text-stone-300"><span class="text-stone-500">输入:</span> {{ typeof turn.input === 'string' ? turn.input : JSON.stringify(turn.input) }}</div>
+                    <div v-if="turn.output" class="truncate text-stone-300"><span class="text-stone-500">输出:</span> {{ typeof turn.output === 'string' ? turn.output : JSON.stringify(turn.output) }}</div>
                   </div>
 
                   <div v-if="turn.tool_calls && turn.tool_calls.length" class="space-y-1 pt-1">
@@ -916,7 +923,12 @@ const filteredTraces = computed(() => {
 
 const getTraceTurns = (trace) => {
   if (!trace || !trace.payload) return []
+  // 1. 标准格式：payload.turns 数组
   if (Array.isArray(trace.payload.turns)) return trace.payload.turns
+  // 2. LangGraph / LangChain 兼容：payload.steps 数组
+  if (Array.isArray(trace.payload.steps)) return trace.payload.steps
+  // 3. LangGraph RunTree 兼容：payload.runs 数组
+  if (Array.isArray(trace.payload.runs)) return trace.payload.runs
   return []
 }
 

@@ -430,7 +430,19 @@ impl TraceRepository for PgIssueRepository {
                 id, session_id, run_id, turn_id, environment, release,
                 eval_status, payload, total_input_tokens, total_output_tokens,
                 total_duration_ms, reported_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)"
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (session_id) DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                turn_id = EXCLUDED.turn_id,
+                environment = EXCLUDED.environment,
+                release = EXCLUDED.release,
+                eval_status = CASE WHEN traces.eval_status != 'unreviewed' THEN traces.eval_status ELSE EXCLUDED.eval_status END,
+                payload = EXCLUDED.payload,
+                total_input_tokens = EXCLUDED.total_input_tokens,
+                total_output_tokens = EXCLUDED.total_output_tokens,
+                total_duration_ms = EXCLUDED.total_duration_ms,
+                reported_at = EXCLUDED.reported_at,
+                updated_at = EXCLUDED.updated_at"
         )
         .bind(&trace.id)
         .bind(&trace.session_id)

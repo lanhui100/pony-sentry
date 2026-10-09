@@ -165,3 +165,74 @@ async fn test_trace_not_found_and_adversarial_payload() {
     let result = repo.record_trace(large_trace).await;
     assert!(result.is_ok(), "Large trace record must be handled without crashing");
 }
+
+#[tokio::test]
+async fn test_trace_upsert_on_same_session_id() {
+    let pool = create_pool("sqlite::memory:")
+        .await
+        .expect("Failed to create memory pool");
+    let repo = SqliteIssueRepository::new(pool);
+    repo.migrate().await.expect("Failed to run migrations");
+
+    let session_id = "pa_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a".to_string();
+    let initial_trace = TraceRecord {
+        id: "trc-1".to_string(),
+        session_id: session_id.clone(),
+        run_id: None,
+        turn_id: Some("turn-1".to_string()),
+        environment: "dev".to_string(),
+        release: "0.1.0".to_string(),
+        eval_status: EvalStatus::Unreviewed,
+        payload: json!({ "turns": [{ "turn_id": "turn-1" }] }),
+        total_input_tokens: Some(100),
+        total_output_tokens: Some(50),
+        total_duration_ms: Some(500),
+        reported_at: Utc::now(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    repo.record_trace(initial_trace)
+        .await
+        .expect("Initial trace insert");
+
+    // 第二次上传：包含 turn-1 和 turn-2，更新相同 session_id
+    let updated_trace = TraceRecord {
+        id: "trc-2".to_string(),
+        session_id: session_id.clone(),
+        run_id: None,
+        turn_id: Some("turn-2".to_string()),
+        environment: "dev".to_string(),
+        release: "0.1.0".to_string(),
+        eval_status: EvalStatus::Unreviewed,
+        payload: json!({ "turns": [{ "turn_id": "turn-1" }, { "turn_id": "turn-2" }] }),
+        total_input_tokens: Some(300),
+        total_output_tokens: Some(150),
+        total_duration_ms: Some(1200),
+        reported_at: Utc::now(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    repo.record_trace(updated_trace)
+        .await
+        .expect("Updated trace upsert");
+
+    let list = repo
+        .list_traces(TraceFilter {
+            session_id: Some(session_id.clone()),
+            eval_status: None,
+            environment: None,
+            release: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .expect("list_traces");
+
+    // 幂等：必须只有 1 条记录，且是最新的 tokens 累计
+    assert_eq!(list.len(), 1, "同一 session_id 必须幂等更新为 1 条记录");
+    assert_eq!(list[0].total_input_tokens, Some(300));
+    assert_eq!(list[0].total_duration_ms, Some(1200));
+    assert_eq!(list[0].turn_id.as_deref(), Some("turn-2"));
+}

@@ -82,7 +82,11 @@ pub struct UpdateIssueRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentTraceIngestRequest {
-    pub session_id: String,
+    /// 会话/线程标识：优先采用 session_id，兼容 LangGraph / LangChain 的 thread_id
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    pub project: Option<String>,
     pub run_id: Option<String>,
     pub turn_id: Option<String>,
     pub environment: Option<String>,
@@ -430,9 +434,19 @@ async fn handle_ingest_trace(
     let raw_payload = serde_json::to_value(&payload)
         .unwrap_or_else(|_| serde_json::json!({}));
 
+    let session_id = payload
+        .session_id
+        .clone()
+        .or_else(|| payload.thread_id.clone())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing session_id or thread_id".to_string()))?;
+
+    if session_id.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "session_id cannot be empty".to_string()));
+    }
+
     let trace = TraceRecord {
         id: Uuid::new_v4().to_string(),
-        session_id: payload.session_id,
+        session_id,
         run_id: payload.run_id,
         turn_id: payload.turn_id,
         environment: payload.environment.unwrap_or_else(|| "default".to_string()),

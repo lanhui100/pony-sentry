@@ -1,7 +1,7 @@
 -- migrations/0003_add_traces.sql (SQLite)
 CREATE TABLE IF NOT EXISTS traces (
     id TEXT PRIMARY KEY NOT NULL,
-    session_id TEXT NOT NULL,
+    session_id TEXT NOT NULL UNIQUE,
     run_id TEXT,
     turn_id TEXT,
     environment TEXT NOT NULL,
