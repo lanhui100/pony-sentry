@@ -98,6 +98,13 @@ spec:
                 name: pony-sentry
                 port:
                   number: 3000
+          - path: /api/v1/traces
+            pathType: Prefix
+            backend:
+              service:
+                name: pony-sentry
+                port:
+                  number: 3000
           - path: /healthz
             pathType: Exact
             backend:
