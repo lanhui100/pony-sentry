@@ -1,7 +1,12 @@
 {
-  "wave": 3,
-  "branch": "wave-1-web-ux",
+  "wave": 4,
+  "branch": "wave-4-systemone-sentry-filter",
   "status": "completed",
-  "red_commit": "412b003",
-  "green_commit": "e546333"
+  "red_commit": "test-agent E0432 (red-phase-systemone-filter.txt)",
+  "green_commit": "ponyllm 8759dea + pony-sentry 4d33df8",
+  "tasks": {
+    "T1": "completed",
+    "T2": "completed",
+    "T3": "completed"
+  }
 }
