@@ -37,3 +37,26 @@ error: could not compile `ponyllm-server` (test "systemone_sentry_filter_tests")
 - 命令：cargo test -p ponyllm-server --test systemone_sentry_filter_tests（/home/dm/ponyllm）
 - 结果：test result: ok. 12 passed; 0 failed; 0 ignored（含 2 条路由级集成：429/文本兜底零 ingest + 干净 500 正控 1 ingest）；Exit Code = 0；耗时 1.61s。
 - 判定：红→绿闭环成立。验收测试即唯一裁决（T2 完成；T3 门禁"红相测试全绿"满足）。
+
+---
+
+## Red Phase (Phase 2): chat/completions + responses 路由闸门扩展（红相物理证据）
+Tester: test-agent | Date: 2026-10-12
+契约：v2 不变（pub fn should_report_sentry_exhaustion，OR 语义、5 文本标记）；目标块 chat.rs:1593-1615 / responses.rs:1151-1173 的 GatewayExhaustedError 上报。
+测试文件：/home/dm/ponyllm/crates/ponyllm-server/tests/chat_responses_sentry_filter_tests.rs（2 条路由级集成：chat 429 零上报 + 正控、responses 429 零上报 + 正控；注入接缝 = AppState::sentry 替换本地 mock ingest）。
+
+命令：cargo test -p ponyllm-server --test chat_responses_sentry_filter_tests（/home/dm/ponyllm）
+Exit Code = 101（cargo 原生失败码，非 0，红相成立）
+结果：test result: FAILED. 0 passed; 2 failed; 0 ignored
+
+失败断言（物理输出节选，两路由均命中"闸门缺失"红相锚点）：
+- chat_completions_quota_rate_limit_skips_sentry_report panicked at ...:183:5:
+  [chat] 429 限流/配额耗尽不得产生 Sentry 上报（should_report_sentry_exhaustion 闸门缺失=红相）
+- responses_route_quota_rate_limit_skips_sentry_report panicked at ...:221:5:
+  [responses] 429 限流/配额耗尽不得产生 Sentry 上报（should_report_sentry_exhaustion 闸门缺失=红相）
+
+解读：路由均到达耗尽路径（上游 429 → project_openai_error 429 断言先行通过），且 ingest 事件在 1.5s 窗口内到达
+（即当前实现确实在无条件上报配额类错误）→ 断言 `!wait_ingest_count(1)` 失败，红相成立。
+绿相判定：Executor 在 chat.rs 1597 行与 responses.rs 1155 行守卫并入
+`&& should_report_sentry_exhaustion(&last_kind, &last_error)`（保留既有 is_client_bad_request 过滤）后，
+本文件须 2/2 全绿（配额类 0 上报 + 正控 1 上报）。
