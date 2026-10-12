@@ -81,4 +81,5 @@ pub fn should_report_sentry_exhaustion(kind: &GatewayErrorKind, last_error: &str
 - 两个存量 jev issue（`c21a9e6c` / `69a0a24d`）将不再累积新事件；存量 issue 的处置（resolve 等）属 PonySentry UI 操作，不在本变更范围。
 - `GatewayEvent::RequestFailed` 指标、流日志、`retry-after` 响应头不受影响——只跳过 Sentry 错误上报。
 - 契约冻结于本 ADR；代码实现（systemone.rs 落地函数 + 闸门）由 Executor 在其写域完成，Test 以本契约冻结红相验收。
+- **扩展（2026-10-12 同日，用户决策）**：同一闸门 `should_report_sentry_exhaustion` 扩展到 `chat.rs`（v1/chat/completions）与 `responses.rs`（v1/responses）上报块——`if !is_client_bad_request && should_report_sentry_exhaustion(&last_kind, &last_error)` 守卫（保留 `is_client_bad_request` 下游 4xx 过滤）。动因：chat 路由同类上游配额/限流噪音复现（deepseek-v4-flash 429 等，此前 kimi/gemini 也已因同因被标 ignored）。函数经 `routes/mod.rs` `pub use systemone::*` 重导出，两文件以 `crate::routes::should_report_sentry_exhaustion` 限定路径引用，未新增 import。验收：`chat_responses_sentry_filter_tests` 2/2（红相 101 → 绿相 0）+ 回归 systemone 12/12、systemone_tests 全绿。
 - 文档家：错误上报规则的家是 `.agents/skills/ponysentry-instrumentation/SKILL.md`；本决策落地时应在其上报规则节补一行指向本 ADR（same-commit 纪律，随实现提交处理，靠 review 核验）。
