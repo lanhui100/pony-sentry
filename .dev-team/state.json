@@ -3,10 +3,11 @@
   "branch": "wave-4-systemone-sentry-filter",
   "status": "completed",
   "red_commit": "test-agent E0432 (red-phase-systemone-filter.txt)",
-  "green_commit": "ponyllm 8759dea + pony-sentry 4d33df8",
+  "green_commit": "ponyllm 5b67caf + bf259fa; pony-sentry 4d33df8 + 6fc0f46 + 055be29",
   "tasks": {
     "T1": "completed",
     "T2": "completed",
-    "T3": "completed"
+    "T3": "completed",
+    "T4": "completed (chat/responses route extension, user decision)"
   }
 }
