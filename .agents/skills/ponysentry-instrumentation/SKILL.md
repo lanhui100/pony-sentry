@@ -14,6 +14,7 @@ description: 何时用：用户开发应用时需要接入错误/崩溃埋点（
 - `crates/ingest/src/sanitizer.rs` —— 服务端零信任脱敏规则（客户端应先脱敏，服务端兜底）
 - `deploy/k3s/app.yaml` —— 上报端点与鉴权（`CLIENT_TOKEN` 配置时强制校验）
 - `references/` 下对应语言栈模板 + `references/api.md` 调试命令 + `references/checklist.md` 最佳实践清单
+- 错误上报规则决策（哪些错误不应上报）：`.agents/notes/implemented/process/2026-10-12-suppress-upstream-quota-errors-in-sentry.md`（上游配额/限流/无可用 key 类 `GatewayExhaustedError` 不上报的契约与闸门函数）
 
 ## 步骤
 

@@ -1,0 +1,39 @@
+# Red Phase: systemone Sentry 上报过滤闸门 验收测试（红相物理证据）
+Tester: test-agent (dev-team, 独立测试分权，验收测试唯一裁决方)
+Date: 2026-10-12
+Contract: ADR .agents/notes/implemented/process/2026-10-12-suppress-upstream-quota-errors-in-sentry.md（v2: pub fn）
+Target: should_report_sentry_exhaustion(kind: &GatewayErrorKind, last_error: &str) -> bool @ ponyllm_server::routes::systemone
+
+## 红相前置条件（保真）
+- Executor 实现已 stash：systemone.rs 回 HEAD（210-229 行无条件 capture_error，无 should_report_sentry_exhaustion 函数）。
+- 测试文件：/home/dm/ponyllm/crates/ponyllm-server/tests/systemone_sentry_filter_tests.rs（10 条纯函数用例 + 2 条路由级集成用例，无 skip、全真实断言）。
+- 预期：函数不存在 → 编译失败（E0432/E0425 类）即为有效红相。
+
+## 执行命令（工作目录 /home/dm/ponyllm）
+cargo test -p ponyllm-server --test systemone_sentry_filter_tests
+
+## 物理结果（机器原生 Exit Code）
+Exit Code = 101（cargo 编译失败原生退出码；非 0，红相成立）
+
+## 编译错误摘要（物理输出，stdout/stderr 原文节选）
+error[E0432]: unresolved import `ponyllm_server::routes::systemone::should_report_sentry_exhaustion`
+  --> crates/ponyllm-server/tests/systemone_sentry_filter_tests.rs:39:5
+   |
+39 | use ponyllm_server::routes::systemone::should_report_sentry_exhaustion;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `should_report_sentry_exhaustion` in `routes::systemone`
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `ponyllm-server` (test "systemone_sentry_filter_tests") due to 1 previous error
+
+## 结论
+红相锚定成立：验收测试引用的契约符号在业务代码中不存在，测试目标编译失败（E0432 unresolved import，Exit 101）。
+绿相判定：Executor 恢复实现（v2 契约：pub fn，212 行调用点闸门）后，本测试须编译通过且 12 条用例全绿；
+其中 2 条路由级集成用例要求"429/配额文本场景 0 条 ingest 事件 + 干净 500 正控 1 条 ingest 事件"（非真空）。
+
+---
+
+## 绿相复跑（同一测试文件，Executor 恢复实现后）
+- 实现恢复：systemone.rs 212 行 `if should_report_sentry_exhaustion(...)` 闸门 + 265 行 `pub fn`（v2 契约）。
+- 命令：cargo test -p ponyllm-server --test systemone_sentry_filter_tests（/home/dm/ponyllm）
+- 结果：test result: ok. 12 passed; 0 failed; 0 ignored（含 2 条路由级集成：429/文本兜底零 ingest + 干净 500 正控 1 ingest）；Exit Code = 0；耗时 1.61s。
+- 判定：红→绿闭环成立。验收测试即唯一裁决（T2 完成；T3 门禁"红相测试全绿"满足）。
