@@ -41,23 +41,6 @@ pub fn infer_project_name(
         return Some("ponyllm".to_string());
     }
 
-    // 3.2 若包含 Tauri IPC 交互指纹，推断归属客户端项目 "job_copilot"
-    if let Some(t) = tags {
-        let is_tauri_source = t.get("source").map(|s| s.contains("tauri")).unwrap_or(false);
-        let has_ipc_cmd = t.contains_key("command");
-        if (is_tauri_source || has_ipc_cmd) && (title_str.contains("IpcCommandError") || title_str.contains("ask_")) {
-            return Some("job_copilot".to_string());
-        }
-    }
-
-    if title_str.contains("IpcCommandError")
-        && (title_str.contains("ask_answer")
-            || title_str.contains("ask_cancel")
-            || title_str.contains("ask_list_pending"))
-    {
-        return Some("job_copilot".to_string());
-    }
-
     None
 }
 
@@ -204,13 +187,13 @@ mod tests {
     }
 
     #[test]
-    fn infers_project_from_tauri_command_heuristics() {
+    fn does_not_blindly_infer_project_from_tauri_or_ipc_without_explicit_project() {
         let mut tags = std::collections::HashMap::new();
         tags.insert("source".to_string(), "tauri_safe_invoke".to_string());
         tags.insert("command".to_string(), "ask_cancel".to_string());
         assert_eq!(
             infer_project_name(Some(&tags), None, Some("IpcCommandError: IPC command failed"), None),
-            Some("job_copilot".to_string())
+            None
         );
     }
 }

@@ -254,6 +254,6 @@ mod tests {
         });
 
         assert_eq!(out.culprit.as_deref(), Some("ipc in ask_answer"));
-        assert_eq!(out.project.as_deref(), Some("job_copilot"));
+        assert_eq!(out.project.as_deref(), None);
     }
 }

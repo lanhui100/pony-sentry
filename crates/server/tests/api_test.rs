@@ -649,7 +649,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     let issue_json: serde_json::Value = issue_detail.json();
     assert_eq!(issue_json["project"], "campus_collector");
 
-    // 2. 上报 Tauri IPC 错误（无 stacktrace，但有 command/source）
+    // 2. 上报 IPC 错误：遵循契约带 tags.project 与 command/source
     let ipc_payload = json!({
         "platform": "tauri",
         "environment": "dev",
@@ -661,6 +661,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
             "stacktrace": null
         },
         "tags": {
+            "project": "my_desktop_app",
             "source": "tauri_safe_invoke",
             "command": "ask_cancel"
         }
@@ -669,12 +670,41 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     ipc_resp.assert_status(StatusCode::OK);
     let ipc_json: serde_json::Value = ipc_resp.json();
     let ipc_issue_id = ipc_json["issue_id"].as_str().unwrap();
+    assert!(ipc_json.get("warnings").is_none() || ipc_json["warnings"].as_array().unwrap().is_empty());
 
     let ipc_issue_detail = server.get(&format!("/api/v1/issues/{}", ipc_issue_id)).await;
     ipc_issue_detail.assert_status(StatusCode::OK);
     let ipc_detail_json: serde_json::Value = ipc_issue_detail.json();
-    assert_eq!(ipc_detail_json["project"], "job_copilot");
+    assert_eq!(ipc_detail_json["project"], "my_desktop_app");
     assert_eq!(ipc_detail_json["culprit"], "tauri_safe_invoke in ask_cancel");
+
+    // 2.1 若上报仅有 IPC 错误但未带 project，服务端严禁盲猜，必须为 null 并返回 warning
+    let unprojected_ipc_payload = json!({
+        "platform": "tauri",
+        "environment": "dev",
+        "message": "IPC command \"ask_open\" failed",
+        "exception": {
+            "error_type": "IpcCommandError",
+            "value": "IPC command \"ask_open\" failed",
+            "stacktrace": null
+        },
+        "tags": {
+            "source": "tauri_safe_invoke",
+            "command": "ask_open"
+        }
+    });
+    let unproj_resp = server.post("/api/v1/ingest").json(&unprojected_ipc_payload).await;
+    unproj_resp.assert_status(StatusCode::OK);
+    let unproj_json: serde_json::Value = unproj_resp.json();
+    let unproj_warnings = unproj_json["warnings"].as_array().expect("warnings expected");
+    assert!(unproj_warnings.iter().any(|w| w.as_str().unwrap().contains("missing_project")));
+    assert!(!unproj_warnings.iter().any(|w| w.as_str().unwrap().contains("missing_culprit")));
+
+    let unproj_detail: serde_json::Value = server
+        .get(&format!("/api/v1/issues/{}", unproj_json["issue_id"].as_str().unwrap()))
+        .await
+        .json();
+    assert_eq!(unproj_detail["project"], serde_json::Value::Null);
 
     // 3. 上报无项目与无栈的事件，验证 warnings 反馈
     let bare_payload = json!({

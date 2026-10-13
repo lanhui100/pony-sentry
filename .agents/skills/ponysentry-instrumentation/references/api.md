@@ -53,10 +53,12 @@ echo "$RESP"
 
 ## 项目维度（project）与识别规则
 
-issue 的 `project` 字段通过以下优先级智能识别（`pony_sentry_ingest::infer_project_name`）：
-1. 优先读取 `tags.project` / `tags.service` / `tags.app`；
-2. 其次读取 `extra.project` / `extra.service` / `extra.project_path`（末段名称）；
-3. 错误指纹启发式推断（如网关错误推断为 `ponyllm`，Tauri IPC 错误推断为 `job_copilot`）。
+issue 的 `project` 字段通过以下优先级严格识别（`pony_sentry_ingest::infer_project_name`）：
+1. 优先读取 `tags.project` / `tags.service` / `tags.app` / `tags.application`；
+2. 其次读取 `extra.project` / `extra.service` / `extra.project_path`（工作区末段名称）；
+3. 网关项目特征兜底（仅限网关系统错误：`GatewayExhaustedError` 等推断为 `ponyllm`）。
+
+> **注意**：除网关专用错误外，服务端严禁根据异常类型或 IPC 盲猜项目名；所有业务应用接入必须显式提供 `tags.project` 或 `extra.project_path`，否则 issue 的 `project` 将为 `null` 并在上报响应中产生 `missing_project` 告警。
 
 ```bash
 # 筛选某项目的未解决缺陷
