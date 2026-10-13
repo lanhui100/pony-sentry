@@ -681,13 +681,13 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
-    // 1. 上报 tags.service: "campus_collector" 探针消息
+    // 1. 上报 tags.service: "campus_collector" 异常消息
     let probe_payload = json!({
         "platform": "python",
         "environment": "dev",
-        "message": "[TEST] Probe issue from campus_collector",
+        "message": "企业【测试企业】岗位【校园技术专家】门禁校验异常",
         "tags": {
-            "company": "test",
+            "company": "测试企业",
             "service": "campus_collector"
         }
     });
