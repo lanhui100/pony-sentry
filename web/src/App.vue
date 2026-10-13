@@ -81,8 +81,8 @@
             @keydown.space.prevent="filterStatus = 'attention'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-stone-700 bg-stone-900/90 hover:bg-stone-850 hover:border-stone-600 shadow-sm"
-            :class="{ 'ring-2 ring-stone-300 border-stone-500 bg-stone-800': filterStatus === 'attention' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-stone-900/95 hover:bg-stone-850 shadow-sm"
+            :class="{ 'ring-2 ring-stone-400 bg-stone-850': filterStatus === 'attention' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-stone-200">需关注</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -97,8 +97,8 @@
             @keydown.space.prevent="filterStatus = 'unresolved'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-rose-800/80 bg-rose-950/60 hover:bg-rose-950/90 hover:border-rose-700 shadow-sm"
-            :class="{ 'ring-2 ring-rose-400 border-rose-500 bg-rose-950': filterStatus === 'unresolved' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-rose-950/90 hover:bg-rose-950 shadow-sm"
+            :class="{ 'ring-2 ring-rose-400 bg-rose-950': filterStatus === 'unresolved' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-rose-200">待处理</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -113,8 +113,8 @@
             @keydown.space.prevent="filterStatus = 'in_progress'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-amber-800/80 bg-amber-950/60 hover:bg-amber-950/90 hover:border-amber-700 shadow-sm"
-            :class="{ 'ring-2 ring-amber-400 border-amber-500 bg-amber-950': filterStatus === 'in_progress' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-amber-950/90 hover:bg-amber-950 shadow-sm"
+            :class="{ 'ring-2 ring-amber-400 bg-amber-950': filterStatus === 'in_progress' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-amber-200">处理中</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -129,8 +129,8 @@
             @keydown.space.prevent="filterStatus = 'resolved'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-emerald-800/80 bg-emerald-950/60 hover:bg-emerald-950/90 hover:border-emerald-700 shadow-sm"
-            :class="{ 'ring-2 ring-emerald-400 border-emerald-500 bg-emerald-950': filterStatus === 'resolved' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-emerald-950/90 hover:bg-emerald-950 shadow-sm"
+            :class="{ 'ring-2 ring-emerald-400 bg-emerald-950': filterStatus === 'resolved' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-emerald-200">已解决</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -442,8 +442,8 @@
             @keydown.space.prevent="filterTraceStatus = 'unreviewed'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-amber-800/80 bg-amber-950/60 hover:bg-amber-950/90 hover:border-amber-700 shadow-sm"
-            :class="{ 'ring-2 ring-amber-400 border-amber-500 bg-amber-950': filterTraceStatus === 'unreviewed' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-amber-950/90 hover:bg-amber-950 shadow-sm"
+            :class="{ 'ring-2 ring-amber-400 bg-amber-950': filterTraceStatus === 'unreviewed' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-amber-200">待评估</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -458,8 +458,8 @@
             @keydown.space.prevent="filterTraceStatus = 'triage_good'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-emerald-800/80 bg-emerald-950/60 hover:bg-emerald-950/90 hover:border-emerald-700 shadow-sm"
-            :class="{ 'ring-2 ring-emerald-400 border-emerald-500 bg-emerald-950': filterTraceStatus === 'triage_good' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-emerald-950/90 hover:bg-emerald-950 shadow-sm"
+            :class="{ 'ring-2 ring-emerald-400 bg-emerald-950': filterTraceStatus === 'triage_good' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-emerald-200">标杆</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -474,8 +474,8 @@
             @keydown.space.prevent="filterTraceStatus = 'triage_bad'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-rose-800/80 bg-rose-950/60 hover:bg-rose-950/90 hover:border-rose-700 shadow-sm"
-            :class="{ 'ring-2 ring-rose-400 border-rose-500 bg-rose-950': filterTraceStatus === 'triage_bad' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-rose-950/90 hover:bg-rose-950 shadow-sm"
+            :class="{ 'ring-2 ring-rose-400 bg-rose-950': filterTraceStatus === 'triage_bad' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-rose-200">缺陷</div>
             <div class="mt-2 flex items-baseline justify-between">
@@ -490,8 +490,8 @@
             @keydown.space.prevent="filterTraceStatus = 'optimized'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all border-stone-700 bg-stone-900/90 hover:bg-stone-850 hover:border-stone-600 shadow-sm"
-            :class="{ 'ring-2 ring-stone-300 border-stone-500 bg-stone-800': filterTraceStatus === 'optimized' }"
+            class="p-3.5 cursor-pointer transition-all border-0 bg-stone-900/95 hover:bg-stone-850 shadow-sm"
+            :class="{ 'ring-2 ring-stone-400 bg-stone-850': filterTraceStatus === 'optimized' }"
           >
             <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-stone-200">已优化</div>
             <div class="mt-2 flex items-baseline justify-between">
