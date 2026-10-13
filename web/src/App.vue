@@ -81,13 +81,13 @@
             @keydown.space.prevent="filterStatus = 'attention'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-stone-400 border-stone-600 bg-stone-900/80': filterStatus === 'attention' }"
+            class="p-3.5 cursor-pointer transition-all border-stone-700 bg-stone-900/90 hover:bg-stone-850 hover:border-stone-600 shadow-sm"
+            :class="{ 'ring-2 ring-stone-300 border-stone-500 bg-stone-800': filterStatus === 'attention' }"
           >
-            <div class="text-[11px] font-mono uppercase text-stone-400">需关注</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-stone-200">需关注</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-stone-100">{{ attentionCount }}</span>
-              <span class="text-[11px] font-mono text-stone-500">待处理/处理中/复现</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ attentionCount }}</span>
+              <span class="text-[11px] font-mono text-stone-300">待处理/处理中/复现</span>
             </div>
           </Card>
 
@@ -97,13 +97,13 @@
             @keydown.space.prevent="filterStatus = 'unresolved'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-rose-500/60 border-rose-800/80 bg-rose-950/20': filterStatus === 'unresolved' }"
+            class="p-3.5 cursor-pointer transition-all border-rose-800/80 bg-rose-950/60 hover:bg-rose-950/90 hover:border-rose-700 shadow-sm"
+            :class="{ 'ring-2 ring-rose-400 border-rose-500 bg-rose-950': filterStatus === 'unresolved' }"
           >
-            <div class="text-[11px] font-mono uppercase text-rose-400">待处理</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-rose-200">待处理</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-rose-300">{{ unresolvedCount }}</span>
-              <span class="text-[11px] font-mono text-rose-400/80">Unresolved</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ unresolvedCount }}</span>
+              <span class="text-[11px] font-mono text-rose-300">Unresolved</span>
             </div>
           </Card>
 
@@ -113,13 +113,13 @@
             @keydown.space.prevent="filterStatus = 'in_progress'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-amber-500/60 border-amber-800/80 bg-amber-950/20': filterStatus === 'in_progress' }"
+            class="p-3.5 cursor-pointer transition-all border-amber-800/80 bg-amber-950/60 hover:bg-amber-950/90 hover:border-amber-700 shadow-sm"
+            :class="{ 'ring-2 ring-amber-400 border-amber-500 bg-amber-950': filterStatus === 'in_progress' }"
           >
-            <div class="text-[11px] font-mono uppercase text-amber-400">处理中</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-amber-200">处理中</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-amber-300">{{ inProgressCount }}</span>
-              <span class="text-[11px] font-mono text-amber-400/80">In Progress</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ inProgressCount }}</span>
+              <span class="text-[11px] font-mono text-amber-300">In Progress</span>
             </div>
           </Card>
 
@@ -129,13 +129,13 @@
             @keydown.space.prevent="filterStatus = 'resolved'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-emerald-500/60 border-emerald-800/80 bg-emerald-950/20': filterStatus === 'resolved' }"
+            class="p-3.5 cursor-pointer transition-all border-emerald-800/80 bg-emerald-950/60 hover:bg-emerald-950/90 hover:border-emerald-700 shadow-sm"
+            :class="{ 'ring-2 ring-emerald-400 border-emerald-500 bg-emerald-950': filterStatus === 'resolved' }"
           >
-            <div class="text-[11px] font-mono uppercase text-emerald-400">已解决</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-emerald-200">已解决</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-emerald-300">{{ resolvedCount }}</span>
-              <span class="text-[11px] font-mono text-emerald-400/80">Resolved</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ resolvedCount }}</span>
+              <span class="text-[11px] font-mono text-emerald-300">Resolved</span>
             </div>
           </Card>
         </div>
@@ -442,13 +442,13 @@
             @keydown.space.prevent="filterTraceStatus = 'unreviewed'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-amber-500/60 border-amber-800/80 bg-amber-950/20': filterTraceStatus === 'unreviewed' }"
+            class="p-3.5 cursor-pointer transition-all border-amber-800/80 bg-amber-950/60 hover:bg-amber-950/90 hover:border-amber-700 shadow-sm"
+            :class="{ 'ring-2 ring-amber-400 border-amber-500 bg-amber-950': filterTraceStatus === 'unreviewed' }"
           >
-            <div class="text-[11px] font-mono uppercase text-amber-400">待评估</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-amber-200">待评估</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-amber-300">{{ traceUnreviewedCount }}</span>
-              <span class="text-[11px] font-mono text-amber-400/80">Unreviewed</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ traceUnreviewedCount }}</span>
+              <span class="text-[11px] font-mono text-amber-300">Unreviewed</span>
             </div>
           </Card>
 
@@ -458,13 +458,13 @@
             @keydown.space.prevent="filterTraceStatus = 'triage_good'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-emerald-500/60 border-emerald-800/80 bg-emerald-950/20': filterTraceStatus === 'triage_good' }"
+            class="p-3.5 cursor-pointer transition-all border-emerald-800/80 bg-emerald-950/60 hover:bg-emerald-950/90 hover:border-emerald-700 shadow-sm"
+            :class="{ 'ring-2 ring-emerald-400 border-emerald-500 bg-emerald-950': filterTraceStatus === 'triage_good' }"
           >
-            <div class="text-[11px] font-mono uppercase text-emerald-400">标杆</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-emerald-200">标杆</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-emerald-300">{{ traceGoodCount }}</span>
-              <span class="text-[11px] font-mono text-emerald-400/80">Good</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ traceGoodCount }}</span>
+              <span class="text-[11px] font-mono text-emerald-300">Good</span>
             </div>
           </Card>
 
@@ -474,13 +474,13 @@
             @keydown.space.prevent="filterTraceStatus = 'triage_bad'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-rose-500/60 border-rose-800/80 bg-rose-950/20': filterTraceStatus === 'triage_bad' }"
+            class="p-3.5 cursor-pointer transition-all border-rose-800/80 bg-rose-950/60 hover:bg-rose-950/90 hover:border-rose-700 shadow-sm"
+            :class="{ 'ring-2 ring-rose-400 border-rose-500 bg-rose-950': filterTraceStatus === 'triage_bad' }"
           >
-            <div class="text-[11px] font-mono uppercase text-rose-400">缺陷</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-rose-200">缺陷</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-rose-300">{{ traceBadCount }}</span>
-              <span class="text-[11px] font-mono text-rose-400/80">Bad</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ traceBadCount }}</span>
+              <span class="text-[11px] font-mono text-rose-300">Bad</span>
             </div>
           </Card>
 
@@ -490,13 +490,13 @@
             @keydown.space.prevent="filterTraceStatus = 'optimized'"
             tabindex="0"
             role="button"
-            class="p-3.5 cursor-pointer transition-all hover:border-stone-700"
-            :class="{ 'ring-1 ring-stone-400 border-stone-600 bg-stone-900/80': filterTraceStatus === 'optimized' }"
+            class="p-3.5 cursor-pointer transition-all border-stone-700 bg-stone-900/90 hover:bg-stone-850 hover:border-stone-600 shadow-sm"
+            :class="{ 'ring-2 ring-stone-300 border-stone-500 bg-stone-800': filterTraceStatus === 'optimized' }"
           >
-            <div class="text-[11px] font-mono uppercase text-stone-400">已优化</div>
+            <div class="text-[11px] font-mono uppercase tracking-wider font-semibold text-stone-200">已优化</div>
             <div class="mt-2 flex items-baseline justify-between">
-              <span class="text-2xl font-mono font-medium text-stone-100">{{ traceOptimizedCount }}</span>
-              <span class="text-[11px] font-mono text-stone-500">Optimized</span>
+              <span class="text-2xl font-mono font-bold text-white tracking-tight">{{ traceOptimizedCount }}</span>
+              <span class="text-[11px] font-mono text-stone-300">Optimized</span>
             </div>
           </Card>
         </div>
