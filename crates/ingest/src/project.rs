@@ -10,27 +10,28 @@ pub fn infer_project_name(
     title: Option<&str>,
     culprit: Option<&str>,
 ) -> Option<String> {
-    // 1. 优先读取 tags.project
+    // 1. 优先读取 tags.project / tags.service / tags.app / tags.application
     if let Some(t) = tags {
-        if let Some(p) = t.get("project") {
-            let trimmed = p.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+        for key in &["project", "service", "app", "application"] {
+            if let Some(p) = t.get(*key) {
+                let trimmed = p.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
     }
 
-    // 2. 其次从 extra 中读取显式 project / project_name / project_path
+    // 2. 其次从 extra 中读取显式 project / project_name / service / app / project_path
     if let Some(p) = project_name_from_extra(extra) {
         return Some(p);
     }
 
     // 3. 基于错误特征指纹推导项目：
-    // 若标题或 culprit 包含明显网关特征（GatewayExhaustedError, AuthInvalid, GatewayConnectionError）
-    // 且带 /v1/chat/completions 或 /v1/models 路由，则归属于网关项目 "ponyllm"
     let title_str = title.unwrap_or("");
     let culprit_str = culprit.unwrap_or("");
 
+    // 3.1 若标题或 culprit 包含明显网关特征，则归属于网关项目 "ponyllm"
     if title_str.contains("GatewayExhaustedError")
         || title_str.contains("GatewayConnectionError")
         || title_str.contains("StreamFailureError")
@@ -38,6 +39,23 @@ pub fn infer_project_name(
         || culprit_str.contains("ponyllm")
     {
         return Some("ponyllm".to_string());
+    }
+
+    // 3.2 若包含 Tauri IPC 交互指纹，推断归属客户端项目 "job_copilot"
+    if let Some(t) = tags {
+        let is_tauri_source = t.get("source").map(|s| s.contains("tauri")).unwrap_or(false);
+        let has_ipc_cmd = t.contains_key("command");
+        if (is_tauri_source || has_ipc_cmd) && (title_str.contains("IpcCommandError") || title_str.contains("ask_")) {
+            return Some("job_copilot".to_string());
+        }
+    }
+
+    if title_str.contains("IpcCommandError")
+        && (title_str.contains("ask_answer")
+            || title_str.contains("ask_cancel")
+            || title_str.contains("ask_list_pending"))
+    {
+        return Some("job_copilot".to_string());
     }
 
     None
@@ -53,16 +71,14 @@ pub fn infer_project_name(
 /// 返回 `None` 的情形：未注入 `extra.project_path`、值非字符串、或末段为空
 /// （例如工作区就是根目录 `/`）。
 pub fn project_name_from_extra(extra: Option<&Value>) -> Option<String> {
-    // 1. 优先读取显式 project / project_name
+    // 1. 优先读取显式 project / project_name / service / app
     if let Some(extra_val) = extra {
-        if let Some(p) = extra_val
-            .get("project")
-            .or_else(|| extra_val.get("project_name"))
-            .and_then(|v| v.as_str())
-        {
-            let trimmed = p.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+        for key in &["project", "project_name", "service", "app", "application"] {
+            if let Some(p) = extra_val.get(*key).and_then(|v| v.as_str()) {
+                let trimmed = p.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
     }
@@ -161,6 +177,40 @@ mod tests {
         assert_eq!(
             infer_project_name(None, None, Some("StreamFailureError: upstream transport error"), None),
             Some("ponyllm".to_string())
+        );
+    }
+
+    #[test]
+    fn infers_project_from_service_or_app_synonyms() {
+        let mut tags_service = std::collections::HashMap::new();
+        tags_service.insert("service".to_string(), "campus_collector".to_string());
+        assert_eq!(
+            infer_project_name(Some(&tags_service), None, None, None),
+            Some("campus_collector".to_string())
+        );
+
+        let mut tags_app = std::collections::HashMap::new();
+        tags_app.insert("app".to_string(), "desktop_client".to_string());
+        assert_eq!(
+            infer_project_name(Some(&tags_app), None, None, None),
+            Some("desktop_client".to_string())
+        );
+
+        let extra_service = json!({ "service": "billing_svc" });
+        assert_eq!(
+            infer_project_name(None, Some(&extra_service), None, None),
+            Some("billing_svc".to_string())
+        );
+    }
+
+    #[test]
+    fn infers_project_from_tauri_command_heuristics() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("source".to_string(), "tauri_safe_invoke".to_string());
+        tags.insert("command".to_string(), "ask_cancel".to_string());
+        assert_eq!(
+            infer_project_name(Some(&tags), None, Some("IpcCommandError: IPC command failed"), None),
+            Some("job_copilot".to_string())
         );
     }
 }

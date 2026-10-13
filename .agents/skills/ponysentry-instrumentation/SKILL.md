@@ -35,7 +35,8 @@ description: 何时用：用户开发应用时需要接入错误/崩溃埋点（
 3. **生成埋点接入代码**：按对应 `references/<lang>.md` 模板生成，必须包含（Sentry 最佳实践）：
    - **全局错误捕获**：Rust panic hook / Tauri `std::panic` + window error / Vue `errorHandler` + `unhandledrejection` / FastAPI 异常中间件；
    - **结构化 payload**：`platform`、`release`、`environment`、`exception`（error_type + value + stacktrace）；
-   - **定位工作区（重要）**：必须在 `extra` 中注入 `project_path`（例如 Node/Python/Rust 服务端取当前工作区绝对路径 `process.cwd()` / `os.getcwd()` / `std::env::current_dir()`；前端取项目根目录或部署约定的工作区标识），确保服务端触发 Webhook 调度 DSH Headless 时，能精准在对应工作区拉起修复会话；
+   - **项目显式归属（强制门禁）**：必须注入 `tags.project`（或 `tags.service`）以及在 `extra` 中注入 `project_path`（Node/Python/Rust 服务端取 `process.cwd()` / `os.getcwd()` / `std::env::current_dir()`；前端取约定项目名），杜绝服务端落库为 `project: null`；
+   - **出错栈或合成栈（强制门禁）**：必须提取堆栈填入 `stacktrace.frames`（filename + function）。对于 IPC 或无物理调用栈的错误（如 `IpcCommandError`），必须在 `tags` 注入 `command` 与 `source`（如 `tags: { "source": "tauri_safe_invoke", "command": "<cmd>" }`），确保服务端能合成 Culprit；
    - **breadcrumbs**：关键用户操作 / HTTP 请求 / 路由导航 / 数据库操作，`category` + `message` + `data`；
    - **user context**（可选，脱敏后）：仅存 id/role，禁止 username/email/password 等 PII；
    - **release 标记**：必须与部署版本一致（回归检测依赖该字段）；
@@ -45,7 +46,10 @@ description: 何时用：用户开发应用时需要接入错误/崩溃埋点（
    - 上报前替换 message/exception/extra/breadcrumbs 中的 Token、密码、私钥、绝对路径用户名；
    - 若目标端已有统一脱敏 util，优先复用；否则用 `references/checklist.md` 的脱敏规则内联实现。
 
-5. **本地验证（机械）**：用 `references/api.md` 中的 curl 命令模拟一次上报，确认 HTTP 200 且响应含 `fingerprint`/`issue_id`；检查响应 `status` 与 `count` 符合预期。
+5. **本地验证与契约门禁（机械硬门禁）**：用 `references/api.md` 中的 curl 命令模拟一次上报：
+   - 确认 HTTP 200 且响应含 `fingerprint`/`issue_id`；
+   - **检查响应 warnings 数组**：必须不存在或为空，若含 `missing_project` 或 `missing_culprit` 则判定接入失败打回修复；
+   - 验证 `GET /api/v1/issues/<issue_id>`，断言返回的 `project` 与 `culprit` 字段均非空。
 
 6. **debug 查看（机械）**：用 `references/api.md` 的查询命令：
    - 按 platform/status/release 列出 issues；

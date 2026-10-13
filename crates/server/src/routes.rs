@@ -62,6 +62,8 @@ pub struct IngestResponse {
     pub fingerprint: String,
     pub status: IssueStatus,
     pub count: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +247,15 @@ async fn handle_ingest(
     let issue = res.issue;
     let event = res.event;
 
+    // 检查是否有契约缺陷告警
+    let mut warnings = Vec::new();
+    if issue.project.is_none() {
+        warnings.push("missing_project: please supply tags.project, tags.service, or extra.project_path".to_string());
+    }
+    if issue.culprit.is_none() {
+        warnings.push("missing_culprit: exception stacktrace or tags.command/source is absent".to_string());
+    }
+
     // 5. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
     if res.is_new || res.is_regression_trigger {
         if let Some(ref webhook_url) = state.webhook_url {
@@ -299,6 +310,7 @@ async fn handle_ingest(
         fingerprint,
         status: issue.status,
         count: issue.count,
+        warnings,
     }))
 }
 

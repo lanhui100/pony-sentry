@@ -613,3 +613,78 @@ async fn test_traces_large_payload_limit_2mb() {
     let created: serde_json::Value = resp.json();
     assert_eq!(created["session_id"], "sess-large-2mb-01");
 }
+
+#[tokio::test]
+async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 1. 上报 tags.service: "campus_collector" 探针消息
+    let probe_payload = json!({
+        "platform": "python",
+        "environment": "dev",
+        "message": "[TEST] Probe issue from campus_collector",
+        "tags": {
+            "company": "test",
+            "service": "campus_collector"
+        }
+    });
+    let probe_resp = server.post("/api/v1/ingest").json(&probe_payload).await;
+    probe_resp.assert_status(StatusCode::OK);
+    let probe_json: serde_json::Value = probe_resp.json();
+    let probe_issue_id = probe_json["issue_id"].as_str().unwrap();
+
+    let issue_detail = server.get(&format!("/api/v1/issues/{}", probe_issue_id)).await;
+    issue_detail.assert_status(StatusCode::OK);
+    let issue_json: serde_json::Value = issue_detail.json();
+    assert_eq!(issue_json["project"], "campus_collector");
+
+    // 2. 上报 Tauri IPC 错误（无 stacktrace，但有 command/source）
+    let ipc_payload = json!({
+        "platform": "tauri",
+        "environment": "dev",
+        "release": "0.1.136",
+        "message": "IPC command \"ask_cancel\" failed: control request cannot be consumed",
+        "exception": {
+            "error_type": "IpcCommandError",
+            "value": "IPC command \"ask_cancel\" failed: control request cannot be consumed",
+            "stacktrace": null
+        },
+        "tags": {
+            "source": "tauri_safe_invoke",
+            "command": "ask_cancel"
+        }
+    });
+    let ipc_resp = server.post("/api/v1/ingest").json(&ipc_payload).await;
+    ipc_resp.assert_status(StatusCode::OK);
+    let ipc_json: serde_json::Value = ipc_resp.json();
+    let ipc_issue_id = ipc_json["issue_id"].as_str().unwrap();
+
+    let ipc_issue_detail = server.get(&format!("/api/v1/issues/{}", ipc_issue_id)).await;
+    ipc_issue_detail.assert_status(StatusCode::OK);
+    let ipc_detail_json: serde_json::Value = ipc_issue_detail.json();
+    assert_eq!(ipc_detail_json["project"], "job_copilot");
+    assert_eq!(ipc_detail_json["culprit"], "tauri_safe_invoke in ask_cancel");
+
+    // 3. 上报无项目与无栈的事件，验证 warnings 反馈
+    let bare_payload = json!({
+        "platform": "other",
+        "message": "Something generic broke"
+    });
+    let bare_resp = server.post("/api/v1/ingest").json(&bare_payload).await;
+    bare_resp.assert_status(StatusCode::OK);
+    let bare_json: serde_json::Value = bare_resp.json();
+    let warnings = bare_json["warnings"].as_array().expect("warnings should be present");
+    assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("missing_project")));
+    assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("missing_culprit")));
+}

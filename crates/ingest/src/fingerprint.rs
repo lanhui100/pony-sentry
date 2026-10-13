@@ -8,8 +8,8 @@ use pony_sentry_fingerprint::FingerprintEngine;
 /// 都调用本函数，保证两套路径产出的指纹完全一致，避免“重索引后新事件
 /// 落不进正确 issue”的二次漂移。
 pub fn compute_issue_fingerprint(event: &RawEvent) -> FingerprintOut {
-    // 1. 提取核心信息：error_type / culprit（栈顶帧）/ title
-    let (error_type, culprit, title) = if let Some(ref ex) = event.exception {
+    // 1. 提取核心信息：error_type / culprit（栈顶帧或兜底）/ title
+    let (error_type, mut culprit, title) = if let Some(ref ex) = event.exception {
         let cul = ex.stacktrace.as_ref().and_then(|frames| {
             frames
                 .first()
@@ -35,6 +35,11 @@ pub fn compute_issue_fingerprint(event: &RawEvent) -> FingerprintOut {
                 .unwrap_or_else(|| "Unknown error".to_string()),
         )
     };
+
+    // 1.1 若 stacktrace 缺失，尝试从 tags / extra / title 智能推导兜底 culprit
+    if culprit.is_none() {
+        culprit = extract_fallback_culprit(event, &title);
+    }
 
     // 2. error_kind / model 判别器：无条件提取（不再受 culprit 有无影响）
     let error_kind = event
@@ -78,6 +83,44 @@ pub fn compute_issue_fingerprint(event: &RawEvent) -> FingerprintOut {
         platform: event.platform.clone(),
         project,
     }
+}
+
+/// 当缺乏原生 stacktrace 时，从 tags、extra 或 title 提取位置指纹（如 command/route/module）作为兜底 culprit。
+fn extract_fallback_culprit(event: &RawEvent, title: &str) -> Option<String> {
+    // 1. 从 tags 读取
+    if let Some(ref t) = event.tags {
+        let cmd = t.get("command").or_else(|| t.get("cmd"));
+        let source = t.get("source").or_else(|| t.get("module")).or_else(|| t.get("caller"));
+        match (source, cmd) {
+            (Some(s), Some(c)) => return Some(format!("{} in {}", s, c)),
+            (None, Some(c)) => return Some(c.clone()),
+            (Some(s), None) => return Some(s.clone()),
+            _ => {}
+        }
+        if let Some(route) = t.get("route").or_else(|| t.get("endpoint")) {
+            return Some(route.clone());
+        }
+    }
+
+    // 2. 从 extra 读取
+    if let Some(ref extra) = event.extra {
+        if let Some(cmd) = extra.get("command").and_then(|v| v.as_str()) {
+            return Some(cmd.to_string());
+        }
+    }
+
+    // 3. 从 title / message 启发式提取 IPC command: `IPC command "xyz"`
+    if let Some(start) = title.find("IPC command \"") {
+        let remainder = &title[start + "IPC command \"".len()..];
+        if let Some(end) = remainder.find('"') {
+            let cmd_name = &remainder[..end];
+            if !cmd_name.is_empty() {
+                return Some(format!("ipc in {}", cmd_name));
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -167,5 +210,50 @@ mod tests {
         assert_eq!(out.title, "ReferenceError: boom");
         assert_eq!(out.culprit.as_deref(), Some("src/main.ts in render"));
         assert_eq!(out.project.as_deref(), Some("blog-web"));
+    }
+
+    #[test]
+    fn synthesizes_culprit_from_command_or_endpoint_when_stacktrace_absent() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("source".to_string(), "tauri_safe_invoke".to_string());
+        tags.insert("command".to_string(), "ask_cancel".to_string());
+
+        let out = compute_issue_fingerprint(&RawEvent {
+            platform: "tauri".to_string(),
+            release: None,
+            environment: None,
+            message: None,
+            exception: Some(Exception {
+                error_type: "IpcCommandError".to_string(),
+                value: Some("command failed".to_string()),
+                stacktrace: None,
+            }),
+            tags: Some(tags),
+            extra: None,
+            breadcrumbs: None,
+        });
+
+        assert_eq!(out.culprit.as_deref(), Some("tauri_safe_invoke in ask_cancel"));
+    }
+
+    #[test]
+    fn synthesizes_culprit_from_title_when_no_tags_available() {
+        let out = compute_issue_fingerprint(&RawEvent {
+            platform: "rust".to_string(),
+            release: None,
+            environment: None,
+            message: None,
+            exception: Some(Exception {
+                error_type: "IpcCommandError".to_string(),
+                value: Some("IPC command \"ask_answer\" failed: control request cannot be consumed".to_string()),
+                stacktrace: None,
+            }),
+            tags: None,
+            extra: None,
+            breadcrumbs: None,
+        });
+
+        assert_eq!(out.culprit.as_deref(), Some("ipc in ask_answer"));
+        assert_eq!(out.project.as_deref(), Some("job_copilot"));
     }
 }

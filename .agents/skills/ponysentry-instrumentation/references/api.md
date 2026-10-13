@@ -23,7 +23,7 @@
 BASE="https://sentry.ponyjob.top"
 TOKEN="$PONYSENTRY_CLIENT_TOKEN"   # 已配置才需要
 
-curl -s -X POST "$BASE/api/v1/ingest" \
+RESP=$(curl -s -X POST "$BASE/api/v1/ingest" \
   -H "Content-Type: application/json" \
   -H "X-Client-Token: $TOKEN" \
   -d '{
@@ -31,6 +31,7 @@ curl -s -X POST "$BASE/api/v1/ingest" \
     "release": "v1.2.0",
     "environment": "production",
     "message": "panic occurred at worker::run",
+    "tags": {"project": "shop-web"},
     "exception": {
       "error_type": "Panic",
       "value": "index out of bounds",
@@ -40,24 +41,22 @@ curl -s -X POST "$BASE/api/v1/ingest" \
     },
     "extra": {"project_path": "/home/dev/shop-web", "user": {"access_token": "leak_test_123"}},
     "breadcrumbs": [{"category": "http", "message": "POST /api/v1/jobs", "data": {}}]
-  }'
+  }')
+echo "$RESP"
 # 期望：{"issue_id":"...","event_id":"...","fingerprint":"...","status":"unresolved","count":1}
-# 注意：extra.user.access_token 应被服务端脱敏为 [REDACTED_SECRET]（抽查验证）
-# 注意：extra.project_path 末段会成为 issue.project（此处为 shop-web），用于 Web 端项目筛选
+# 契约门禁：响应不得含有 "warnings"（或 warnings 为空）
+# 抽查 issue 详情，断言 project 和 culprit 均非空：
+# ISSUE_ID=$(echo "$RESP" | jq -r .issue_id)
+# curl -s -H "X-Client-Token: $TOKEN" "$BASE/api/v1/issues/$ISSUE_ID" | jq '{project, culprit}'
+# 期望：project == "shop-web", culprit != null
 ```
 
-## 项目维度（project）
+## 项目维度（project）与识别规则
 
-issue 的 `project` 字段由上报事件 `extra.project_path` 的**末段**推导（`pony_sentry_ingest::project_name_from_extra`）：
-`{"extra": {"project_path": "/home/dev/shop-web"}}` → `issue.project == "shop-web"`。
-
-要点：
-
-- 取末段而非整条路径——脱敏管道会把用户目录前缀替换为 `[USER_HOME]`（前缀本就不可读），
-  末段（项目目录名）在脱敏后完整保留，故项目名是唯一稳定可用的展示与筛选键。
-- 一个 issue 的 `project` **以首报为准**，后续同指纹上报不改写它（指纹/标题/出错位置都诞生于首报工作区）。
-- 未注入 `extra.project_path` 的事件 `project` 为 `null`，不进入 `/api/v1/projects` 候选集。
-- `path` 不是契约键：只有 `project_path` 生效。
+issue 的 `project` 字段通过以下优先级智能识别（`pony_sentry_ingest::infer_project_name`）：
+1. 优先读取 `tags.project` / `tags.service` / `tags.app`；
+2. 其次读取 `extra.project` / `extra.service` / `extra.project_path`（末段名称）；
+3. 错误指纹启发式推断（如网关错误推断为 `ponyllm`，Tauri IPC 错误推断为 `job_copilot`）。
 
 ```bash
 # 筛选某项目的未解决缺陷

@@ -46,6 +46,12 @@
 - [ ] **G2 认领与解决**：Agent 用 `PATCH /api/v1/issues/{id}` 完成 `in_progress → resolved` 闭环。
 - [ ] **G3 回归感知**：`resolved` 后新版本再触发 → `regression` 自动重开（验收此行为）。
 
+## H. 项目归属与出错栈契约硬门禁（Project & Culprit Gate）
+
+- [ ] **H1 明确项目归属**：必须注入 `tags.project`（或 `tags.service`）与 `extra.project_path`，服务端 issue 详情中的 `project` 绝对不能为 `null`。
+- [ ] **H2 栈位置与合成栈**：异常上报必须提供结构化栈帧 `stacktrace.frames`；对于 IPC 或跨进程调用等无原生栈环境，必须在 `tags` 注入 `command` 与 `source`，严禁服务端 `culprit` 为 `null`。
+- [ ] **H3 零 Warning 物理验收门禁**：上报响应中 `warnings` 必须为空，严禁忽略 `missing_project` / `missing_culprit` 警告。
+
 ## 校准样例
 
 - 正例：接入后 curl 上报 200、`status: unresolved`、`count: 1`，再次上报 `count: 2` → 去重生效。
