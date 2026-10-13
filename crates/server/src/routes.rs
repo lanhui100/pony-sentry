@@ -250,10 +250,15 @@ async fn handle_ingest(
     // 检查是否有契约缺陷告警
     let mut warnings = Vec::new();
     if issue.project.is_none() {
-        warnings.push("missing_project: please supply tags.project, tags.service, or extra.project_path".to_string());
+        warnings.push(
+            "missing_project: please supply tags.project, tags.service, or extra.project_path"
+                .to_string(),
+        );
     }
     if issue.culprit.is_none() {
-        warnings.push("missing_culprit: exception stacktrace or tags.command/source is absent".to_string());
+        warnings.push(
+            "missing_culprit: exception stacktrace or tags.command/source is absent".to_string(),
+        );
     }
 
     // 5. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
@@ -443,21 +448,20 @@ async fn handle_ingest_trace(
         }
     }
 
-    let trace_repo = state
-        .trace_repo
-        .as_ref()
-        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+    let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Trace repository not configured".into(),
+        )
+    })?;
 
     let now = chrono::Utc::now();
     let reported_at = payload
         .reported_at_ms
-        .and_then(|ms| {
-            chrono::DateTime::from_timestamp_millis(ms as i64)
-        })
+        .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
         .unwrap_or(now);
 
-    let raw_payload = serde_json::to_value(&payload)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let raw_payload = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
 
     // 服务端二次脱敏：客户端 SDK 已脱敏一次，入库前按同一管道再扫一遍，
     // 防止绕过客户端的敏感字段（token/secret/password 等）落库。
@@ -467,10 +471,18 @@ async fn handle_ingest_trace(
         .session_id
         .clone()
         .or_else(|| payload.thread_id.clone())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing session_id or thread_id".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing session_id or thread_id".to_string(),
+            )
+        })?;
 
     if session_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "session_id cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "session_id cannot be empty".to_string(),
+        ));
     }
 
     let trace = TraceRecord {
@@ -503,13 +515,18 @@ async fn handle_list_traces(
     State(state): State<AppState>,
     Query(query): Query<TraceQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let trace_repo = state
-        .trace_repo
-        .as_ref()
-        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+    let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Trace repository not configured".into(),
+        )
+    })?;
 
     let eval_status = match query.eval_status {
-        Some(s) => Some(s.parse::<EvalStatus>().map_err(|e| (StatusCode::BAD_REQUEST, e))?),
+        Some(s) => Some(
+            s.parse::<EvalStatus>()
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        ),
         None => None,
     };
 
@@ -535,10 +552,12 @@ async fn handle_get_trace(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let trace_repo = state
-        .trace_repo
-        .as_ref()
-        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+    let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Trace repository not configured".into(),
+        )
+    })?;
 
     let trace = trace_repo.get_trace(&id).await.map_err(|e| match e {
         pony_sentry_core::RepositoryError::TraceNotFound(_)
@@ -556,10 +575,12 @@ async fn handle_update_trace(
     Path(id): Path<String>,
     Json(body): Json<UpdateTraceRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let trace_repo = state
-        .trace_repo
-        .as_ref()
-        .ok_or_else(|| (StatusCode::NOT_IMPLEMENTED, "Trace repository not configured".into()))?;
+    let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Trace repository not configured".into(),
+        )
+    })?;
 
     let updated = trace_repo
         .update_trace_eval_status(&id, body.eval_status)

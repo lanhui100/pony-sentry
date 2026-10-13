@@ -1,4 +1,6 @@
-use pony_sentry_core::{create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository};
+use pony_sentry_core::{
+    create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository,
+};
 use pony_sentry_server::{create_app_with_state, AppState};
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;

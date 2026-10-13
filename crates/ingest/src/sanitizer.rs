@@ -140,7 +140,10 @@ impl SanitizationPipeline {
     fn is_sensitive_key(key: &str) -> bool {
         let lower = key.to_ascii_lowercase();
         // 计量与度量指标白名单（LLM tokens 计量字段严禁误当作鉴权 token 脱敏）
-        if lower.ends_with("tokens") || lower.contains("token_count") || lower.contains("tokencount") {
+        if lower.ends_with("tokens")
+            || lower.contains("token_count")
+            || lower.contains("tokencount")
+        {
             return false;
         }
 

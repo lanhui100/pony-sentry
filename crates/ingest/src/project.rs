@@ -158,7 +158,12 @@ mod tests {
     #[test]
     fn infers_ponyllm_from_stream_failure_error() {
         assert_eq!(
-            infer_project_name(None, None, Some("StreamFailureError: upstream transport error"), None),
+            infer_project_name(
+                None,
+                None,
+                Some("StreamFailureError: upstream transport error"),
+                None
+            ),
             Some("ponyllm".to_string())
         );
     }
@@ -192,7 +197,12 @@ mod tests {
         tags.insert("source".to_string(), "tauri_safe_invoke".to_string());
         tags.insert("command".to_string(), "ask_cancel".to_string());
         assert_eq!(
-            infer_project_name(Some(&tags), None, Some("IpcCommandError: IPC command failed"), None),
+            infer_project_name(
+                Some(&tags),
+                None,
+                Some("IpcCommandError: IPC command failed"),
+                None
+            ),
             None
         );
     }

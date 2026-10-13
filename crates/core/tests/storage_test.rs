@@ -92,7 +92,10 @@ async fn test_issue_lifecycle_and_regression_flow() {
 
     let regressed = res3.issue;
     assert!(!res3.is_new);
-    assert!(res3.is_regression_trigger, "初次回归必须触发 is_regression_trigger");
+    assert!(
+        res3.is_regression_trigger,
+        "初次回归必须触发 is_regression_trigger"
+    );
     assert_eq!(regressed.status, IssueStatus::Regression);
     assert_eq!(regressed.count, 3);
     assert_eq!(regressed.last_release.as_deref(), Some("v1.0.1"));
@@ -112,7 +115,10 @@ async fn test_issue_lifecycle_and_regression_flow() {
         .await
         .expect("Follow-up report in regression should succeed");
     assert!(!res4.is_new);
-    assert!(!res4.is_regression_trigger, "已在回归状态的后续事件不得再次触发 regression 跃迁");
+    assert!(
+        !res4.is_regression_trigger,
+        "已在回归状态的后续事件不得再次触发 regression 跃迁"
+    );
     assert_eq!(res4.issue.count, 4);
 
     // 5. 过滤查询

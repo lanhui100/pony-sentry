@@ -13,7 +13,7 @@ cargo check --workspace
 
 # 2. 全量回归测试
 echo "--> Running workspace tests..."
-cargo test --workspace
+cargo test --workspace --jobs 2
 
 # 3. ponygo 治理状态检查
 echo "--> Verifying ponygo governance status..."

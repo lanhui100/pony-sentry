@@ -25,7 +25,9 @@ impl PgIssueRepository {
         let migration_sql = include_str!("../../../migrations/postgres/0002_add_project.sql");
         sqlx::raw_sql(migration_sql).execute(&self.pool).await?;
         let migration_traces_sql = include_str!("../../../migrations/postgres/0003_add_traces.sql");
-        sqlx::raw_sql(migration_traces_sql).execute(&self.pool).await?;
+        sqlx::raw_sql(migration_traces_sql)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
@@ -487,7 +489,7 @@ impl TraceRepository for PgIssueRepository {
             "SELECT id, session_id, run_id, turn_id, environment, release, project,
                     eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
                     total_duration_ms, reported_at, created_at, updated_at
-             FROM traces WHERE id = $1"
+             FROM traces WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -556,13 +558,14 @@ impl TraceRepository for PgIssueRepository {
         status: EvalStatus,
     ) -> Result<TraceRecord, RepositoryError> {
         let now = Utc::now();
-        let rows_affected = sqlx::query("UPDATE traces SET eval_status = $1, updated_at = $2 WHERE id = $3")
-            .bind(status.to_string())
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let rows_affected =
+            sqlx::query("UPDATE traces SET eval_status = $1, updated_at = $2 WHERE id = $3")
+                .bind(status.to_string())
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
 
         if rows_affected == 0 {
             return Err(RepositoryError::TraceNotFound(id.to_string()));
@@ -588,9 +591,7 @@ impl TraceRepository for PgIssueRepository {
 }
 
 impl PgIssueRepository {
-    fn trace_from_row(
-        row: sqlx::postgres::PgRow,
-    ) -> Result<TraceRecord, RepositoryError> {
+    fn trace_from_row(row: sqlx::postgres::PgRow) -> Result<TraceRecord, RepositoryError> {
         use sqlx::Row;
 
         let eval_status_str: String = row.get("eval_status");

@@ -307,13 +307,13 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         "total_duration_ms": 2500
     });
 
-    let resp = server
-        .post("/api/v1/traces")
-        .json(&langgraph_payload)
-        .await;
+    let resp = server.post("/api/v1/traces").json(&langgraph_payload).await;
     resp.assert_status(StatusCode::CREATED);
     let created: serde_json::Value = resp.json();
-    assert_eq!(created["session_id"], "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a");
+    assert_eq!(
+        created["session_id"],
+        "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a"
+    );
 
     // 2. 第二轮图执行完成后增量更新该 thread
     let langgraph_update = json!({
@@ -339,26 +339,32 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
     // 3. 验证幂等性：同一 thread_id 仅存在 1 条记录，且累积数据已刷新
     let list: Vec<serde_json::Value> = server.get("/api/v1/traces").await.json();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0]["session_id"], "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a");
+    assert_eq!(
+        list[0]["session_id"],
+        "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a"
+    );
     assert_eq!(list[0]["total_input_tokens"], 3200);
     assert_eq!(list[0]["total_duration_ms"], 5000);
 }
 
 #[tokio::test]
 async fn test_webhook_anti_avalanche_on_regression() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use axum::routing::post;
     use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static WEBHOOK_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     // 启动本地 mock webhook 接收服务器
     let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_port = mock_listener.local_addr().unwrap().port();
-    let mock_app = Router::new().route("/webhook", post(|| async {
-        WEBHOOK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        StatusCode::OK
-    }));
+    let mock_app = Router::new().route(
+        "/webhook",
+        post(|| async {
+            WEBHOOK_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+            StatusCode::OK
+        }),
+    );
 
     tokio::spawn(async move {
         axum::serve(mock_listener, mock_app).await.unwrap();
@@ -403,12 +409,24 @@ async fn test_webhook_anti_avalanche_on_regression() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 1, "初次创建应触发 1 次 Webhook");
+    assert_eq!(
+        WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
+        1,
+        "初次创建应触发 1 次 Webhook"
+    );
 
     // 2. 第二次上报：count=2，处于 unresolved，不触发 Webhook
-    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    server
+        .post("/api/v1/ingest")
+        .json(&payload)
+        .await
+        .assert_status(StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 1, "未解决的后续事件不应重复触发 Webhook");
+    assert_eq!(
+        WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
+        1,
+        "未解决的后续事件不应重复触发 Webhook"
+    );
 
     // 3. 将 issue 标记为 resolved
     pony_sentry_core::IssueRepository::update_issue_status(
@@ -421,15 +439,35 @@ async fn test_webhook_anti_avalanche_on_regression() {
     .unwrap();
 
     // 4. 第三次上报：状态由 resolved 回归为 regression，必须触发第 2 次 Webhook
-    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    server
+        .post("/api/v1/ingest")
+        .json(&payload)
+        .await
+        .assert_status(StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 2, "从 resolved 回归时必须触发 1 次 issue.regression Webhook");
+    assert_eq!(
+        WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
+        2,
+        "从 resolved 回归时必须触发 1 次 issue.regression Webhook"
+    );
 
     // 5. 第四、五次上报：已处于 regression 状态，绝对不得再次触发 Webhook（防止雪崩）
-    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
-    server.post("/api/v1/ingest").json(&payload).await.assert_status(StatusCode::OK);
+    server
+        .post("/api/v1/ingest")
+        .json(&payload)
+        .await
+        .assert_status(StatusCode::OK);
+    server
+        .post("/api/v1/ingest")
+        .json(&payload)
+        .await
+        .assert_status(StatusCode::OK);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(WEBHOOK_CALL_COUNT.load(Ordering::SeqCst), 2, "在已回归状态下的持续涌入事件严禁重复触发 Webhook 雪崩");
+    assert_eq!(
+        WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
+        2,
+        "在已回归状态下的持续涌入事件严禁重复触发 Webhook 雪崩"
+    );
 }
 
 #[tokio::test]
@@ -476,7 +514,11 @@ async fn test_traces_api_project_filter_and_aggregation() {
         "exception": { "error_type": "BlogError", "value": "test", "stacktrace": [] },
         "extra": { "project_path": "/home/dev/blog-web" }
     });
-    server.post("/api/v1/ingest").json(&issue_blog).await.assert_status(StatusCode::OK);
+    server
+        .post("/api/v1/ingest")
+        .json(&issue_blog)
+        .await
+        .assert_status(StatusCode::OK);
 
     // 4. 测试 GET /api/v1/traces?project=job_copilot 过滤
     let filtered: Vec<serde_json::Value> = server
@@ -491,7 +533,11 @@ async fn test_traces_api_project_filter_and_aggregation() {
     let projects: Vec<String> = server.get("/api/v1/projects").await.json();
     assert_eq!(
         projects,
-        vec!["blog-web".to_string(), "job_copilot".to_string(), "pony-agent".to_string()]
+        vec![
+            "blog-web".to_string(),
+            "job_copilot".to_string(),
+            "pony-agent".to_string()
+        ]
     );
 }
 
@@ -561,8 +607,14 @@ async fn test_traces_server_side_sanitization() {
         token_val, "[REDACTED_SECRET]",
         "敏感 token 字段必须被脱敏为 [REDACTED_SECRET]"
     );
-    assert_eq!(stored_payload["total_input_tokens"], 1200, "total_input_tokens 计量指标严禁被误杀");
-    assert_eq!(turn["input_tokens"], 800, "turn.input_tokens 计量指标严禁被误杀");
+    assert_eq!(
+        stored_payload["total_input_tokens"], 1200,
+        "total_input_tokens 计量指标严禁被误杀"
+    );
+    assert_eq!(
+        turn["input_tokens"], 800,
+        "turn.input_tokens 计量指标严禁被误杀"
+    );
 
     // 断言 note 内的 Bearer token 经正则脱敏
     let note = turn["note"].as_str().unwrap_or_default();
@@ -644,7 +696,9 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     let probe_json: serde_json::Value = probe_resp.json();
     let probe_issue_id = probe_json["issue_id"].as_str().unwrap();
 
-    let issue_detail = server.get(&format!("/api/v1/issues/{}", probe_issue_id)).await;
+    let issue_detail = server
+        .get(&format!("/api/v1/issues/{}", probe_issue_id))
+        .await;
     issue_detail.assert_status(StatusCode::OK);
     let issue_json: serde_json::Value = issue_detail.json();
     assert_eq!(issue_json["project"], "campus_collector");
@@ -670,13 +724,20 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     ipc_resp.assert_status(StatusCode::OK);
     let ipc_json: serde_json::Value = ipc_resp.json();
     let ipc_issue_id = ipc_json["issue_id"].as_str().unwrap();
-    assert!(ipc_json.get("warnings").is_none() || ipc_json["warnings"].as_array().unwrap().is_empty());
+    assert!(
+        ipc_json.get("warnings").is_none() || ipc_json["warnings"].as_array().unwrap().is_empty()
+    );
 
-    let ipc_issue_detail = server.get(&format!("/api/v1/issues/{}", ipc_issue_id)).await;
+    let ipc_issue_detail = server
+        .get(&format!("/api/v1/issues/{}", ipc_issue_id))
+        .await;
     ipc_issue_detail.assert_status(StatusCode::OK);
     let ipc_detail_json: serde_json::Value = ipc_issue_detail.json();
     assert_eq!(ipc_detail_json["project"], "my_desktop_app");
-    assert_eq!(ipc_detail_json["culprit"], "tauri_safe_invoke in ask_cancel");
+    assert_eq!(
+        ipc_detail_json["culprit"],
+        "tauri_safe_invoke in ask_cancel"
+    );
 
     // 2.1 若上报仅有 IPC 错误但未带 project，服务端严禁盲猜，必须为 null 并返回 warning
     let unprojected_ipc_payload = json!({
@@ -693,15 +754,27 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
             "command": "ask_open"
         }
     });
-    let unproj_resp = server.post("/api/v1/ingest").json(&unprojected_ipc_payload).await;
+    let unproj_resp = server
+        .post("/api/v1/ingest")
+        .json(&unprojected_ipc_payload)
+        .await;
     unproj_resp.assert_status(StatusCode::OK);
     let unproj_json: serde_json::Value = unproj_resp.json();
-    let unproj_warnings = unproj_json["warnings"].as_array().expect("warnings expected");
-    assert!(unproj_warnings.iter().any(|w| w.as_str().unwrap().contains("missing_project")));
-    assert!(!unproj_warnings.iter().any(|w| w.as_str().unwrap().contains("missing_culprit")));
+    let unproj_warnings = unproj_json["warnings"]
+        .as_array()
+        .expect("warnings expected");
+    assert!(unproj_warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("missing_project")));
+    assert!(!unproj_warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("missing_culprit")));
 
     let unproj_detail: serde_json::Value = server
-        .get(&format!("/api/v1/issues/{}", unproj_json["issue_id"].as_str().unwrap()))
+        .get(&format!(
+            "/api/v1/issues/{}",
+            unproj_json["issue_id"].as_str().unwrap()
+        ))
         .await
         .json();
     assert_eq!(unproj_detail["project"], serde_json::Value::Null);
@@ -714,7 +787,13 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     let bare_resp = server.post("/api/v1/ingest").json(&bare_payload).await;
     bare_resp.assert_status(StatusCode::OK);
     let bare_json: serde_json::Value = bare_resp.json();
-    let warnings = bare_json["warnings"].as_array().expect("warnings should be present");
-    assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("missing_project")));
-    assert!(warnings.iter().any(|w| w.as_str().unwrap().contains("missing_culprit")));
+    let warnings = bare_json["warnings"]
+        .as_array()
+        .expect("warnings should be present");
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("missing_project")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("missing_culprit")));
 }

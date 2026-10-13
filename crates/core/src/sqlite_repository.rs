@@ -38,12 +38,11 @@ impl SqliteIssueRepository {
         // 存量库可能已建过 traces 表（缺 project 列）：0003 的 CREATE TABLE IF NOT EXISTS
         // 是 no-op，但其内的 idx_traces_project 依赖 project 列，缺列时建索引会报错，
         // 因此先判断表是否存在：全新库整文件执行；存量库先补列（幂等）再建索引。
-        let traces_table_exists: Option<String> = sqlx::query(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'traces'",
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .map(|row| row.get("name"));
+        let traces_table_exists: Option<String> =
+            sqlx::query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'traces'")
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|row| row.get("name"));
 
         match traces_table_exists {
             None => {
@@ -500,13 +499,12 @@ impl IssueRepository for SqliteIssueRepository {
 impl TraceRepository for SqliteIssueRepository {
     async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
         // 同 session_id 增量上报：先取旧 payload，按 turns 轮次去重合并（旧轮保留、新轮按序追加）。
-        let existing_payload: Option<String> = sqlx::query(
-            "SELECT payload FROM traces WHERE session_id = ?",
-        )
-        .bind(&trace.session_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .map(|row| row.get("payload"));
+        let existing_payload: Option<String> =
+            sqlx::query("SELECT payload FROM traces WHERE session_id = ?")
+                .bind(&trace.session_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|row| row.get("payload"));
 
         let existing_json = existing_payload
             .as_deref()
@@ -566,7 +564,7 @@ impl TraceRepository for SqliteIssueRepository {
             "SELECT id, session_id, run_id, turn_id, environment, release, project,
                     eval_status, payload, total_input_tokens, total_output_tokens,
                     total_duration_ms, reported_at, created_at, updated_at
-             FROM traces WHERE id = ?"
+             FROM traces WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -613,7 +611,8 @@ impl TraceRepository for SqliteIssueRepository {
         let mut query = "SELECT id, session_id, run_id, turn_id, environment, release, project,
                                 eval_status, payload, total_input_tokens, total_output_tokens,
                                 total_duration_ms, reported_at, created_at, updated_at
-                         FROM traces WHERE 1=1".to_string();
+                         FROM traces WHERE 1=1"
+            .to_string();
         let mut binds: Vec<String> = Vec::new();
 
         if let Some(session_id) = &filter.session_id {
@@ -696,13 +695,14 @@ impl TraceRepository for SqliteIssueRepository {
         status: EvalStatus,
     ) -> Result<TraceRecord, RepositoryError> {
         let now = Utc::now();
-        let rows_affected = sqlx::query("UPDATE traces SET eval_status = ?, updated_at = ? WHERE id = ?")
-            .bind(status.to_string())
-            .bind(now.to_rfc3339())
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        let rows_affected =
+            sqlx::query("UPDATE traces SET eval_status = ?, updated_at = ? WHERE id = ?")
+                .bind(status.to_string())
+                .bind(now.to_rfc3339())
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
 
         if rows_affected == 0 {
             return Err(RepositoryError::TraceNotFound(id.to_string()));

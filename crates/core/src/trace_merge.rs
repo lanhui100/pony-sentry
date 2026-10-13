@@ -76,10 +76,7 @@ mod tests {
         let new = json!({ "turns": [{ "step": "b" }, { "step": "c" }] });
         let merged = merge_trace_payloads(&old, &new);
         let turns = merged["turns"].as_array().expect("turns array");
-        let steps: Vec<&str> = turns
-            .iter()
-            .map(|t| t["step"].as_str().unwrap())
-            .collect();
+        let steps: Vec<&str> = turns.iter().map(|t| t["step"].as_str().unwrap()).collect();
         assert_eq!(steps, vec!["a", "b", "c"]);
     }
 
@@ -90,8 +87,7 @@ mod tests {
         let merged = merge_trace_payloads(&old, &new);
         assert_eq!(merged["tags"]["k"], "v2");
         assert_eq!(
-            merged["turns"][0]["turn_id"],
-            "t1",
+            merged["turns"][0]["turn_id"], "t1",
             "无轮次的新上报不得吞掉旧轮"
         );
     }

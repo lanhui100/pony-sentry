@@ -1,6 +1,7 @@
 # ADR: 加固 Sentry Ingest 契约推断与接入技能门禁 (2026-10-13)
 
-- **状态**: implemented
+Status: implemented
+
 - **负责人**: dev-team
 - **先决 / 关联决策**:
   - `implemented/feature/2026-10-08-add-project-dimension-to-issues.md` (引入 project 维度)

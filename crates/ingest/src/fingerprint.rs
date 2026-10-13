@@ -90,7 +90,10 @@ fn extract_fallback_culprit(event: &RawEvent, title: &str) -> Option<String> {
     // 1. 从 tags 读取
     if let Some(ref t) = event.tags {
         let cmd = t.get("command").or_else(|| t.get("cmd"));
-        let source = t.get("source").or_else(|| t.get("module")).or_else(|| t.get("caller"));
+        let source = t
+            .get("source")
+            .or_else(|| t.get("module"))
+            .or_else(|| t.get("caller"));
         match (source, cmd) {
             (Some(s), Some(c)) => return Some(format!("{} in {}", s, c)),
             (None, Some(c)) => return Some(c.clone()),
@@ -233,7 +236,10 @@ mod tests {
             breadcrumbs: None,
         });
 
-        assert_eq!(out.culprit.as_deref(), Some("tauri_safe_invoke in ask_cancel"));
+        assert_eq!(
+            out.culprit.as_deref(),
+            Some("tauri_safe_invoke in ask_cancel")
+        );
     }
 
     #[test]
@@ -245,7 +251,10 @@ mod tests {
             message: None,
             exception: Some(Exception {
                 error_type: "IpcCommandError".to_string(),
-                value: Some("IPC command \"ask_answer\" failed: control request cannot be consumed".to_string()),
+                value: Some(
+                    "IPC command \"ask_answer\" failed: control request cannot be consumed"
+                        .to_string(),
+                ),
                 stacktrace: None,
             }),
             tags: None,

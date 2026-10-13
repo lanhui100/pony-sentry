@@ -166,14 +166,18 @@ async fn test_trace_not_found_and_adversarial_payload() {
     };
 
     let result = repo.record_trace(large_trace).await;
-    assert!(result.is_ok(), "Large trace record must be handled without crashing");
+    assert!(
+        result.is_ok(),
+        "Large trace record must be handled without crashing"
+    );
 }
 
 #[tokio::test]
 async fn test_migrate_upgrades_existing_traces_table_with_project_column() {
     // 模拟存量库：traces 表已按旧 schema 建好（无 project 列），
     // migrate() 必须补列并建索引，而不是整体重放 0003（其内索引依赖 project 列）。
-    let tmp = std::env::temp_dir().join(format!("ponysentry_old_traces_{}.db", uuid::Uuid::new_v4()));
+    let tmp =
+        std::env::temp_dir().join(format!("ponysentry_old_traces_{}.db", uuid::Uuid::new_v4()));
     let url = format!("sqlite:{}?mode=rwc", tmp.display());
 
     let pool = create_pool(&url).await.expect("Failed to create file pool");
@@ -200,7 +204,9 @@ async fn test_migrate_upgrades_existing_traces_table_with_project_column() {
     .expect("Seed old-schema traces table");
 
     let repo = SqliteIssueRepository::new(pool);
-    repo.migrate().await.expect("migrate() must upgrade old traces schema");
+    repo.migrate()
+        .await
+        .expect("migrate() must upgrade old traces schema");
 
     // 补列后写入与读取 project 必须可用
     let now = Utc::now();
@@ -221,7 +227,9 @@ async fn test_migrate_upgrades_existing_traces_table_with_project_column() {
         created_at: now,
         updated_at: now,
     };
-    repo.record_trace(trace).await.expect("record after upgrade");
+    repo.record_trace(trace)
+        .await
+        .expect("record after upgrade");
 
     let projects = repo
         .list_projects()
@@ -230,7 +238,9 @@ async fn test_migrate_upgrades_existing_traces_table_with_project_column() {
     assert_eq!(projects, vec!["job_copilot".to_string()]);
 
     // 幂等：再次 migrate() 不得报错（重复启动重放）
-    repo.migrate().await.expect("migrate() must be replay-idempotent");
+    repo.migrate()
+        .await
+        .expect("migrate() must be replay-idempotent");
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -486,10 +496,7 @@ async fn test_trace_filter_by_project() {
         "Filtered project 'job_copilot' should return exactly 1 record"
     );
     assert_eq!(copilot_results[0].session_id, "sess-copilot-001");
-    assert_eq!(
-        copilot_results[0].project.as_deref(),
-        Some("job_copilot")
-    );
+    assert_eq!(copilot_results[0].project.as_deref(), Some("job_copilot"));
 
     // 查询 pony-agent
     let agent_filter = TraceFilter {
@@ -501,18 +508,12 @@ async fn test_trace_filter_by_project() {
         limit: None,
         offset: None,
     };
-    let agent_results = repo
-        .list_traces(agent_filter)
-        .await
-        .expect("Filter agent");
+    let agent_results = repo.list_traces(agent_filter).await.expect("Filter agent");
     assert_eq!(
         agent_results.len(),
         1,
         "Filtered project 'pony-agent' should return exactly 1 record"
     );
     assert_eq!(agent_results[0].session_id, "sess-agent-001");
-    assert_eq!(
-        agent_results[0].project.as_deref(),
-        Some("pony-agent")
-    );
+    assert_eq!(agent_results[0].project.as_deref(), Some("pony-agent"));
 }
