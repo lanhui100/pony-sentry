@@ -694,6 +694,37 @@
                     <span v-if="turn.cache_hit_tokens">缓存: {{ turn.cache_hit_tokens }}</span>
                   </div>
 
+                  <!-- interrupt span 明细：结构化展示 HITL 中断（source / reason / query / user_choice） -->
+                  <div
+                    v-if="turn.interrupt && typeof turn.interrupt === 'object'"
+                    class="rounded border border-amber-900/60 bg-amber-950/20 p-2 space-y-1.5"
+                  >
+                    <div class="flex items-center gap-2 text-[10px] font-mono uppercase text-amber-400/90">
+                      <span>中断 Interrupt</span>
+                      <span
+                        v-if="turn.interrupt.source"
+                        class="px-1 py-0.5 rounded bg-amber-900/40 border border-amber-800/60 text-amber-300 normal-case"
+                      >{{ stringifySpanValue(turn.interrupt.source) }}</span>
+                      <span v-if="turn.interrupt.reason" class="text-amber-300/80 normal-case">
+                        {{ stringifySpanValue(turn.interrupt.reason) }}
+                      </span>
+                    </div>
+                    <div v-if="stringifySpanValue(turn.interrupt.query)" class="space-y-0.5">
+                      <div class="text-[10px] font-mono uppercase text-stone-500">Query</div>
+                      <pre class="font-mono text-[11px] text-amber-100/90 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto no-scrollbar">{{ stringifySpanValue(turn.interrupt.query) }}</pre>
+                    </div>
+                    <div v-if="getInterruptChoices(turn.interrupt).length" class="space-y-0.5">
+                      <div class="text-[10px] font-mono uppercase text-stone-500">候选选项 User Choice</div>
+                      <ol class="list-decimal list-inside space-y-0.5 font-mono text-[11px] text-stone-300">
+                        <li
+                          v-for="(choice, chIdx) in getInterruptChoices(turn.interrupt)"
+                          :key="'ch-' + chIdx"
+                          class="break-all"
+                        >{{ choice }}</li>
+                      </ol>
+                    </div>
+                  </div>
+
                   <!-- 对话文本（input_text/output_text 或 langgraph input/output），工具调用之前 -->
                   <div v-if="getTurnTextBlocks(turn).length" class="space-y-1.5 pt-0.5">
                     <div
@@ -726,22 +757,41 @@
 
                   <div v-if="turn.tool_calls && turn.tool_calls.length" class="space-y-1 pt-1">
                     <div class="text-[10px] font-mono uppercase text-stone-500">工具调用:</div>
-                    <div
+                    <details
                       v-for="(call, cIdx) in turn.tool_calls"
-                      :key="cIdx"
-                      class="bg-stone-950/70 p-2 rounded border border-stone-800/60 font-mono text-[11px] space-y-0.5"
+                      :key="'call-' + cIdx"
+                      class="group bg-stone-950/70 rounded border border-stone-800/60 font-mono text-[11px]"
                     >
-                      <div class="flex justify-between text-stone-300">
-                        <span class="font-medium text-stone-200">&gt; {{ call.tool_name }}</span>
-                        <span :class="call.status === 'success' ? 'text-emerald-400' : 'text-rose-400'">{{ call.status }} ({{ call.duration_ms || 0 }}ms)</span>
+                      <summary class="cursor-pointer list-none select-none p-2 space-y-0.5 [&::-webkit-details-marker]:hidden">
+                        <div class="flex justify-between items-baseline gap-2 text-stone-300">
+                          <span class="font-medium text-stone-200 truncate">&gt; {{ toolCallName(call) }}</span>
+                          <span class="shrink-0 flex items-center gap-1.5">
+                            <span :class="toolCallStatusClass(call)">{{ toolCallStatusLabel(call) }} ({{ call.duration_ms || 0 }}ms)</span>
+                            <ChevronRight class="w-3 h-3 text-stone-500 transition-transform group-open:rotate-90" />
+                          </span>
+                        </div>
+                        <div v-if="toolCallArguments(call)" class="text-stone-500 truncate">
+                          参数: {{ toolCallArguments(call) }}
+                        </div>
+                      </summary>
+                      <div class="border-t border-stone-800/60 p-2 space-y-1.5">
+                        <div v-if="toolCallArguments(call)" class="space-y-0.5">
+                          <div class="text-[10px] uppercase text-stone-500">参数 arguments</div>
+                          <pre class="text-stone-300 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto no-scrollbar">{{ toolCallArguments(call) }}</pre>
+                        </div>
+                        <div v-if="toolCallOutput(call)" class="space-y-0.5">
+                          <div class="text-[10px] uppercase text-stone-500">输出 output</div>
+                          <pre class="text-stone-300 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto no-scrollbar">{{ toolCallOutput(call) }}</pre>
+                        </div>
+                        <div v-if="call.error" class="space-y-0.5">
+                          <div class="text-[10px] uppercase text-stone-500">错误 error</div>
+                          <pre class="text-rose-400 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto no-scrollbar">{{ stringifySpanValue(call.error) }}</pre>
+                        </div>
+                        <div v-if="toolCallId(call)" class="text-[10px] text-stone-600 break-all">
+                          call_id: {{ toolCallId(call) }}
+                        </div>
                       </div>
-                      <div v-if="call.arguments_summary" class="text-stone-500 truncate">
-                        参数: {{ call.arguments_summary }}
-                      </div>
-                      <div v-if="call.error" class="text-rose-400">
-                        错误: {{ call.error }}
-                      </div>
-                    </div>
+                    </details>
                   </div>
                 </div>
 
@@ -1029,6 +1079,68 @@ const formatWallClockSeconds = (ms) => {
   const sec = Number(ms) / 1000
   if (!Number.isFinite(sec)) return ms
   return Math.round(sec * 10) / 10
+}
+
+// ---- span 展示辅助：interrupt / tool_calls 兼容历史存量结构，任何字段缺失都不抛错 ----
+
+// 结构化字段渲染为文本：字符串原样返回，对象/数组走 JSON，绝不产出 "undefined"
+const stringifySpanValue = (value) => {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  try {
+    const serialized = JSON.stringify(value, null, 2)
+    return typeof serialized === 'string' ? serialized : String(value)
+  } catch {
+    return String(value)
+  }
+}
+
+// interrupt.user_choice 兼容数组/非数组：非数组不渲染该行
+const getInterruptChoices = (interrupt) => {
+  if (!interrupt || typeof interrupt !== 'object') return []
+  const choices = interrupt.user_choice
+  if (!Array.isArray(choices)) return []
+  return choices
+    .filter(choice => choice !== null && choice !== undefined && choice !== '')
+    .map(choice => stringifySpanValue(choice))
+}
+
+const TOOL_CALL_SUCCESS_STATUSES = ['success', 'ok', 'done']
+const TOOL_CALL_FAILURE_STATUSES = ['error', 'failed']
+
+const normalizeToolCallStatus = (call) => {
+  const raw = call && call.status
+  return typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+}
+
+const toolCallName = (call) => {
+  if (!call || typeof call !== 'object') return 'unknown'
+  return call.tool_name || call.name || 'unknown'
+}
+
+// 历史存量 trace 用 call_id 而非 tool_call_id
+const toolCallId = (call) => {
+  if (!call || typeof call !== 'object') return ''
+  return call.tool_call_id || call.call_id || ''
+}
+
+const toolCallArguments = (call) => {
+  if (!call || typeof call !== 'object') return ''
+  return stringifySpanValue(call.arguments_summary)
+}
+
+const toolCallOutput = (call) => {
+  if (!call || typeof call !== 'object') return ''
+  return stringifySpanValue(call.output)
+}
+
+const toolCallStatusLabel = (call) => normalizeToolCallStatus(call) || 'unknown'
+
+const toolCallStatusClass = (call) => {
+  const status = normalizeToolCallStatus(call)
+  if (TOOL_CALL_SUCCESS_STATUSES.includes(status)) return 'text-emerald-400'
+  if (TOOL_CALL_FAILURE_STATUSES.includes(status)) return 'text-rose-400'
+  return 'text-stone-400'
 }
 
 const fetchTraces = async () => {
