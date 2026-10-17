@@ -619,14 +619,6 @@
                   <p class="text-[11px] text-stone-500 font-mono">
                     ID: {{ selectedTrace.id }} · {{ formatDate(selectedTrace.reported_at) }}
                   </p>
-                  <p
-                    v-if="selectedTrace.payload && (selectedTrace.payload.wall_clock_ms != null || selectedTrace.payload.inter_turn_pause_ms != null)"
-                    class="text-[11px] text-stone-400 font-mono"
-                  >
-                    <span v-if="selectedTrace.payload.wall_clock_ms != null">墙钟: {{ formatDuration(selectedTrace.payload.wall_clock_ms) }}</span>
-                    <span v-if="selectedTrace.payload.wall_clock_ms != null && selectedTrace.payload.inter_turn_pause_ms != null"> · </span>
-                    <span v-if="selectedTrace.payload.inter_turn_pause_ms != null">轮间停顿: {{ formatDuration(selectedTrace.payload.inter_turn_pause_ms) }}</span>
-                  </p>
                 </div>
                 <Button variant="ghost" size="icon" @click="closeTraceDrawer">
                   <X class="w-4 h-4" />
