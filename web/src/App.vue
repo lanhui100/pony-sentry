@@ -575,7 +575,7 @@
                 <div class="flex items-center gap-4 text-[11px] text-stone-400 font-mono">
                   <span>Turns: <strong class="text-stone-300 font-medium">{{ getTraceTurns(trace).length }}</strong></span>
                   <span>Tokens: <strong class="text-stone-300 font-medium">{{ (trace.total_input_tokens || 0) + (trace.total_output_tokens || 0) }}</strong></span>
-                  <span>耗时: <strong class="text-stone-300 font-medium">{{ trace.total_duration_ms || 0 }}ms</strong></span>
+                  <span>耗时: <strong class="text-stone-300 font-medium">{{ formatDurationSeconds(trace.total_duration_ms) }}s</strong></span>
                 </div>
               </div>
               <div class="text-right shrink-0 font-mono text-xs text-stone-500">
@@ -623,9 +623,9 @@
                     v-if="selectedTrace.payload && (selectedTrace.payload.wall_clock_ms != null || selectedTrace.payload.inter_turn_pause_ms != null)"
                     class="text-[11px] text-stone-400 font-mono"
                   >
-                    <span v-if="selectedTrace.payload.wall_clock_ms != null">墙钟: {{ formatWallClockSeconds(selectedTrace.payload.wall_clock_ms) }}s</span>
+                    <span v-if="selectedTrace.payload.wall_clock_ms != null">墙钟: {{ formatDurationSeconds(selectedTrace.payload.wall_clock_ms) }}s</span>
                     <span v-if="selectedTrace.payload.wall_clock_ms != null && selectedTrace.payload.inter_turn_pause_ms != null"> · </span>
-                    <span v-if="selectedTrace.payload.inter_turn_pause_ms != null">轮间停顿: {{ selectedTrace.payload.inter_turn_pause_ms }}ms</span>
+                    <span v-if="selectedTrace.payload.inter_turn_pause_ms != null">轮间停顿: {{ formatDurationSeconds(selectedTrace.payload.inter_turn_pause_ms) }}s</span>
                   </p>
                 </div>
                 <Button variant="ghost" size="icon" @click="closeTraceDrawer">
@@ -686,7 +686,7 @@
                       Turn #{{ idx + 1 }}
                       <span v-if="turn.phase" class="text-stone-500 font-normal">({{ turn.phase }})</span>
                     </span>
-                    <span class="text-stone-500">seq {{ turn.sequence ?? '-' }} · {{ turn.model || turn.node || turn.step || '-' }} · {{ turn.duration_ms || 0 }}ms</span>
+                    <span class="text-stone-500">seq {{ turn.sequence ?? '-' }} · {{ turn.model || turn.node || turn.step || '-' }} · {{ formatDurationSeconds(turn.duration_ms) }}s</span>
                   </div>
                   <div v-if="turn.input_tokens || turn.output_tokens || turn.cache_hit_tokens" class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
                     <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
@@ -766,7 +766,7 @@
                         <div class="flex justify-between items-baseline gap-2 text-stone-300">
                           <span class="font-medium text-stone-200 truncate">&gt; {{ toolCallName(call) }}</span>
                           <span class="shrink-0 flex items-center gap-1.5">
-                            <span :class="toolCallStatusClass(call)">{{ toolCallStatusLabel(call) }} ({{ call.duration_ms || 0 }}ms)</span>
+                            <span :class="toolCallStatusClass(call)">{{ toolCallStatusLabel(call) }} ({{ formatDurationSeconds(call.duration_ms) }}s)</span>
                             <ChevronRight class="w-3 h-3 text-stone-500 transition-transform group-open:rotate-90" />
                           </span>
                         </div>
@@ -1075,10 +1075,11 @@ const getTurnTextBlocks = (turn) => {
   return blocks
 }
 
-const formatWallClockSeconds = (ms) => {
-  const sec = Number(ms) / 1000
-  if (!Number.isFinite(sec)) return ms
-  return Math.round(sec * 10) / 10
+// 耗时统一以「秒」展示并保留 1 位小数（入参为毫秒）；非法/缺失回落到 0.0
+const formatDurationSeconds = (ms) => {
+  const num = Number(ms)
+  if (!Number.isFinite(num) || num < 0) return '0.0'
+  return (num / 1000).toFixed(1)
 }
 
 // ---- span 展示辅助：interrupt / tool_calls 兼容历史存量结构，任何字段缺失都不抛错 ----
