@@ -756,7 +756,12 @@
                     >
                       <summary class="cursor-pointer list-none select-none p-2 space-y-0.5 [&::-webkit-details-marker]:hidden">
                         <div class="flex justify-between items-baseline gap-2 text-stone-300">
-                          <span class="font-medium text-stone-200 truncate">&gt; {{ toolCallName(call) }}</span>
+                          <span class="font-medium text-stone-200 truncate flex items-center gap-1.5">
+                            <span>&gt; {{ toolCallName(call) }}</span>
+                            <span v-if="call.rejection_code" class="text-[9px] px-1 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                              {{ call.rejection_code }}
+                            </span>
+                          </span>
                           <span class="shrink-0 flex items-center gap-1.5">
                             <span :class="toolCallStatusClass(call)">{{ toolCallStatusLabel(call) }} ({{ formatDuration(call.duration_ms) }})</span>
                             <ChevronRight class="w-3 h-3 text-stone-500 transition-transform group-open:rotate-90" />
@@ -767,6 +772,10 @@
                         </div>
                       </summary>
                       <div class="border-t border-stone-800/60 p-2 space-y-1.5">
+                        <div v-if="call.validator || call.rejection_code" class="flex flex-wrap gap-2 text-[10px] text-amber-300 bg-amber-950/20 p-1.5 rounded border border-amber-800/40">
+                          <span v-if="call.validator"><strong>拦截中间件:</strong> {{ call.validator }}</span>
+                          <span v-if="call.rejection_code"><strong>驳回分类:</strong> {{ call.rejection_code }}</span>
+                        </div>
                         <div v-if="toolCallArguments(call)" class="space-y-0.5">
                           <div class="text-[10px] uppercase text-stone-500">参数 arguments</div>
                           <pre class="text-stone-300 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto no-scrollbar">{{ toolCallArguments(call) }}</pre>
@@ -1100,6 +1109,7 @@ const getInterruptChoices = (interrupt) => {
 }
 
 const TOOL_CALL_SUCCESS_STATUSES = ['success', 'ok', 'done']
+const TOOL_CALL_REJECTED_STATUSES = ['rejected', 'gated']
 const TOOL_CALL_FAILURE_STATUSES = ['error', 'failed']
 
 const normalizeToolCallStatus = (call) => {
@@ -1133,6 +1143,7 @@ const toolCallStatusLabel = (call) => normalizeToolCallStatus(call) || 'unknown'
 const toolCallStatusClass = (call) => {
   const status = normalizeToolCallStatus(call)
   if (TOOL_CALL_SUCCESS_STATUSES.includes(status)) return 'text-emerald-400'
+  if (TOOL_CALL_REJECTED_STATUSES.includes(status)) return 'text-amber-400 font-semibold'
   if (TOOL_CALL_FAILURE_STATUSES.includes(status)) return 'text-rose-400'
   return 'text-stone-400'
 }
