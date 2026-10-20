@@ -16,7 +16,38 @@ pub fn merge_trace_payloads(old: &Value, new: &Value) -> Value {
         new.get("turns").and_then(|t| t.as_array()),
     ) {
         (Some(old_turns), Some(new_turns)) => {
-            merged["turns"] = Value::Array(merge_turns(old_turns, new_turns));
+            let combined_turns = merge_turns(old_turns, new_turns);
+            // 重新累计所有 turns 的 input_tokens, output_tokens, duration_ms
+            let mut sum_in = 0i64;
+            let mut sum_out = 0i64;
+            let mut sum_dur = 0i64;
+            let mut has_in = false;
+            let mut has_out = false;
+            let mut has_dur = false;
+            for t in &combined_turns {
+                if let Some(n) = t.get("input_tokens").and_then(|v| v.as_i64()) {
+                    sum_in += n;
+                    has_in = true;
+                }
+                if let Some(n) = t.get("output_tokens").and_then(|v| v.as_i64()) {
+                    sum_out += n;
+                    has_out = true;
+                }
+                if let Some(n) = t.get("duration_ms").and_then(|v| v.as_i64()) {
+                    sum_dur += n;
+                    has_dur = true;
+                }
+            }
+            if has_in {
+                merged["total_input_tokens"] = Value::from(sum_in);
+            }
+            if has_out {
+                merged["total_output_tokens"] = Value::from(sum_out);
+            }
+            if has_dur {
+                merged["total_duration_ms"] = Value::from(sum_dur);
+            }
+            merged["turns"] = Value::Array(combined_turns);
         }
         (Some(old_turns), None) => {
             // 新上报未携带轮次：保留旧轮，避免增量覆盖吞掉历史。

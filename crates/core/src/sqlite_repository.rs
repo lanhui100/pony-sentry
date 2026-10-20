@@ -516,6 +516,20 @@ impl TraceRepository for SqliteIssueRepository {
         let payload_str =
             serde_json::to_string(&merged_payload).unwrap_or_else(|_| "{}".to_string());
 
+        let mut effective_in_tokens = trace.total_input_tokens;
+        let mut effective_out_tokens = trace.total_output_tokens;
+        let mut effective_duration = trace.total_duration_ms;
+
+        if let Some(t) = merged_payload.get("total_input_tokens").and_then(|v| v.as_i64()) {
+            effective_in_tokens = Some(t);
+        }
+        if let Some(t) = merged_payload.get("total_output_tokens").and_then(|v| v.as_i64()) {
+            effective_out_tokens = Some(t);
+        }
+        if let Some(t) = merged_payload.get("total_duration_ms").and_then(|v| v.as_i64()) {
+            effective_duration = Some(t);
+        }
+
         sqlx::query(
             "INSERT INTO traces (
                 id, session_id, run_id, turn_id, environment, release, project,
@@ -545,9 +559,9 @@ impl TraceRepository for SqliteIssueRepository {
         .bind(&trace.project)
         .bind(trace.eval_status.to_string())
         .bind(payload_str)
-        .bind(trace.total_input_tokens)
-        .bind(trace.total_output_tokens)
-        .bind(trace.total_duration_ms)
+        .bind(effective_in_tokens)
+        .bind(effective_out_tokens)
+        .bind(effective_duration)
         .bind(trace.reported_at.to_rfc3339())
         .bind(trace.created_at.to_rfc3339())
         .bind(trace.updated_at.to_rfc3339())
