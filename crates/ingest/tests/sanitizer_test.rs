@@ -1,4 +1,4 @@
-use pony_sentry_ingest::{parser::Exception, Frame, RawEvent, SanitizationPipeline};
+use pony_sentry_ingest::{parser::Exception, Frame, RawEvent, SanitizationPipeline, Stacktrace};
 use serde_json::json;
 
 #[test]
@@ -15,13 +15,13 @@ fn test_deep_zero_trust_sanitization() {
         exception: Some(Exception {
             error_type: "AuthError".into(),
             value: Some("password=super_secret_pass".into()),
-            stacktrace: Some(vec![Frame {
+            stacktrace: Some(Stacktrace::Frames(vec![Frame {
                 filename: Some("C:\\Users\\alice\\projects\\pony\\src\\main.rs".into()),
                 function: Some("login_with_token".into()),
                 lineno: Some(42),
                 colno: None,
                 in_app: Some(true),
-            }]),
+            }])),
         }),
         tags: Some(tags),
         extra: Some(json!({
@@ -37,6 +37,17 @@ fn test_deep_zero_trust_sanitization() {
                 "url": "https://api.example.com/login"
             }
         })]),
+        event_id: None,
+        level: None,
+        namespace: None,
+        app: None,
+        component: None,
+        service_name: None,
+        error_type: None,
+        source_kind: None,
+        grafana_url: None,
+        loki_query: None,
+        timestamp: None,
     };
 
     let sanitized = SanitizationPipeline::sanitize_event(event);
@@ -49,8 +60,12 @@ fn test_deep_zero_trust_sanitization() {
 
     let ex = sanitized.exception.unwrap();
     assert!(ex.value.unwrap().contains("[REDACTED_SECRET]"));
+    let frames = match ex.stacktrace.unwrap() {
+        Stacktrace::Frames(frames) => frames,
+        Stacktrace::Text(_) => panic!("结构化栈帧形态必须保持 Frames"),
+    };
     assert_eq!(
-        ex.stacktrace.unwrap()[0].filename.as_deref(),
+        frames[0].filename.as_deref(),
         Some("[USER_HOME]\\projects\\pony\\src\\main.rs")
     );
 
@@ -73,4 +88,49 @@ fn test_deep_zero_trust_sanitization() {
     // 4. Breadcrumbs 递归脱敏
     let crumbs_out = sanitized.breadcrumbs.unwrap();
     assert_eq!(crumbs_out[0]["data"]["authorization"], "[REDACTED_SECRET]");
+}
+
+/// 字符串形态栈帧同样必须脱敏（契约 R3.0：客户端 traceback 文本也是敏感数据载体）。
+#[test]
+fn test_string_stacktrace_is_sanitized() {
+    let event = RawEvent {
+        platform: "python".into(),
+        release: None,
+        environment: Some("production".into()),
+        message: None,
+        exception: Some(Exception {
+            error_type: "RuntimeError".into(),
+            value: None,
+            stacktrace: Some(Stacktrace::Text(
+                "File \"/home/john_doe/app/x.py\", line 7, in run\nRuntimeError: password=super_secret_pass"
+                    .into(),
+            )),
+        }),
+        tags: None,
+        extra: None,
+        breadcrumbs: None,
+        event_id: Some("evt-sanitize".into()),
+        level: Some("error".into()),
+        namespace: None,
+        app: None,
+        component: None,
+        service_name: None,
+        error_type: None,
+        source_kind: None,
+        grafana_url: None,
+        loki_query: None,
+        timestamp: None,
+    };
+
+    let sanitized = SanitizationPipeline::sanitize_event(event);
+    let text = match sanitized.exception.unwrap().stacktrace.unwrap() {
+        Stacktrace::Text(text) => text,
+        Stacktrace::Frames(_) => panic!("字符串形态必须保持 Text"),
+    };
+    assert!(!text.contains("john_doe"), "用户路径必须被脱敏：{text}");
+    assert!(text.contains("[USER_HOME]"), "脱敏占位符缺失：{text}");
+    assert!(
+        !text.contains("super_secret_pass"),
+        "密钥必须被脱敏：{text}"
+    );
 }

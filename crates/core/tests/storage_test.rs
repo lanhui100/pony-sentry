@@ -1,7 +1,39 @@
 use pony_sentry_core::{
-    create_pool, models::IssueStatus, IssueFilter, IssueRepository, SqliteIssueRepository,
+    create_pool, models::IssueStatus, IssueFilter, IssueRepository, NewEventRecord,
+    SqliteIssueRepository,
 };
 use serde_json::json;
+
+/// 构造 `NewEventRecord` 的测试夹具：保持既有用例的 8 元参数顺序。
+#[allow(clippy::too_many_arguments)]
+fn record<'a>(
+    fingerprint: &'a str,
+    title: &'a str,
+    culprit: Option<&'a str>,
+    platform: &'a str,
+    release: Option<&'a str>,
+    environment: Option<&'a str>,
+    project: Option<&'a str>,
+    payload: serde_json::Value,
+) -> NewEventRecord<'a> {
+    NewEventRecord {
+        fingerprint,
+        title,
+        culprit,
+        platform,
+        release,
+        environment,
+        project,
+        app: None,
+        namespace: None,
+        component: None,
+        level: "error",
+        source_kind: None,
+        event_key: None,
+        payload,
+        occurred_at: None,
+    }
+}
 
 #[tokio::test]
 async fn test_issue_lifecycle_and_regression_flow() {
@@ -17,7 +49,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
 
     // 1. 首次上报：状态为 unresolved, count = 1
     let res = repo
-        .record_event_and_upsert_issue(
+        .record_event_and_upsert_issue(record(
             fp,
             title,
             Some("worker::run"),
@@ -26,7 +58,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             Some("production"),
             None,
             json!({"trace": "stack info"}),
-        )
+        ))
         .await
         .expect("First report should succeed");
 
@@ -41,7 +73,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
 
     // 2. 重复上报：count = 2
     let res2 = repo
-        .record_event_and_upsert_issue(
+        .record_event_and_upsert_issue(record(
             fp,
             title,
             Some("worker::run"),
@@ -50,7 +82,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             Some("production"),
             None,
             json!({"trace": "stack info 2"}),
-        )
+        ))
         .await
         .expect("Second report should succeed");
 
@@ -77,7 +109,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
 
     // 4. 新版本再度出现该错误：自动触发 Regression，且 is_regression_trigger = true
     let res3 = repo
-        .record_event_and_upsert_issue(
+        .record_event_and_upsert_issue(record(
             fp,
             title,
             Some("worker::run"),
@@ -86,7 +118,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             Some("production"),
             None,
             json!({"trace": "stack info 3"}),
-        )
+        ))
         .await
         .expect("Regression report should succeed");
 
@@ -102,7 +134,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
 
     // 4.1 再次上报：此时已处于 Regression，必须 is_regression_trigger = false（防止雪崩）
     let res4 = repo
-        .record_event_and_upsert_issue(
+        .record_event_and_upsert_issue(record(
             fp,
             title,
             Some("worker::run"),
@@ -111,7 +143,7 @@ async fn test_issue_lifecycle_and_regression_flow() {
             Some("production"),
             None,
             json!({"trace": "stack info 4"}),
-        )
+        ))
         .await
         .expect("Follow-up report in regression should succeed");
     assert!(!res4.is_new);
@@ -145,7 +177,7 @@ async fn test_project_dimension_persists_and_filters() {
     let repo_ref = &repo;
     let report = |fp: &'static str, project: &'static str| async move {
         repo_ref
-            .record_event_and_upsert_issue(
+            .record_event_and_upsert_issue(record(
                 fp,
                 "TypeError: cannot read token",
                 Some("src/views/Dashboard.vue in mounted"),
@@ -154,7 +186,7 @@ async fn test_project_dimension_persists_and_filters() {
                 Some("production"),
                 Some(project),
                 json!({ "project_path": format!("/home/dev/{project}") }),
-            )
+            ))
             .await
             .expect("Report should succeed")
             .issue
@@ -193,7 +225,7 @@ async fn test_project_dimension_persists_and_filters() {
 
     // 未注入工作区的事件不污染项目候选集合
     let no_workspace = repo
-        .record_event_and_upsert_issue(
+        .record_event_and_upsert_issue(record(
             "fp_noname",
             "GenericError: boom",
             None,
@@ -202,7 +234,7 @@ async fn test_project_dimension_persists_and_filters() {
             Some("production"),
             None,
             json!({}),
-        )
+        ))
         .await
         .expect("Report without workspace should succeed")
         .issue;

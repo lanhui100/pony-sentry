@@ -12,6 +12,14 @@ pub struct FingerprintOut {
     pub culprit: Option<String>,
     pub platform: String,
     pub project: Option<String>,
+    /// 环境维度（v3 指纹的作用域分量），缺省为 `unknown`。
+    pub environment: String,
+    pub app: Option<String>,
+    pub namespace: Option<String>,
+    pub component: Option<String>,
+    /// 事件等级（非法值已由上报侧降级为 `warning`）。
+    pub level: String,
+    pub source_kind: Option<String>,
 }
 
 /// 幂等重索引规划：以“新指纹”为唯一分组键，重建 issue 归属。
@@ -142,6 +150,12 @@ pub fn plan_reindex(
             count: group_events.len() as i64,
             last_release,
             project: info.project.clone(),
+            environment: info.environment.clone(),
+            app: info.app.clone(),
+            namespace: info.namespace.clone(),
+            component: info.component.clone(),
+            level: info.level.clone(),
+            source_kind: info.source_kind.clone(),
             first_seen_at: first_seen,
             last_seen_at: last_seen,
         });
@@ -201,6 +215,8 @@ mod tests {
             payload: json!({"fp_hint": fp}),
             release: Some("0.2.49".to_string()),
             environment: None,
+            event_key: None,
+            level: None,
             created_at: Utc.with_ymd_and_hms(2026, 10, 8, 12, minute, 0).unwrap(),
         }
     }
@@ -218,6 +234,12 @@ mod tests {
             count: 1,
             last_release: None,
             project: None,
+            environment: "unknown".to_string(),
+            app: None,
+            namespace: None,
+            component: None,
+            level: "error".to_string(),
+            source_kind: None,
             first_seen_at: now,
             last_seen_at: now,
         }
@@ -233,6 +255,12 @@ mod tests {
                 culprit: None,
                 platform: "rust".to_string(),
                 project: None,
+                environment: "unknown".to_string(),
+                app: None,
+                namespace: None,
+                component: None,
+                level: "error".to_string(),
+                source_kind: None,
             })
     }
 
@@ -294,6 +322,8 @@ mod tests {
                 payload: json!({}),
                 release: None,
                 environment: None,
+                event_key: None,
+                level: None,
                 created_at: Utc.with_ymd_and_hms(2026, 10, 8, 12, 2, 0).unwrap(),
             },
         ];

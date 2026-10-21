@@ -7,10 +7,14 @@ pub mod sqlite_repository;
 pub mod trace_merge;
 
 pub use db::{create_pool, DatabasePool};
-pub use models::{EvalStatus, Event, Issue, IssueStatus, Platform, TraceFilter, TraceRecord};
+pub use models::{
+    EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, Platform, TraceFilter,
+    TraceRecord,
+};
 pub use pg_repository::PgIssueRepository;
 pub use reindex::{FingerprintOut, ReindexPlan, ReindexSummary};
 pub use repository::{
-    IssueFilter, IssueRepository, RepositoryError, TraceRepository, UpsertIssueResult,
+    IssueFilter, IssueRepository, NewEventRecord, RepositoryError, TraceRepository,
+    UpsertIssueResult,
 };
 pub use sqlite_repository::SqliteIssueRepository;

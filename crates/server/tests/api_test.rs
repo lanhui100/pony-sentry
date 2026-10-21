@@ -15,7 +15,9 @@ async fn test_ingest_and_agent_api_flow() {
         repo: repo.clone(),
         trace_repo: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
         webhook_url: None,
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -41,7 +43,7 @@ async fn test_ingest_and_agent_api_flow() {
     });
 
     let res = server.post("/api/v1/ingest").json(&rust_payload).await;
-    res.assert_status(StatusCode::OK);
+    res.assert_status(StatusCode::CREATED);
     let json_body: serde_json::Value = res.json();
     let issue_id = json_body["issue_id"].as_str().unwrap().to_string();
     assert_eq!(json_body["count"], 1);
@@ -67,11 +69,12 @@ async fn test_ingest_and_agent_api_flow() {
         }
     });
     let res_vue = server.post("/api/v1/ingest").json(&vue_payload).await;
-    res_vue.assert_status(StatusCode::OK);
+    res_vue.assert_status(StatusCode::CREATED);
 
     // 3. Agent 调用 REST API 查询待处理的 Rust issues
     let list_res = server
         .get("/api/v1/issues?platform=rust&status=unresolved")
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     list_res.assert_status(StatusCode::OK);
     let issues: Vec<serde_json::Value> = list_res.json();
@@ -85,6 +88,7 @@ async fn test_ingest_and_agent_api_flow() {
             "status": "in_progress",
             "assigned_to": "agent-dev-lead"
         }))
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     claim_res.assert_status(StatusCode::OK);
     let claimed_issue: serde_json::Value = claim_res.json();
@@ -97,6 +101,7 @@ async fn test_ingest_and_agent_api_flow() {
         .json(&json!({
             "status": "resolved"
         }))
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     resolve_res.assert_status(StatusCode::OK);
     let resolved_issue: serde_json::Value = resolve_res.json();
@@ -104,7 +109,7 @@ async fn test_ingest_and_agent_api_flow() {
 
     // 6. 新版本再度上报同一错误，自动触发 Regression
     let res_repeat = server.post("/api/v1/ingest").json(&rust_payload).await;
-    res_repeat.assert_status(StatusCode::OK);
+    res_repeat.assert_status(StatusCode::CREATED);
     let repeat_json: serde_json::Value = res_repeat.json();
     assert_eq!(repeat_json["status"], "regression");
     assert_eq!(repeat_json["count"], 2);
@@ -122,6 +127,8 @@ async fn test_ingest_requires_client_token_when_configured() {
         trace_repo: None,
         client_token: Some("test-secret-token".into()),
         webhook_url: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -149,7 +156,7 @@ async fn test_ingest_requires_client_token_when_configured() {
         .add_header("x-client-token", "test-secret-token")
         .json(&payload)
         .await;
-    res_ok.assert_status(StatusCode::OK);
+    res_ok.assert_status(StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -162,7 +169,9 @@ async fn test_sql_injection_is_safely_parametrized() {
         repo: repo.clone(),
         trace_repo: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
         webhook_url: None,
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -179,11 +188,12 @@ async fn test_sql_injection_is_safely_parametrized() {
             }
         }))
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
 
     // 尝试 SQL 注入 payload（URL 编码），参数化绑定后应安全返回 200 且为空结果
     let inject_res = server
         .get("/api/v1/issues?platform=%27%20OR%20%271%27%3D%271%27--")
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     inject_res.assert_status(StatusCode::OK);
     let issues: Vec<serde_json::Value> = inject_res.json();
@@ -194,7 +204,10 @@ async fn test_sql_injection_is_safely_parametrized() {
     );
 
     // 负分页参数应被钳制而非报错
-    let neg_res = server.get("/api/v1/issues?limit=-5&offset=-10").await;
+    let neg_res = server
+        .get("/api/v1/issues?limit=-5&offset=-10")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
     neg_res.assert_status(StatusCode::OK);
 }
 
@@ -209,7 +222,9 @@ async fn test_project_path_is_surfaced_and_filterable() {
         repo: repo.clone(),
         trace_repo: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
         webhook_url: None,
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -240,13 +255,17 @@ async fn test_project_path_is_surfaced_and_filterable() {
 
     report("ReferenceErrorA", "/home/dev/shop-web")
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
     report("ReferenceErrorB", "/home/dev/blog-web")
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
 
     // issue.project 暴露的是项目名（工作区末段），而非会随机器变化的绝对路径
-    let issues: Vec<serde_json::Value> = server.get("/api/v1/issues").await.json();
+    let issues: Vec<serde_json::Value> = server
+        .get("/api/v1/issues")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     let mut projects: Vec<&str> = issues
         .iter()
         .map(|i| i["project"].as_str().expect("project must be present"))
@@ -256,13 +275,20 @@ async fn test_project_path_is_surfaced_and_filterable() {
     assert_eq!(projects, vec!["blog-web", "shop-web"]);
 
     // 筛选只返回目标项目
-    let filtered: Vec<serde_json::Value> =
-        server.get("/api/v1/issues?project=shop-web").await.json();
+    let filtered: Vec<serde_json::Value> = server
+        .get("/api/v1/issues?project=shop-web")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0]["project"], "shop-web");
 
     // 下拉候选：去重排序
-    let candidates: Vec<String> = server.get("/api/v1/projects").await.json();
+    let candidates: Vec<String> = server
+        .get("/api/v1/projects")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     assert_eq!(
         candidates,
         vec!["blog-web".to_string(), "shop-web".to_string()]
@@ -273,8 +299,12 @@ async fn test_project_path_is_surfaced_and_filterable() {
         .post("/api/v1/ingest")
         .json(&json!({ "platform": "python", "message": "no workspace here" }))
         .await
-        .assert_status(StatusCode::OK);
-    let after: Vec<String> = server.get("/api/v1/projects").await.json();
+        .assert_status(StatusCode::CREATED);
+    let after: Vec<String> = server
+        .get("/api/v1/projects")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     assert_eq!(after, vec!["blog-web".to_string(), "shop-web".to_string()]);
 }
 
@@ -289,6 +319,8 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         trace_repo: Some(repo.clone()),
         webhook_url: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -337,7 +369,11 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         .assert_status(StatusCode::CREATED);
 
     // 3. 验证幂等性：同一 thread_id 仅存在 1 条记录，且累积数据已刷新
-    let list: Vec<serde_json::Value> = server.get("/api/v1/traces").await.json();
+    let list: Vec<serde_json::Value> = server
+        .get("/api/v1/traces")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     assert_eq!(list.len(), 1);
     assert_eq!(
         list[0]["session_id"],
@@ -381,6 +417,8 @@ async fn test_webhook_anti_avalanche_on_regression() {
         trace_repo: None,
         client_token: None,
         webhook_url: Some(webhook_url),
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -397,7 +435,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
 
     // 1. 首次上报：触发 1 次 issue.created Webhook
     let res = server.post("/api/v1/ingest").json(&payload).await;
-    res.assert_status(StatusCode::OK);
+    res.assert_status(StatusCode::CREATED);
     let body: serde_json::Value = res.json();
     let issue_id = body["issue_id"].as_str().unwrap().to_string();
     assert_eq!(body["count"], 1);
@@ -420,7 +458,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
         .post("/api/v1/ingest")
         .json(&payload)
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
         WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
@@ -443,7 +481,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
         .post("/api/v1/ingest")
         .json(&payload)
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
         WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
@@ -456,12 +494,12 @@ async fn test_webhook_anti_avalanche_on_regression() {
         .post("/api/v1/ingest")
         .json(&payload)
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
     server
         .post("/api/v1/ingest")
         .json(&payload)
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert_eq!(
         WEBHOOK_CALL_COUNT.load(Ordering::SeqCst),
@@ -481,6 +519,8 @@ async fn test_traces_api_project_filter_and_aggregation() {
         trace_repo: Some(repo.clone()),
         webhook_url: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -518,11 +558,12 @@ async fn test_traces_api_project_filter_and_aggregation() {
         .post("/api/v1/ingest")
         .json(&issue_blog)
         .await
-        .assert_status(StatusCode::OK);
+        .assert_status(StatusCode::CREATED);
 
     // 4. 测试 GET /api/v1/traces?project=job_copilot 过滤
     let filtered: Vec<serde_json::Value> = server
         .get("/api/v1/traces?project=job_copilot")
+        .add_header("x-admin-token", "test-admin-token")
         .await
         .json();
     assert_eq!(filtered.len(), 1);
@@ -530,7 +571,11 @@ async fn test_traces_api_project_filter_and_aggregation() {
     assert_eq!(filtered[0]["project"], "job_copilot");
 
     // 5. 测试 GET /api/v1/projects 聚合 issues 和 traces 的去重项目清单
-    let projects: Vec<String> = server.get("/api/v1/projects").await.json();
+    let projects: Vec<String> = server
+        .get("/api/v1/projects")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
     assert_eq!(
         projects,
         vec![
@@ -552,6 +597,8 @@ async fn test_traces_server_side_sanitization() {
         trace_repo: Some(repo.clone()),
         webhook_url: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -580,6 +627,7 @@ async fn test_traces_server_side_sanitization() {
     // 查询落库后的 trace
     let list: Vec<serde_json::Value> = server
         .get("/api/v1/traces?session_id=sess-sanitize-server-01")
+        .add_header("x-admin-token", "test-admin-token")
         .await
         .json();
     assert_eq!(list.len(), 1);
@@ -641,6 +689,8 @@ async fn test_traces_large_payload_limit_2mb() {
         trace_repo: Some(repo.clone()),
         webhook_url: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -677,6 +727,8 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         trace_repo: Some(repo.clone()),
         webhook_url: None,
         client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -692,12 +744,13 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         }
     });
     let probe_resp = server.post("/api/v1/ingest").json(&probe_payload).await;
-    probe_resp.assert_status(StatusCode::OK);
+    probe_resp.assert_status(StatusCode::CREATED);
     let probe_json: serde_json::Value = probe_resp.json();
     let probe_issue_id = probe_json["issue_id"].as_str().unwrap();
 
     let issue_detail = server
         .get(&format!("/api/v1/issues/{}", probe_issue_id))
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     issue_detail.assert_status(StatusCode::OK);
     let issue_json: serde_json::Value = issue_detail.json();
@@ -721,7 +774,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         }
     });
     let ipc_resp = server.post("/api/v1/ingest").json(&ipc_payload).await;
-    ipc_resp.assert_status(StatusCode::OK);
+    ipc_resp.assert_status(StatusCode::CREATED);
     let ipc_json: serde_json::Value = ipc_resp.json();
     let ipc_issue_id = ipc_json["issue_id"].as_str().unwrap();
     assert!(
@@ -730,6 +783,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
 
     let ipc_issue_detail = server
         .get(&format!("/api/v1/issues/{}", ipc_issue_id))
+        .add_header("x-admin-token", "test-admin-token")
         .await;
     ipc_issue_detail.assert_status(StatusCode::OK);
     let ipc_detail_json: serde_json::Value = ipc_issue_detail.json();
@@ -758,7 +812,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         .post("/api/v1/ingest")
         .json(&unprojected_ipc_payload)
         .await;
-    unproj_resp.assert_status(StatusCode::OK);
+    unproj_resp.assert_status(StatusCode::CREATED);
     let unproj_json: serde_json::Value = unproj_resp.json();
     let unproj_warnings = unproj_json["warnings"]
         .as_array()
@@ -775,6 +829,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
             "/api/v1/issues/{}",
             unproj_json["issue_id"].as_str().unwrap()
         ))
+        .add_header("x-admin-token", "test-admin-token")
         .await
         .json();
     assert_eq!(unproj_detail["project"], serde_json::Value::Null);
@@ -785,7 +840,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         "message": "Something generic broke"
     });
     let bare_resp = server.post("/api/v1/ingest").json(&bare_payload).await;
-    bare_resp.assert_status(StatusCode::OK);
+    bare_resp.assert_status(StatusCode::CREATED);
     let bare_json: serde_json::Value = bare_resp.json();
     let warnings = bare_json["warnings"]
         .as_array()

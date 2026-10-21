@@ -1,6 +1,9 @@
-use crate::models::{EvalStatus, Event, Issue, IssueStatus, TraceFilter, TraceRecord};
+use crate::models::{
+    EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, TraceFilter, TraceRecord,
+};
 use crate::reindex::FingerprintOut;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
@@ -20,8 +23,39 @@ pub struct IssueFilter {
     pub platform: Option<String>,
     pub release: Option<String>,
     pub project: Option<String>,
+    /// 环境维度筛选（`GET /api/v1/issues?environment=<env>`）。
+    pub environment: Option<String>,
+    /// 等级维度筛选（`fatal|error|warning|info`）。
+    pub level: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// 一次事件写入所需的全部维度（避免超长位置参数；`event_key` 为客户端幂等键）。
+///
+/// 语义：`event_key` 为 `Some` 且该键已存在时，整次写入按幂等命中处理——
+/// 不新增 events 行、不递增 `issues.count`、不推进 `issues.last_seen_at`（契约 R4.1）。
+#[derive(Debug, Clone)]
+pub struct NewEventRecord<'a> {
+    pub fingerprint: &'a str,
+    pub title: &'a str,
+    pub culprit: Option<&'a str>,
+    pub platform: &'a str,
+    pub release: Option<&'a str>,
+    /// 环境维度；`None` 落库为 `unknown`。
+    pub environment: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub app: Option<&'a str>,
+    pub namespace: Option<&'a str>,
+    pub component: Option<&'a str>,
+    /// 已校验并完成降级的事件等级（调用方负责非法值 → `warning`）。
+    pub level: &'a str,
+    pub source_kind: Option<&'a str>,
+    /// 客户端确定性幂等键（上报一级 `event_id`）。
+    pub event_key: Option<&'a str>,
+    pub payload: serde_json::Value,
+    /// 事件发生时间（上报 `timestamp` 或服务端 now）；`None` 取写入时刻。
+    pub occurred_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,21 +64,15 @@ pub struct UpsertIssueResult {
     pub event: Event,
     pub is_new: bool,
     pub is_regression_trigger: bool,
+    /// `event_key` 幂等命中：本次写入未产生新 events 行，issue 计数与时间戳均未变更。
+    pub is_duplicate: bool,
 }
 
 #[async_trait]
 pub trait IssueRepository: Send + Sync {
-    #[allow(clippy::too_many_arguments)]
     async fn record_event_and_upsert_issue(
         &self,
-        fingerprint: &str,
-        title: &str,
-        culprit: Option<&str>,
-        platform: &str,
-        release: Option<&str>,
-        environment: Option<&str>,
-        project: Option<&str>,
-        payload: serde_json::Value,
+        record: NewEventRecord<'_>,
     ) -> Result<UpsertIssueResult, RepositoryError>;
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError>;
@@ -74,6 +102,24 @@ pub trait IssueRepository: Send + Sync {
         &self,
         fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
     ) -> Result<crate::reindex::ReindexSummary, RepositoryError>;
+
+    /// 存活探针（`/healthz`）：只做一次最轻量的 DB 往返，失败即视为不可用。
+    async fn health_check(&self) -> Result<(), RepositoryError>;
+
+    /// 按 `(status, environment)` 聚合的 issue 计数（`/metrics`）。
+    async fn issue_counts_by_status_environment(
+        &self,
+    ) -> Result<Vec<IssueStatusEnvironmentCount>, RepositoryError>;
+
+    /// events 总行数（`/metrics`）。
+    async fn count_events(&self) -> Result<i64, RepositoryError>;
+
+    /// 分批删除 `created_at < cutoff` 的 events，返回本批删除行数（retention 任务）。
+    async fn delete_events_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<u64, RepositoryError>;
 }
 
 #[async_trait]
@@ -93,4 +139,11 @@ pub trait TraceRepository: Send + Sync {
     /// Trace 维度已出现过的项目名去重排序列表（不含 NULL 与空串），
     /// 供 Web 端项目筛选下拉与 `/api/v1/projects` 聚合使用。
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError>;
+
+    /// 分批删除 `created_at < cutoff` 的 traces，返回本批删除行数（retention 任务）。
+    async fn delete_traces_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<u64, RepositoryError>;
 }

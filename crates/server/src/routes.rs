@@ -1,30 +1,74 @@
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, Method, StatusCode},
-    response::IntoResponse,
+    http::{header, HeaderMap, Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
 use pony_sentry_core::{
     models::{EvalStatus, IssueStatus, TraceFilter, TraceRecord},
-    repository::{IssueFilter, IssueRepository, TraceRepository},
+    repository::{IssueFilter, IssueRepository, NewEventRecord, TraceRepository},
 };
 use pony_sentry_ingest::{
-    compute_issue_fingerprint, infer_project_name, RawEvent, SanitizationPipeline,
+    compute_issue_fingerprint, guard_extra, infer_project_name, normalize_dimension,
+    normalize_environment, normalize_grafana_url, normalize_level, normalize_loki_query,
+    normalize_source_kind, normalize_stacktrace, normalize_tags, parse_timestamp, truncate_chars,
+    validate_event_id, RawEvent, SanitizationPipeline, MESSAGE_MAX_CHARS,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde_json::json;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// 单次 DB 探活的硬超时（契约 R11.2 / NFR `db_probe_timeout_ms`）。
+const DB_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// ingest 结果计数器（`/metrics` 的 `pony_sentry_ingest_requests_total` 数据源）。
+#[derive(Debug, Default)]
+pub struct IngestMetrics {
+    created: AtomicU64,
+    duplicate: AtomicU64,
+    degraded_level: AtomicU64,
+}
+
+impl IngestMetrics {
+    fn record_created(&self) {
+        self.created.fetch_add(1, Ordering::Relaxed);
+    }
+    fn record_duplicate(&self) {
+        self.duplicate.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 非法 level 降级计数（契约 R2：非法值降级为 `warning` 并 WARN 日志）。
+    fn record_degraded_level(&self) {
+        self.degraded_level.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.created.load(Ordering::Relaxed),
+            self.duplicate.load(Ordering::Relaxed),
+            self.degraded_level.load(Ordering::Relaxed),
+        )
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub repo: Arc<dyn IssueRepository>,
     pub trace_repo: Option<Arc<dyn TraceRepository>>,
     pub client_token: Option<String>,
+    /// 管理侧只读/PATCH 令牌（契约 R10）；未配置时回退 `client_token`，两者皆无则 fail-closed 503。
+    pub admin_token: Option<String>,
     pub webhook_url: Option<String>,
+    pub metrics: Arc<IngestMetrics>,
 }
 
 impl AppState {
@@ -33,7 +77,9 @@ impl AppState {
             repo,
             trace_repo: None,
             client_token: None,
+            admin_token: None,
             webhook_url: None,
+            metrics: Arc::new(IngestMetrics::default()),
         }
     }
 
@@ -41,6 +87,140 @@ impl AppState {
         self.trace_repo = trace_repo;
         self
     }
+
+    /// 管理侧请求的失败策略（契约 R10 / R10.1）：
+    /// - 两个 token 都没配置 → `NotConfigured`（503 fail-closed）；
+    /// - 提供了 `admin_token` 或 `client_token` 之一且匹配 → `Allowed`；
+    /// - 其余 → `Unauthorized`。
+    fn check_admin_auth(&self, headers: &HeaderMap) -> AuthOutcome {
+        check_admin_auth(
+            self.admin_token.as_deref(),
+            self.client_token.as_deref(),
+            headers,
+        )
+    }
+
+    /// 写入端点（ingest / traces）的鉴权，沿用既有 CLIENT_TOKEN 语义（契约 R10.1 收窄版）：
+    /// 未配置任何 token 时放行（集群内自举场景），配置后必须匹配 `client_token` 或 `admin_token`。
+    fn check_write_auth(&self, headers: &HeaderMap) -> AuthOutcome {
+        check_write_auth(
+            self.client_token.as_deref(),
+            self.admin_token.as_deref(),
+            headers,
+        )
+    }
+}
+
+/// 鉴权判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthOutcome {
+    Allowed,
+    Unauthorized,
+    NotConfigured,
+}
+
+/// 管理侧（读 + PATCH）鉴权规则（契约 R10 / R10.1）：
+/// - `admin` 与 `client` 都未配置 → `NotConfigured`（503 fail-closed）；
+/// - 任一配置且请求令牌与之匹配 → `Allowed`；否则 `Unauthorized`。
+fn check_admin_auth(admin: Option<&str>, client: Option<&str>, headers: &HeaderMap) -> AuthOutcome {
+    match (admin, client) {
+        (None, None) => AuthOutcome::NotConfigured,
+        _ => {
+            let provided = extract_provided_token(headers);
+            let matched = provided.is_some_and(|token| {
+                [admin, client]
+                    .into_iter()
+                    .flatten()
+                    .any(|expected| token_matches(token, expected))
+            });
+            if matched {
+                AuthOutcome::Allowed
+            } else {
+                AuthOutcome::Unauthorized
+            }
+        }
+    }
+}
+
+/// 写入侧（ingest / traces）鉴权规则：未配置任何令牌时沿用既有放行语义（契约 R10.1 收窄版），
+/// 配置后必须匹配 `client` 或 `admin`。
+fn check_write_auth(client: Option<&str>, admin: Option<&str>, headers: &HeaderMap) -> AuthOutcome {
+    // 写入端点的门控键是 CLIENT_TOKEN（契约 R10.1 收窄版）：未配置即放行历史行为；
+    // 配置后 ADMIN_TOKEN 亦可作为合法凭证（契约 R10 矩阵）。
+    if client.is_none() {
+        return AuthOutcome::Allowed;
+    }
+    let provided = extract_provided_token(headers);
+    let matched = provided.is_some_and(|token| {
+        [client, admin]
+            .into_iter()
+            .flatten()
+            .any(|expected| token_matches(token, expected))
+    });
+    if matched {
+        AuthOutcome::Allowed
+    } else {
+        AuthOutcome::Unauthorized
+    }
+}
+
+/// 从请求头取凭证：`x-admin-token` → `x-client-token` → `Authorization: Bearer`。
+fn extract_provided_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-admin-token")
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| headers.get("x-client-token").and_then(|h| h.to_str().ok()))
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 常量时间比较，避免按字节提前返回泄露 token 前缀。
+fn token_matches(provided: &str, expected: &str) -> bool {
+    let (a, b) = (provided.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+/// 422 校验拒绝（契约 R4）。
+fn invalid_field(field: &'static str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"error": "invalid_field", "field": field})),
+    )
+}
+
+/// 503 fail-closed（契约 R10.1）。
+fn admin_token_not_configured() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "admin_token_not_configured"})),
+    )
+}
+
+fn unauthorized() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "unauthorized"})),
+    )
+}
+
+fn persistence_error(err: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+    error!(error = %err, "ingest persistence failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "persistence_error"})),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,15 +233,34 @@ pub struct IngestPayload {
     pub tags: Option<std::collections::HashMap<String, String>>,
     pub extra: Option<serde_json::Value>,
     pub breadcrumbs: Option<Vec<serde_json::Value>>,
+    /// 客户端确定性幂等键（≤64 可打印 ASCII），落 `events.event_key`（契约 R2 / R2.3）。
+    pub event_id: Option<String>,
+    /// `fatal|error|warning|info`，非法值降级 `warning`（契约 R2）。
+    pub level: Option<String>,
+    pub namespace: Option<String>,
+    pub app: Option<String>,
+    pub component: Option<String>,
+    pub service_name: Option<String>,
+    /// 一级错误类型，缺省取 `exception.error_type`（契约 R2）。
+    pub error_type: Option<String>,
+    pub source_kind: Option<String>,
+    pub grafana_url: Option<String>,
+    pub loki_query: Option<String>,
+    /// ISO8601 事件发生时间；缺省为服务端 now()（契约 R2）。
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct IngestResponse {
+    /// `created` | `duplicate`（契约 R4；与 `status` 正交，后者仍是 issue 状态）。
+    pub result: &'static str,
+    pub status: IssueStatus,
     pub issue_id: String,
+    /// 回显客户端 `event_id`（无则回退服务端事件 id）。
     pub event_id: String,
     pub fingerprint: String,
-    pub status: IssueStatus,
     pub count: i64,
+    pub duplicate: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<String>,
 }
@@ -72,6 +271,10 @@ pub struct IssueQuery {
     pub platform: Option<String>,
     pub release: Option<String>,
     pub project: Option<String>,
+    /// 环境维度筛选（契约 R10.5）。
+    pub environment: Option<String>,
+    /// 等级维度筛选 `fatal|error|warning|info`。
+    pub level: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -130,6 +333,7 @@ pub fn create_app_with_state(state: AppState) -> Router {
             header::AUTHORIZATION,
             header::HeaderName::from_static("x-sentry-auth"),
             header::HeaderName::from_static("x-client-token"),
+            header::HeaderName::from_static("x-admin-token"),
         ]);
 
     // 2. 遥测上报路由 (强制挂载 2MB 请求体硬限制与专有 CORS)
@@ -140,6 +344,7 @@ pub fn create_app_with_state(state: AppState) -> Router {
         .layer(ingest_cors);
 
     // 3. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
+    //    鉴权（契约 R10）：ADMIN_TOKEN 优先，回退 CLIENT_TOKEN；两者皆无 → 503 fail-closed。
     let admin_routes = Router::new()
         .route("/api/v1/issues", get(handle_list_issues))
         .route("/api/v1/projects", get(handle_list_projects))
@@ -154,7 +359,11 @@ pub fn create_app_with_state(state: AppState) -> Router {
         .route(
             "/api/v1/traces/:id",
             patch(handle_update_trace).layer(DefaultBodyLimit::max(64 * 1024)),
-        );
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth_middleware,
+        ));
 
     let html_content = include_str!("../../../web/dist/index.html");
 
@@ -163,61 +372,224 @@ pub fn create_app_with_state(state: AppState) -> Router {
             "/",
             get(move || async move { axum::response::Html(html_content) }),
         )
-        .route("/healthz", get(|| async { "OK" }))
+        .route("/healthz", get(handle_healthz))
+        .route("/metrics", get(handle_metrics))
         .merge(ingest_routes)
         .merge(admin_routes)
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .with_state(state)
 }
 
+/// 管理侧鉴权中间件：读接口与 PATCH 一律先过 token 校验（契约 R10 / R10.1）。
+async fn admin_auth_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    match state.check_admin_auth(request.headers()) {
+        AuthOutcome::Allowed => next.run(request).await,
+        AuthOutcome::Unauthorized => unauthorized().into_response(),
+        AuthOutcome::NotConfigured => admin_token_not_configured().into_response(),
+    }
+}
+
+/// `GET /healthz`：DB 探活（契约 R11.2）。DB 不可达 → 503 且 body 带 `db:"down"`。
+async fn handle_healthz(State(state): State<AppState>) -> Response {
+    match tokio::time::timeout(DB_PROBE_TIMEOUT, state.repo.health_check()).await {
+        Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": "ok", "db": "up"}))).into_response(),
+        Ok(Err(err)) => {
+            warn!(error = %err, "healthz db probe failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status": "degraded", "db": "down"})),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            warn!("healthz db probe timed out");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status": "degraded", "db": "down"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Prometheus 文本格式的 label 值转义。
+fn escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// `GET /metrics`：最小运维指标集（契约 R11.3）。
+async fn handle_metrics(State(state): State<AppState>) -> Result<Response, (StatusCode, String)> {
+    let counts = state
+        .repo
+        .issue_counts_by_status_environment()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let events_total = state
+        .repo
+        .count_events()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut body = String::from(
+        "# HELP pony_sentry_issues_total Issue 总数（按 status 与 environment 维度）\n\
+         # TYPE pony_sentry_issues_total gauge\n",
+    );
+    for row in &counts {
+        body.push_str(&format!(
+            "pony_sentry_issues_total{{status=\"{}\",environment=\"{}\"}} {}\n",
+            escape_label(&row.status),
+            escape_label(&row.environment),
+            row.count
+        ));
+    }
+
+    body.push_str(
+        "# HELP pony_sentry_events_total 事件总行数\n\
+         # TYPE pony_sentry_events_total counter\n",
+    );
+    body.push_str(&format!("pony_sentry_events_total {events_total}\n"));
+
+    let (created, duplicate, degraded_level) = state.metrics.snapshot();
+    body.push_str(
+        "# HELP pony_sentry_ingest_requests_total ingest 写入结果计数\n\
+         # TYPE pony_sentry_ingest_requests_total counter\n",
+    );
+    body.push_str(&format!(
+        "pony_sentry_ingest_requests_total{{result=\"created\"}} {created}\n\
+         pony_sentry_ingest_requests_total{{result=\"duplicate\"}} {duplicate}\n"
+    ));
+    body.push_str(
+        "# HELP pony_sentry_ingest_level_degraded_total 非法 level 降级为 warning 的次数\n\
+         # TYPE pony_sentry_ingest_level_degraded_total counter\n",
+    );
+    body.push_str(&format!(
+        "pony_sentry_ingest_level_degraded_total {degraded_level}\n"
+    ));
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response())
+}
+
 async fn handle_ingest(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<IngestPayload>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // 若配置了 CLIENT_TOKEN，验证客户端请求头
-    if let Some(ref expected_token) = state.client_token {
-        let provided = headers
-            .get("x-client-token")
-            .and_then(|h| h.to_str().ok())
-            .or_else(|| {
-                headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.strip_prefix("Bearer "))
-            });
-
-        match provided {
-            Some(t) if t.trim() == expected_token => {}
-            _ => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid or missing client token".into(),
-                ))
-            }
-        }
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    // 1. 写入侧鉴权：未配置 token 时沿用既有放行语义（契约 R10.1 收窄版）
+    if state.check_write_auth(&headers) == AuthOutcome::Unauthorized {
+        return Err(unauthorized());
     }
+
+    // 2. 严格校验：会破坏幂等语义/时间可信度的字段直接 422（契约 R2.3 / R4）
+    let event_key = validate_event_id(payload.event_id).map_err(|e| invalid_field(e.field))?;
+    let occurred_at =
+        parse_timestamp(payload.timestamp.as_deref()).map_err(|e| invalid_field(e.field))?;
+
+    // 3. 归一：等级降级、维度截断、URL/查询结构校验（契约 R2 / R2.5）
+    let mut warnings: Vec<String> = Vec::new();
+    let (level, degraded_level) = normalize_level(payload.level.as_deref());
+    if degraded_level {
+        state.metrics.record_degraded_level();
+        warn!(
+            raw_level = ?payload.level,
+            degraded_to = %level,
+            "ingest level 非法，已降级"
+        );
+        warnings.push(format!("invalid_level_degraded_to_{level}"));
+    }
+
+    let environment = normalize_environment(payload.environment.as_deref());
+    let namespace = normalize_dimension(payload.namespace.as_deref(), 128);
+    let app = normalize_dimension(payload.app.as_deref(), 128);
+    let component = normalize_dimension(payload.component.as_deref(), 128);
+    let service_name = normalize_dimension(payload.service_name.as_deref(), 128);
+    let error_type = normalize_dimension(payload.error_type.as_deref(), 256);
+    let source_kind = normalize_source_kind(payload.source_kind.as_deref());
+    let scope = "ingest";
+    let request_id = event_key
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    info!(
+        scope,
+        request_id = %request_id,
+        environment = %environment,
+        level = %level,
+        source_kind = ?source_kind,
+        "ingest received"
+    );
+
+    let grafana_url = normalize_grafana_url(payload.grafana_url.clone());
+    if grafana_url.is_none() && payload.grafana_url.is_some() {
+        warn!(scope, request_id = %request_id, "grafana_url 结构非法，已丢弃");
+        warnings.push("grafana_url_discarded".to_string());
+    }
+    let loki_query = normalize_loki_query(payload.loki_query.clone());
+    if loki_query.is_none() && payload.loki_query.is_some() {
+        warn!(scope, request_id = %request_id, "loki_query 结构非法，已丢弃");
+        warnings.push("loki_query_discarded".to_string());
+    }
+
+    let (message, extra_truncated) = (
+        payload
+            .message
+            .as_deref()
+            .map(|m| truncate_chars(m, MESSAGE_MAX_CHARS)),
+        false,
+    );
+    let (extra, extra_truncated_by_size) = guard_extra(payload.extra);
+    if extra_truncated_by_size {
+        warn!(scope, request_id = %request_id, "extra 超过 8KB，已替换为占位对象");
+        warnings.push("extra_truncated".to_string());
+    }
+    let _ = extra_truncated;
+
     let raw_event = RawEvent {
-        platform: payload.platform.unwrap_or_else(|| "other".into()),
-        release: payload.release,
-        environment: payload.environment,
-        message: payload.message,
+        platform: normalize_dimension(payload.platform.as_deref(), 64)
+            .unwrap_or_else(|| "other".to_string()),
+        release: normalize_dimension(payload.release.as_deref(), 128),
+        environment: Some(environment.clone()),
+        message,
         exception: payload.exception,
-        tags: payload.tags,
-        extra: payload.extra,
+        tags: normalize_tags(payload.tags),
+        extra,
         breadcrumbs: payload.breadcrumbs,
+        event_id: event_key.clone(),
+        level: Some(level.clone()),
+        namespace: namespace.clone(),
+        app: app.clone(),
+        component: component.clone(),
+        service_name: service_name.clone(),
+        error_type: error_type.clone(),
+        source_kind: source_kind.clone(),
+        grafana_url,
+        loki_query,
+        timestamp: payload.timestamp,
     };
 
-    // 1. 脱敏
+    // 4. 栈帧双形态归一：字符串 → extra.stacktrace_text + 单帧（契约 R3）
+    let raw_event = normalize_stacktrace(raw_event);
+
+    // 5. 脱敏
     let sanitized = SanitizationPipeline::sanitize_event(raw_event);
 
-    // 2. 计算指纹与提取核心信息（唯一真相源：compute_issue_fingerprint）
+    // 6. 计算 v3 指纹与派生维度（唯一真相源：compute_issue_fingerprint）
     let info = compute_issue_fingerprint(&sanitized);
     let title = info.title.clone();
     let culprit = info.culprit.clone();
     let fingerprint = info.fingerprint.clone();
 
-    // 3. 项目维度：使用 infer_project_name 综合 tags、extra、title 与 culprit 智能识别
+    // 7. 项目维度：综合 tags、extra、title 与 culprit 智能识别
     let project = infer_project_name(
         sanitized.tags.as_ref(),
         sanitized.extra.as_ref(),
@@ -225,30 +597,36 @@ async fn handle_ingest(
         culprit.as_deref(),
     );
 
-    // 4. 持久化与状态机流转
     let payload_json = serde_json::to_value(&sanitized)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| persistence_error(format!("serialize sanitized event: {e}")))?;
 
+    // 8. 持久化与幂等（契约 R4）
     let res = state
         .repo
-        .record_event_and_upsert_issue(
-            &fingerprint,
-            &title,
-            culprit.as_deref(),
-            &sanitized.platform,
-            sanitized.release.as_deref(),
-            sanitized.environment.as_deref(),
-            project.as_deref(),
-            payload_json,
-        )
+        .record_event_and_upsert_issue(NewEventRecord {
+            fingerprint: &fingerprint,
+            title: &title,
+            culprit: culprit.as_deref(),
+            platform: &sanitized.platform,
+            release: sanitized.release.as_deref(),
+            environment: Some(info.environment.as_str()),
+            project: project.as_deref(),
+            app: info.app.as_deref(),
+            namespace: info.namespace.as_deref(),
+            component: info.component.as_deref(),
+            level: &info.level,
+            source_kind: info.source_kind.as_deref(),
+            event_key: event_key.as_deref(),
+            payload: payload_json,
+            occurred_at,
+        })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(persistence_error)?;
 
     let issue = res.issue;
     let event = res.event;
 
-    // 检查是否有契约缺陷告警
-    let mut warnings = Vec::new();
+    // 9. 契约缺陷告警（保持既有行为）
     if issue.project.is_none() {
         warnings.push(
             "missing_project: please supply tags.project, tags.service, or extra.project_path"
@@ -261,8 +639,24 @@ async fn handle_ingest(
         );
     }
 
-    // 5. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
-    if res.is_new || res.is_regression_trigger {
+    if res.is_duplicate {
+        state.metrics.record_duplicate();
+    } else {
+        state.metrics.record_created();
+    }
+
+    info!(
+        scope,
+        request_id = %request_id,
+        issue_id = %issue.id,
+        duplicate = res.is_duplicate,
+        count = issue.count,
+        "ingest persisted"
+    );
+
+    // 10. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
+    //     幂等命中不再触发通知（同一事件不重复通知）。
+    if !res.is_duplicate && (res.is_new || res.is_regression_trigger) {
         if let Some(ref webhook_url) = state.webhook_url {
             let webhook_url = webhook_url.clone();
             let event_type = if res.is_new {
@@ -282,6 +676,8 @@ async fn handle_ingest(
                     "count": issue.count,
                     "status": issue.status,
                     "project": issue.project,
+                    "environment": issue.environment,
+                    "level": issue.level,
                     "project_path": sanitized.extra.as_ref().and_then(|x| x.get("project_path")).and_then(|v| v.as_str()),
                 },
                 "latest_event": {
@@ -309,14 +705,27 @@ async fn handle_ingest(
         }
     }
 
-    Ok(Json(IngestResponse {
-        issue_id: issue.id,
-        event_id: event.id,
-        fingerprint,
+    let response = IngestResponse {
+        result: if res.is_duplicate {
+            "duplicate"
+        } else {
+            "created"
+        },
         status: issue.status,
+        issue_id: issue.id,
+        event_id: event.event_key.clone().unwrap_or_else(|| event.id.clone()),
+        fingerprint,
         count: issue.count,
+        duplicate: res.is_duplicate,
         warnings,
-    }))
+    };
+
+    let status_code = if res.is_duplicate {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status_code, Json(response)).into_response())
 }
 
 async fn handle_list_issues(
@@ -329,6 +738,8 @@ async fn handle_list_issues(
         platform: q.platform,
         release: q.release,
         project: q.project,
+        environment: q.environment,
+        level: q.level,
         limit: q.limit,
         offset: q.offset,
     };
@@ -366,6 +777,24 @@ async fn handle_list_projects(
     Ok(Json(projects))
 }
 
+/// 从事件载荷派生 `error_type`（契约 R2 的一级字段，事件级属性，不落 issues 表）：
+/// 优先级 `payload.error_type` → `payload.exception.error_type`。
+fn derived_error_type(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("error_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            payload
+                .get("exception")
+                .and_then(|e| e.get("error_type"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+        })
+}
+
 async fn handle_get_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -377,7 +806,20 @@ async fn handle_get_issue(
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     })?;
 
-    Ok(Json(issue))
+    // 派生视图字段 `error_type`（事件级属性）：取该 issue 最近一条事件的载荷。
+    let mut value = serde_json::to_value(&issue)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Ok(events) = state.repo.get_events_for_issue(&id, 1).await {
+        if let Some(latest) = events.first() {
+            if let Some(error_type) = derived_error_type(&latest.payload) {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("error_type".to_string(), json!(error_type));
+                }
+            }
+        }
+    }
+
+    Ok(Json(value))
 }
 
 async fn handle_update_issue(
@@ -426,26 +868,11 @@ async fn handle_ingest_trace(
     headers: HeaderMap,
     Json(payload): Json<AgentTraceIngestRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if let Some(ref expected_token) = state.client_token {
-        let provided = headers
-            .get("x-client-token")
-            .and_then(|h| h.to_str().ok())
-            .or_else(|| {
-                headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.strip_prefix("Bearer "))
-            });
-
-        match provided {
-            Some(t) if t.trim() == expected_token => {}
-            _ => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid or missing client token".into(),
-                ))
-            }
-        }
+    if state.check_write_auth(&headers) == AuthOutcome::Unauthorized {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing client token".into(),
+        ));
     }
 
     let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
@@ -594,4 +1021,99 @@ async fn handle_update_trace(
         })?;
 
     Ok(Json(updated))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_match_requires_exact_value() {
+        assert!(token_matches("abc", "abc"));
+        assert!(!token_matches("abc", "abd"));
+        assert!(!token_matches("abc", "abcd"));
+        assert!(!token_matches("", "abc"));
+    }
+
+    #[test]
+    fn derived_error_type_prefers_top_level_field() {
+        let payload = json!({
+            "error_type": "ValidationError",
+            "exception": {"error_type": "ValueError"}
+        });
+        assert_eq!(
+            derived_error_type(&payload).as_deref(),
+            Some("ValidationError")
+        );
+    }
+
+    #[test]
+    fn derived_error_type_falls_back_to_exception() {
+        let payload = json!({"exception": {"error_type": "ValueError"}});
+        assert_eq!(derived_error_type(&payload).as_deref(), Some("ValueError"));
+        assert_eq!(derived_error_type(&json!({})), None);
+        assert_eq!(
+            derived_error_type(&json!({"error_type": "  "})),
+            None,
+            "空白等价缺失"
+        );
+    }
+
+    #[test]
+    fn metrics_label_values_are_escaped() {
+        assert_eq!(escape_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn write_auth_allows_when_no_token_configured() {
+        assert_eq!(
+            check_write_auth(None, None, &HeaderMap::new()),
+            AuthOutcome::Allowed,
+            "未配置 token 时写入沿用既有放行语义（契约 R10.1 收窄版）"
+        );
+        assert_eq!(
+            check_admin_auth(None, None, &HeaderMap::new()),
+            AuthOutcome::NotConfigured,
+            "未配置 token 时读/PATCH fail-closed（契约 R10.1）"
+        );
+    }
+
+    #[test]
+    fn admin_auth_prefers_admin_token_and_falls_back_to_client_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-admin-token", "admin-tok".parse().unwrap());
+        assert_eq!(
+            check_admin_auth(Some("admin-tok"), Some("client-tok"), &headers),
+            AuthOutcome::Allowed
+        );
+
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("authorization", "Bearer client-tok".parse().unwrap());
+        assert_eq!(
+            check_admin_auth(Some("admin-tok"), Some("client-tok"), &client_headers),
+            AuthOutcome::Allowed,
+            "CLIENT_TOKEN 亦可通过管理侧鉴权（契约 R10 矩阵）"
+        );
+
+        let mut bad = HeaderMap::new();
+        bad.insert("x-admin-token", "nope".parse().unwrap());
+        assert_eq!(
+            check_admin_auth(Some("admin-tok"), Some("client-tok"), &bad),
+            AuthOutcome::Unauthorized
+        );
+    }
+
+    #[test]
+    fn admin_auth_requires_token_when_only_client_token_configured() {
+        assert_eq!(
+            check_admin_auth(None, Some("client-tok"), &HeaderMap::new()),
+            AuthOutcome::Unauthorized
+        );
+        assert_eq!(
+            check_write_auth(Some("client-tok"), None, &HeaderMap::new()),
+            AuthOutcome::Unauthorized,
+            "配置 CLIENT_TOKEN 后匿名写入必须 401"
+        );
+    }
 }

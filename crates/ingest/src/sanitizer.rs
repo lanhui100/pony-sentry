@@ -1,4 +1,4 @@
-use crate::parser::{Exception, Frame, RawEvent};
+use crate::parser::{Exception, RawEvent, Stacktrace};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -89,20 +89,26 @@ impl SanitizationPipeline {
         if let Some(val) = ex.value.take() {
             ex.value = Some(Self::sanitize_string(&val));
         }
-        if let Some(frames) = ex.stacktrace.take() {
-            let sanitized_frames: Vec<Frame> = frames
-                .into_iter()
-                .map(|mut f| {
-                    if let Some(fname) = f.filename.take() {
-                        f.filename = Some(Self::sanitize_path(&fname));
-                    }
-                    if let Some(func) = f.function.take() {
-                        f.function = Some(Self::sanitize_string(&func));
-                    }
-                    f
-                })
-                .collect();
-            ex.stacktrace = Some(sanitized_frames);
+        if let Some(stacktrace) = ex.stacktrace.take() {
+            // 两种形态都要脱敏：结构化栈帧逐帧清理路径/函数名；
+            // 字符串形态（客户端 traceback 文本）整体走字符串脱敏，保留首帧可解析性。
+            ex.stacktrace = Some(match stacktrace {
+                Stacktrace::Frames(frames) => Stacktrace::Frames(
+                    frames
+                        .into_iter()
+                        .map(|mut f| {
+                            if let Some(fname) = f.filename.take() {
+                                f.filename = Some(Self::sanitize_path(&fname));
+                            }
+                            if let Some(func) = f.function.take() {
+                                f.function = Some(Self::sanitize_string(&func));
+                            }
+                            f
+                        })
+                        .collect(),
+                ),
+                Stacktrace::Text(text) => Stacktrace::Text(Self::sanitize_string(&text)),
+            });
         }
         ex
     }

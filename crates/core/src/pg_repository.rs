@@ -1,12 +1,25 @@
 use crate::{
-    models::{EvalStatus, Event, Issue, IssueStatus, TraceFilter, TraceRecord},
+    models::{
+        EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, TraceFilter,
+        TraceRecord,
+    },
     reindex::{plan_reindex, FingerprintOut, ReindexSummary},
-    repository::{IssueFilter, IssueRepository, RepositoryError, TraceRepository},
+    repository::{IssueFilter, IssueRepository, NewEventRecord, RepositoryError, TraceRepository},
 };
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+/// issues 表全量列（对齐 `migrations/postgres/0001` + `0002` + `0004`）。
+const ISSUE_COLUMNS: &str =
+    "id, fingerprint, title, culprit, platform, status, assigned_to, count, \
+     last_release, project, environment, app, namespace, component, level, source_kind, \
+     first_seen_at, last_seen_at";
+
+/// events 表全量列（含 0004 新增 event_key / level）。
+const EVENT_COLUMNS: &str =
+    "id, issue_id, payload, release, environment, event_key, level, created_at";
 
 #[derive(Clone)]
 pub struct PgIssueRepository {
@@ -28,30 +41,135 @@ impl PgIssueRepository {
         sqlx::raw_sql(migration_traces_sql)
             .execute(&self.pool)
             .await?;
+        // 0004：多环境维度 + 事件幂等键。全部语句幂等（IF NOT EXISTS / DROP ... IF EXISTS），
+        // 每次启动重放安全；失败即启动失败（契约 R5.3）。
+        let migration_ext_sql =
+            include_str!("../../../migrations/postgres/0004_add_issue_dimensions.sql");
+        sqlx::raw_sql(migration_ext_sql).execute(&self.pool).await?;
         Ok(())
+    }
+
+    async fn issue_by_id(&self, id: &str) -> Result<Issue, RepositoryError> {
+        let row = sqlx::query(&format!("SELECT {ISSUE_COLUMNS} FROM issues WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| RepositoryError::NotFound(id.to_string()))?;
+        Ok(issue_from_row(&row))
+    }
+
+    /// 幂等命中路径：按 event_key 取既有事件与其归属 issue（不触碰计数与时间戳）。
+    async fn duplicate_hit(
+        &self,
+        event_key: &str,
+    ) -> Result<Option<UpsertDuplicate>, RepositoryError> {
+        let row = sqlx::query(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events WHERE event_key = $1"
+        ))
+        .bind(event_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let event = event_from_row(&row)?;
+        let issue_id = event.issue_id.clone();
+        Ok(Some(UpsertDuplicate { issue_id, event }))
+    }
+}
+
+/// 幂等命中时待回填的既有行（issue 由调用方按 id 查询）。
+struct UpsertDuplicate {
+    issue_id: String,
+    event: Event,
+}
+
+fn issue_from_row(row: &sqlx::postgres::PgRow) -> Issue {
+    let status_str: String = row.get("status");
+    Issue {
+        id: row.get("id"),
+        fingerprint: row.get("fingerprint"),
+        title: row.get("title"),
+        culprit: row.get("culprit"),
+        platform: row.get("platform"),
+        status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
+        assigned_to: row.get("assigned_to"),
+        count: row.get("count"),
+        last_release: row.get("last_release"),
+        project: row.get("project"),
+        environment: row.get("environment"),
+        app: row.get("app"),
+        namespace: row.get("namespace"),
+        component: row.get("component"),
+        level: row.get("level"),
+        source_kind: row.get("source_kind"),
+        first_seen_at: row.get("first_seen_at"),
+        last_seen_at: row.get("last_seen_at"),
+    }
+}
+
+fn event_from_row(row: &sqlx::postgres::PgRow) -> Result<Event, RepositoryError> {
+    let payload_text: String = row.get("payload");
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload_text).unwrap_or_else(|_| serde_json::json!({}));
+    Ok(Event {
+        id: row.get("id"),
+        issue_id: row.get("issue_id"),
+        payload,
+        release: row.get("release"),
+        environment: row.get("environment"),
+        event_key: row.get("event_key"),
+        level: row.get("level"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// 环境维度归一：空白/缺省一律落 `unknown`（契约 R2 / R5 默认值）。
+fn normalize_environment(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn duplicate_result(issue: Issue, event: Event) -> crate::repository::UpsertIssueResult {
+    crate::repository::UpsertIssueResult {
+        issue,
+        event,
+        is_new: false,
+        is_regression_trigger: false,
+        is_duplicate: true,
     }
 }
 
 #[async_trait]
 impl IssueRepository for PgIssueRepository {
-    #[allow(clippy::too_many_arguments)]
     async fn record_event_and_upsert_issue(
         &self,
-        fingerprint: &str,
-        title: &str,
-        culprit: Option<&str>,
-        platform: &str,
-        release: Option<&str>,
-        environment: Option<&str>,
-        project: Option<&str>,
-        payload: serde_json::Value,
+        record: NewEventRecord<'_>,
     ) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
         let now = Utc::now();
-        let existing = sqlx::query(
-            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues WHERE fingerprint = $1"
-        )
-        .bind(fingerprint)
-        .fetch_optional(&self.pool)
+        let occurred_at: DateTime<Utc> = record.occurred_at.unwrap_or(now);
+        let environment = normalize_environment(record.environment);
+
+        // 1. 幂等前置检查（契约 R4.1）：命中即不产生新 events 行、不动计数与时间戳。
+        if let Some(key) = record.event_key {
+            if let Some(hit) = self.duplicate_hit(key).await? {
+                let issue = self.issue_by_id(&hit.issue_id).await?;
+                return Ok(duplicate_result(issue, hit.event));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let existing = sqlx::query(&format!(
+            "SELECT {ISSUE_COLUMNS} FROM issues WHERE fingerprint = $1 AND environment = $2"
+        ))
+        .bind(record.fingerprint)
+        .bind(&environment)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let mut is_new = false;
@@ -59,49 +177,71 @@ impl IssueRepository for PgIssueRepository {
 
         let issue = match existing {
             Some(row) => {
-                let id: String = row.get("id");
-                let current_status_str: String = row.get("status");
-                let mut status = current_status_str
-                    .parse::<IssueStatus>()
-                    .unwrap_or(IssueStatus::Unresolved);
-                let current_count: i64 = row.get("count");
-                let assigned_to: Option<String> = row.get("assigned_to");
-                let stored_project: Option<String> = row.get("project");
-                let first_seen: chrono::DateTime<Utc> = row.get("first_seen_at");
-
+                let stored = issue_from_row(&row);
+                let mut status = stored.status;
                 if status == IssueStatus::Resolved {
                     status = IssueStatus::Regression;
                     is_regression_trigger = true;
                 }
-
-                let new_count = current_count + 1;
+                let new_count = stored.count + 1;
+                // 乱序事件（补投历史 timestamp）不得把 last_seen_at 拉回过去
+                let last_seen_at = if occurred_at > stored.last_seen_at {
+                    occurred_at
+                } else {
+                    stored.last_seen_at
+                };
                 sqlx::query(
                     "UPDATE issues SET count = $1, status = $2, last_release = $3, last_seen_at = $4 WHERE id = $5"
                 )
                 .bind(new_count)
                 .bind(status.to_string())
-                .bind(release)
-                .bind(now)
-                .bind(&id)
-                .execute(&self.pool)
+                .bind(record.release)
+                .bind(last_seen_at)
+                .bind(&stored.id)
+                .execute(&mut *tx)
                 .await?;
 
-                // 项目名以首报为准，理由同 SQLite 实现。
-                let project = stored_project.or_else(|| project.map(|s| s.to_string()));
+                // 维度以首报为准（与项目名同策略）：后续上报若缺维度，不把已有值擦成 NULL。
+                let app = stored.app.or_else(|| record.app.map(str::to_string));
+                let namespace = stored
+                    .namespace
+                    .or_else(|| record.namespace.map(str::to_string));
+                let component = stored
+                    .component
+                    .or_else(|| record.component.map(str::to_string));
+                sqlx::query(
+                    "UPDATE issues SET app = $1, namespace = $2, component = $3, level = $4, source_kind = $5 WHERE id = $6",
+                )
+                .bind(&app)
+                .bind(&namespace)
+                .bind(&component)
+                .bind(record.level)
+                .bind(record.source_kind)
+                .bind(&stored.id)
+                .execute(&mut *tx)
+                .await?;
 
                 Issue {
-                    id,
-                    fingerprint: fingerprint.to_string(),
-                    title: title.to_string(),
-                    culprit: culprit.map(|s| s.to_string()),
-                    platform: platform.to_string(),
+                    id: stored.id,
+                    fingerprint: record.fingerprint.to_string(),
+                    title: record.title.to_string(),
+                    culprit: record.culprit.map(str::to_string),
+                    platform: record.platform.to_string(),
                     status,
-                    assigned_to,
+                    assigned_to: stored.assigned_to,
                     count: new_count,
-                    last_release: release.map(|s| s.to_string()),
-                    project,
-                    first_seen_at: first_seen,
-                    last_seen_at: now,
+                    last_release: record.release.map(str::to_string),
+                    project: stored
+                        .project
+                        .or_else(|| record.project.map(str::to_string)),
+                    environment: environment.clone(),
+                    app,
+                    namespace,
+                    component,
+                    level: record.level.to_string(),
+                    source_kind: record.source_kind.map(str::to_string),
+                    first_seen_at: stored.first_seen_at,
+                    last_seen_at,
                 }
             }
             None => {
@@ -109,59 +249,95 @@ impl IssueRepository for PgIssueRepository {
                 let id = Uuid::new_v4().to_string();
                 let status = IssueStatus::Unresolved;
                 sqlx::query(
-                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, count, last_release, project, first_seen_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, count, \
+                     last_release, project, environment, app, namespace, component, level, source_kind, \
+                     first_seen_at, last_seen_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
                 )
                 .bind(&id)
-                .bind(fingerprint)
-                .bind(title)
-                .bind(culprit)
-                .bind(platform)
+                .bind(record.fingerprint)
+                .bind(record.title)
+                .bind(record.culprit)
+                .bind(record.platform)
                 .bind(status.to_string())
                 .bind(1i64)
-                .bind(release)
-                .bind(project)
-                .bind(now)
-                .bind(now)
-                .execute(&self.pool)
+                .bind(record.release)
+                .bind(record.project)
+                .bind(&environment)
+                .bind(record.app)
+                .bind(record.namespace)
+                .bind(record.component)
+                .bind(record.level)
+                .bind(record.source_kind)
+                .bind(occurred_at)
+                .bind(occurred_at)
+                .execute(&mut *tx)
                 .await?;
 
                 Issue {
                     id,
-                    fingerprint: fingerprint.to_string(),
-                    title: title.to_string(),
-                    culprit: culprit.map(|s| s.to_string()),
-                    platform: platform.to_string(),
+                    fingerprint: record.fingerprint.to_string(),
+                    title: record.title.to_string(),
+                    culprit: record.culprit.map(str::to_string),
+                    platform: record.platform.to_string(),
                     status,
                     assigned_to: None,
                     count: 1,
-                    last_release: release.map(|s| s.to_string()),
-                    project: project.map(|s| s.to_string()),
-                    first_seen_at: now,
-                    last_seen_at: now,
+                    last_release: record.release.map(str::to_string),
+                    project: record.project.map(str::to_string),
+                    environment: environment.clone(),
+                    app: record.app.map(str::to_string),
+                    namespace: record.namespace.map(str::to_string),
+                    component: record.component.map(str::to_string),
+                    level: record.level.to_string(),
+                    source_kind: record.source_kind.map(str::to_string),
+                    first_seen_at: occurred_at,
+                    last_seen_at: occurred_at,
                 }
             }
         };
 
         let event_id = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO events (id, issue_id, payload, release, environment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+        let insert_result = sqlx::query(
+            "INSERT INTO events (id, issue_id, payload, release, environment, event_key, level, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&event_id)
         .bind(&issue.id)
-        .bind(&payload)
-        .bind(release)
-        .bind(environment)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
+        .bind(&record.payload)
+        .bind(record.release)
+        .bind(&environment)
+        .bind(record.event_key)
+        .bind(record.level)
+        .bind(occurred_at)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(err) = insert_result {
+            // 并发同 event_key：唯一索引兜底，归一为幂等命中（契约 R4.2，不得 500）。
+            if is_unique_violation(&err) {
+                tx.rollback().await?;
+                if let Some(key) = record.event_key {
+                    if let Some(hit) = self.duplicate_hit(key).await? {
+                        let issue = self.issue_by_id(&hit.issue_id).await?;
+                        return Ok(duplicate_result(issue, hit.event));
+                    }
+                }
+            }
+            return Err(err.into());
+        }
+
+        tx.commit().await?;
 
         let event = Event {
             id: event_id,
             issue_id: issue.id.clone(),
-            payload,
-            release: release.map(|s| s.to_string()),
-            environment: environment.map(|s| s.to_string()),
-            created_at: now,
+            payload: record.payload,
+            release: record.release.map(str::to_string),
+            environment: Some(environment),
+            event_key: record.event_key.map(str::to_string),
+            level: Some(record.level.to_string()),
+            created_at: occurred_at,
         };
 
         Ok(crate::repository::UpsertIssueResult {
@@ -169,40 +345,18 @@ impl IssueRepository for PgIssueRepository {
             event,
             is_new,
             is_regression_trigger,
+            is_duplicate: false,
         })
     }
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| RepositoryError::NotFound(id.to_string()))?;
-
-        let status_str: String = row.get("status");
-
-        Ok(Issue {
-            id: row.get("id"),
-            fingerprint: row.get("fingerprint"),
-            title: row.get("title"),
-            culprit: row.get("culprit"),
-            platform: row.get("platform"),
-            status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
-            assigned_to: row.get("assigned_to"),
-            count: row.get("count"),
-            last_release: row.get("last_release"),
-            project: row.get("project"),
-            first_seen_at: row.get("first_seen_at"),
-            last_seen_at: row.get("last_seen_at"),
-        })
+        self.issue_by_id(id).await
     }
 
     async fn list_issues(&self, filter: IssueFilter) -> Result<Vec<Issue>, RepositoryError> {
-        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues WHERE 1=1"
-        );
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
+            "SELECT {ISSUE_COLUMNS} FROM issues WHERE 1=1"
+        ));
 
         if let Some(ref st) = filter.status {
             builder.push(" AND status = ").push_bind(st.to_string());
@@ -216,6 +370,12 @@ impl IssueRepository for PgIssueRepository {
         if let Some(ref proj) = filter.project {
             builder.push(" AND project = ").push_bind(proj);
         }
+        if let Some(ref env) = filter.environment {
+            builder.push(" AND environment = ").push_bind(env);
+        }
+        if let Some(ref level) = filter.level {
+            builder.push(" AND level = ").push_bind(level);
+        }
         builder.push(" ORDER BY last_seen_at DESC");
 
         let limit = filter.limit.unwrap_or(50).clamp(1, 100);
@@ -227,25 +387,7 @@ impl IssueRepository for PgIssueRepository {
             .push_bind(offset);
 
         let rows = builder.build().fetch_all(&self.pool).await?;
-        let mut issues = Vec::new();
-        for row in rows {
-            let status_str: String = row.get("status");
-            issues.push(Issue {
-                id: row.get("id"),
-                fingerprint: row.get("fingerprint"),
-                title: row.get("title"),
-                culprit: row.get("culprit"),
-                platform: row.get("platform"),
-                status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
-                assigned_to: row.get("assigned_to"),
-                count: row.get("count"),
-                last_release: row.get("last_release"),
-                project: row.get("project"),
-                first_seen_at: row.get("first_seen_at"),
-                last_seen_at: row.get("last_seen_at"),
-            });
-        }
-        Ok(issues)
+        Ok(rows.iter().map(issue_from_row).collect())
     }
 
     async fn update_issue_status(
@@ -272,25 +414,16 @@ impl IssueRepository for PgIssueRepository {
         issue_id: &str,
         limit: i64,
     ) -> Result<Vec<Event>, RepositoryError> {
-        let rows = sqlx::query("SELECT id, issue_id, payload, release, environment, created_at FROM events WHERE issue_id = $1 ORDER BY created_at DESC LIMIT $2")
-            .bind(issue_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT id, issue_id, payload::text AS payload, release, environment, event_key, level, created_at \
+             FROM events WHERE issue_id = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(issue_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
 
-        let mut events = Vec::new();
-        for row in rows {
-            let payload: serde_json::Value = row.get("payload");
-            events.push(Event {
-                id: row.get("id"),
-                issue_id: row.get("issue_id"),
-                payload,
-                release: row.get("release"),
-                environment: row.get("environment"),
-                created_at: row.get("created_at"),
-            });
-        }
-        Ok(events)
+        rows.iter().map(event_from_row).collect()
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError> {
@@ -306,51 +439,75 @@ impl IssueRepository for PgIssueRepository {
             .collect())
     }
 
+    async fn health_check(&self) -> Result<(), RepositoryError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn issue_counts_by_status_environment(
+        &self,
+    ) -> Result<Vec<IssueStatusEnvironmentCount>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT status, environment, COUNT(*) AS cnt FROM issues GROUP BY status, environment \
+             ORDER BY environment ASC, status ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| IssueStatusEnvironmentCount {
+                status: row.get("status"),
+                environment: row.get("environment"),
+                count: row.get("cnt"),
+            })
+            .collect())
+    }
+
+    async fn count_events(&self) -> Result<i64, RepositoryError> {
+        let row = sqlx::query("SELECT COUNT(*) AS cnt FROM events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get("cnt"))
+    }
+
+    async fn delete_events_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<u64, RepositoryError> {
+        let batch_size = batch_size.max(1);
+        let deleted = sqlx::query(
+            "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE created_at < $1 LIMIT $2)",
+        )
+        .bind(cutoff)
+        .bind(batch_size)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deleted)
+    }
+
     async fn reindex_fingerprints(
         &self,
         fingerprint_of: &(dyn for<'a> Fn(&'a serde_json::Value) -> Option<FingerprintOut> + Sync),
     ) -> Result<ReindexSummary, RepositoryError> {
         let event_rows = sqlx::query(
-            "SELECT id, issue_id, payload, release, environment, created_at FROM events",
+            "SELECT id, issue_id, payload::text AS payload, release, environment, event_key, level, created_at FROM events",
         )
         .fetch_all(&self.pool)
         .await?;
-
         let mut events = Vec::with_capacity(event_rows.len());
-        for row in event_rows {
-            events.push(Event {
-                id: row.get("id"),
-                issue_id: row.get("issue_id"),
-                payload: row.get("payload"),
-                release: row.get("release"),
-                environment: row.get("environment"),
-                created_at: row.get("created_at"),
-            });
+        for row in &event_rows {
+            events.push(event_from_row(row)?);
         }
 
-        let issue_rows = sqlx::query(
-            "SELECT id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at FROM issues",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let issue_rows = sqlx::query(&format!("SELECT {ISSUE_COLUMNS} FROM issues"))
+            .fetch_all(&self.pool)
+            .await?;
         let mut issues = Vec::with_capacity(issue_rows.len());
-        for row in issue_rows {
-            let status_str: String = row.get("status");
-            issues.push(Issue {
-                id: row.get("id"),
-                fingerprint: row.get("fingerprint"),
-                title: row.get("title"),
-                culprit: row.get("culprit"),
-                platform: row.get("platform"),
-                status: status_str.parse().unwrap_or(IssueStatus::Unresolved),
-                assigned_to: row.get("assigned_to"),
-                count: row.get("count"),
-                last_release: row.get("last_release"),
-                project: row.get("project"),
-                first_seen_at: row.get("first_seen_at"),
-                last_seen_at: row.get("last_seen_at"),
-            });
+        for row in &issue_rows {
+            issues.push(issue_from_row(row));
         }
 
         let plan = plan_reindex(&events, &issues, fingerprint_of);
@@ -359,7 +516,7 @@ impl IssueRepository for PgIssueRepository {
         for row in &plan.issue_rows {
             if plan.reused_ids.contains(&row.id) {
                 sqlx::query(
-                    "UPDATE issues SET fingerprint = $1, title = $2, culprit = $3, platform = $4, status = $5, assigned_to = $6, count = $7, last_release = $8, project = $9, first_seen_at = $10, last_seen_at = $11 WHERE id = $12",
+                    "UPDATE issues SET fingerprint = $1, title = $2, culprit = $3, platform = $4, status = $5, assigned_to = $6, count = $7, last_release = $8, project = $9, environment = $10, app = $11, namespace = $12, component = $13, level = $14, source_kind = $15, first_seen_at = $16, last_seen_at = $17 WHERE id = $18",
                 )
                 .bind(&row.fingerprint)
                 .bind(&row.title)
@@ -370,6 +527,12 @@ impl IssueRepository for PgIssueRepository {
                 .bind(row.count)
                 .bind(&row.last_release)
                 .bind(&row.project)
+                .bind(&row.environment)
+                .bind(&row.app)
+                .bind(&row.namespace)
+                .bind(&row.component)
+                .bind(&row.level)
+                .bind(&row.source_kind)
                 .bind(row.first_seen_at)
                 .bind(row.last_seen_at)
                 .bind(&row.id)
@@ -377,7 +540,7 @@ impl IssueRepository for PgIssueRepository {
                 .await?;
             } else {
                 sqlx::query(
-                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, first_seen_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, assigned_to, count, last_release, project, environment, app, namespace, component, level, source_kind, first_seen_at, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
                 )
                 .bind(&row.id)
                 .bind(&row.fingerprint)
@@ -389,6 +552,12 @@ impl IssueRepository for PgIssueRepository {
                 .bind(row.count)
                 .bind(&row.last_release)
                 .bind(&row.project)
+                .bind(&row.environment)
+                .bind(&row.app)
+                .bind(&row.namespace)
+                .bind(&row.component)
+                .bind(&row.level)
+                .bind(&row.source_kind)
                 .bind(row.first_seen_at)
                 .bind(row.last_seen_at)
                 .execute(&mut *tx)
@@ -526,7 +695,8 @@ impl TraceRepository for PgIssueRepository {
         let mut query = "SELECT id, session_id, run_id, turn_id, environment, release, project,
                                 eval_status, payload::text AS payload, total_input_tokens, total_output_tokens,
                                 total_duration_ms, reported_at, created_at, updated_at
-                         FROM traces WHERE 1=1".to_string();
+                         FROM traces WHERE 1=1"
+            .to_string();
         let mut binds: Vec<String> = Vec::new();
         let mut bind_index = 1;
 
@@ -610,6 +780,23 @@ impl TraceRepository for PgIssueRepository {
             .into_iter()
             .map(|row| row.get::<String, _>("project"))
             .collect())
+    }
+
+    async fn delete_traces_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<u64, RepositoryError> {
+        let batch_size = batch_size.max(1);
+        let deleted = sqlx::query(
+            "DELETE FROM traces WHERE id IN (SELECT id FROM traces WHERE created_at < $1 LIMIT $2)",
+        )
+        .bind(cutoff)
+        .bind(batch_size)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deleted)
     }
 }
 

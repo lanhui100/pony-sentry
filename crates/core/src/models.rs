@@ -85,6 +85,19 @@ pub struct Issue {
     pub last_release: Option<String>,
     /// 项目名（上报事件 `extra.project_path` 的末段），见 pony_sentry_ingest::project_name_from_extra。
     pub project: Option<String>,
+    /// 部署环境维度（`dev|development|preprod|production|<自由串>`），参与 v3 指纹作用域；
+    /// 历史 issue 由 0004 迁移从其最近一条 events.environment 回填，缺失为 `unknown`。
+    pub environment: String,
+    /// 应用名（上报一级字段 `app`，如 `api_v2`）。
+    pub app: Option<String>,
+    /// 命名空间（上报一级字段 `namespace`，通常与 environment 同值）。
+    pub namespace: Option<String>,
+    /// 组件名（上报一级字段 `component`，如 `agent`）。
+    pub component: Option<String>,
+    /// 事件等级 `fatal|error|warning|info`，非法上报值降级为 `warning`。
+    pub level: String,
+    /// 来源通道 `log|agent|backend_exception|frontend|alert`。
+    pub source_kind: Option<String>,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
 }
@@ -96,6 +109,10 @@ pub struct Event {
     pub payload: serde_json::Value,
     pub release: Option<String>,
     pub environment: Option<String>,
+    /// 客户端确定性幂等键（上报一级字段 `event_id`），全局唯一；历史事件为 NULL。
+    pub event_key: Option<String>,
+    /// 事件等级快照（与 issue.level 同源，供审计与回填留痕，读取接口不依赖）。
+    pub level: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -158,6 +175,14 @@ pub struct TraceRecord {
     pub reported_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// 环境维度的状态分布（`/metrics` 的 `pony_sentry_issues_total{status,environment}` 数据源）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueStatusEnvironmentCount {
+    pub status: String,
+    pub environment: String,
+    pub count: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

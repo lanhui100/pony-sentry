@@ -1,18 +1,25 @@
 use pony_sentry_core::{
-    create_pool, reindex::FingerprintOut, IssueFilter, IssueRepository, SqliteIssueRepository,
+    create_pool, reindex::FingerprintOut, IssueFilter, IssueRepository, NewEventRecord,
+    SqliteIssueRepository,
 };
 use serde_json::json;
 
 async fn raw_report(repo: &SqliteIssueRepository, fp: &str, model: &str, kind: &str) {
-    repo.record_event_and_upsert_issue(
-        fp,
-        "dummy-title",
-        None,
-        "rust",
-        Some("0.2.49"),
-        None,
-        None,
-        json!({
+    repo.record_event_and_upsert_issue(NewEventRecord {
+        fingerprint: fp,
+        title: "dummy-title",
+        culprit: None,
+        platform: "rust",
+        release: Some("0.2.49"),
+        environment: None,
+        project: None,
+        app: None,
+        namespace: None,
+        component: None,
+        level: "error",
+        source_kind: None,
+        event_key: None,
+        payload: json!({
             "platform": "rust",
             "release": "0.2.49",
             "exception": {
@@ -26,7 +33,8 @@ async fn raw_report(repo: &SqliteIssueRepository, fp: &str, model: &str, kind: &
             },
             "extra": {}
         }),
-    )
+        occurred_at: None,
+    })
     .await
     .expect("Report should succeed");
 }

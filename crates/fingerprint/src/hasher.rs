@@ -80,6 +80,57 @@ impl FingerprintEngine {
         hex::encode(hasher.finalize())
     }
 
+    /// v3 指纹：在 v2 的拼接规则之上**追加** `0x1F ‖ environment`（契约 R6 / R6.0）。
+    ///
+    /// 拼接规则与 v2 完全一致——可选组件（error_kind/model/culprit）缺失时连分隔符一起跳过；
+    /// `environment` 恒参与（调用方保证缺省为 `unknown`），以小写去空白归一，
+    /// 使同一签名在不同环境下落到不同 issue（契约 R6.2）。
+    ///
+    /// 例：`v3("rust","E",None,None,None,"production")` = `SHA256("rust" 0x1F "E" 0x1F "production")`。
+    pub fn compute_fingerprint_v3(
+        platform: &str,
+        error_type: &str,
+        error_kind: Option<&str>,
+        model: Option<&str>,
+        culprit: Option<&str>,
+        environment: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(platform.trim().to_lowercase().as_bytes());
+        hasher.update([SEP]);
+        hasher.update(error_type.trim().as_bytes());
+
+        if let Some(kind) = Self::normalize_error_kind(error_kind) {
+            hasher.update([SEP]);
+            hasher.update(kind.as_bytes());
+        }
+        if let Some(model) = Self::normalize_model(model) {
+            hasher.update([SEP]);
+            hasher.update(model.as_bytes());
+        }
+        if let Some(c) = culprit {
+            let clean_culprit = Self::clean_culprit(c);
+            if !clean_culprit.is_empty() {
+                hasher.update([SEP]);
+                hasher.update(clean_culprit.as_bytes());
+            }
+        }
+
+        // environment 恒参与：缺失/空白一律归一为 "unknown"，保证作用域分量稳定存在。
+        let env = {
+            let trimmed = environment.trim().to_lowercase();
+            if trimmed.is_empty() {
+                "unknown".to_string()
+            } else {
+                trimmed
+            }
+        };
+        hasher.update([SEP]);
+        hasher.update(env.as_bytes());
+
+        hex::encode(hasher.finalize())
+    }
+
     /// 规范化 error_kind：`RateLimitExceeded { retry_after: None }` → `RateLimitExceeded`；
     /// 只保留 Rust 枚举变体名，剥掉 `{ ... }` 中的抖动字段。
     pub fn normalize_error_kind(error_kind: Option<&str>) -> Option<String> {
@@ -128,6 +179,69 @@ impl FingerprintEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v3_environment_scopes_fingerprint() {
+        let dev = FingerprintEngine::compute_fingerprint_v3(
+            "python",
+            "ValidationError",
+            Some("Invalid"),
+            Some("gemini-3.8-flash"),
+            Some("api_v2/src/x.py in run"),
+            "dev",
+        );
+        let prod = FingerprintEngine::compute_fingerprint_v3(
+            "python",
+            "ValidationError",
+            Some("Invalid"),
+            Some("gemini-3.8-flash"),
+            Some("api_v2/src/x.py in run"),
+            "production",
+        );
+        assert_ne!(dev, prod, "同签名跨环境必须产出不同指纹（契约 R6.2）");
+    }
+
+    #[test]
+    fn v3_skips_missing_optional_components_like_v2() {
+        // 契约 R6.0 示例：v2("rust","E",None,None,None) = SHA256("rust" 0x1F "E")；
+        // v3(..., "production") = SHA256("rust" 0x1F "E" 0x1F "production")
+        let v3 =
+            FingerprintEngine::compute_fingerprint_v3("rust", "E", None, None, None, "production");
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"rust");
+            hasher.update([SEP]);
+            hasher.update(b"E");
+            hasher.update([SEP]);
+            hasher.update(b"production");
+            hex::encode(hasher.finalize())
+        };
+        assert_eq!(v3, expected);
+    }
+
+    #[test]
+    fn v3_missing_environment_normalizes_to_unknown() {
+        let blank = FingerprintEngine::compute_fingerprint_v3("rust", "E", None, None, None, "  ");
+        let unknown =
+            FingerprintEngine::compute_fingerprint_v3("rust", "E", None, None, None, "unknown");
+        assert_eq!(blank, unknown);
+    }
+
+    #[test]
+    fn v3_environment_case_and_space_insensitive() {
+        let a = FingerprintEngine::compute_fingerprint_v3(
+            "rust",
+            "E",
+            None,
+            None,
+            None,
+            "  Production ",
+        );
+        let b =
+            FingerprintEngine::compute_fingerprint_v3("rust", "E", None, None, None, "production");
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn v2_line_number_noise_does_not_change_fingerprint() {
