@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "pony-sentry-contract-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 该包是「契约级黑盒验收测试」专用包，故意不加入上层 workspace：
+# - `crates/**` 是实施者写域，Test Agent 禁写；
+# - 本包不依赖任何 crate 内部类型，只通过进程级契约面（env + HTTP）驱动被测二进制，
+#   因此红相失败必然是「能力缺失」而非编译/类型不匹配。
+# 运行：cargo test --manifest-path tests/Cargo.toml --offline
+autotests = false
+autobins = false
+autoexamples = false
+autobenches = false
+
+[[test]]
+name = "api_ingest_v1_contract"
+path = "api_ingest_v1_contract.rs"
+
+[[test]]
+name = "api_admin_auth_contract"
+path = "api_admin_auth_contract.rs"
+
+[dev-dependencies]
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
