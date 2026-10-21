@@ -45,6 +45,10 @@ VITE_PONY_SENTRY_TOKEN=<admin 或 client token> pnpm build
 localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
 ```
 
+生产部署请直接使用 `deploy/scripts/deploy-console.sh`（从 `/etc/pony-sentry/pony-sentry.env`
+读取 `ADMIN_TOKEN` 烘焙进产物并重装二进制，幂等可重跑，构建后自动还原无 token 的
+`web/dist` 保持仓库卫生）。
+
 备份（`deploy/systemd/pony-sentry-backup.{service,timer}` + `deploy/scripts/backup.sh`）：
 
 | 环境变量 | 默认 | 说明 |
