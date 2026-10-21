@@ -68,6 +68,8 @@ spec:
 ---
 # -------------------------------------------------------------
 # 3. 生产公网 Ingress（仅暴露 /api/v1/ingest 与 /healthz）
+#    暴露面收敛（契约 R10.2 / R10.3）：/api/v1/traces 与全部读接口只走集群内 svc 或 tailnet，
+#    公网访问必须返回 404。新增公网路径前先过安全评审。
 # -------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -93,13 +95,6 @@ spec:
         paths:
           - path: /api/v1/ingest
             pathType: Exact
-            backend:
-              service:
-                name: pony-sentry
-                port:
-                  number: 3000
-          - path: /api/v1/traces
-            pathType: Prefix
             backend:
               service:
                 name: pony-sentry

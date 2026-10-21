@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily encrypted backup of the PonySentry database
+Documentation=file:///etc/pony-sentry/backup.env
+
+[Timer]
+# 每日 03:30（宿主本地时区，生产/dev 宿主均为 Asia/Shanghai，见 runbook §5）
+OnCalendar=*-*-* 03:30:00
+# 宿主在计划时刻离线时，开机后补跑一次
+Persistent=true
+# 抖动 5 分钟，避免与其他机器备份同时打满对象存储/磁盘
+RandomizedDelaySec=300
+Unit=pony-sentry-backup.service
+
+[Install]
+WantedBy=timers.target

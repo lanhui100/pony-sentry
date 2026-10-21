@@ -1,0 +1,26 @@
+[Unit]
+Description=PonySentry encrypted PostgreSQL backup (pg_dump | age)
+Documentation=file:///etc/pony-sentry/backup.env
+After=network-online.target
+Wants=network-online.target
+# 三环境共用本单元；环境差异（DATABASE_URL / AGE_RECIPIENT / BACKUP_DIR /
+# BACKUP_RETENTION_DAYS）一律由 EnvironmentFile 承载，禁止写进单元文件。
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+# 主配置提供 DATABASE_URL；backup.env 提供 AGE_RECIPIENT 等备份专属变量（可选文件）。
+EnvironmentFile=/etc/pony-sentry/pony-sentry.env
+EnvironmentFile=-/etc/pony-sentry/backup.env
+ExecStart=/usr/local/bin/pony-sentry-backup.sh
+# 资源与优先级约束：备份不得抢占在线服务的 IO/CPU，内存上限防止 pg_dump 失控。
+MemoryMax=1G
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3600
+# 失败只记录，不自动重试（次日 timer 仍会触发；避免磁盘将满时反复刷盘）。
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
