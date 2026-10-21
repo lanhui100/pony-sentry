@@ -520,13 +520,22 @@ impl TraceRepository for SqliteIssueRepository {
         let mut effective_out_tokens = trace.total_output_tokens;
         let mut effective_duration = trace.total_duration_ms;
 
-        if let Some(t) = merged_payload.get("total_input_tokens").and_then(|v| v.as_i64()) {
+        if let Some(t) = merged_payload
+            .get("total_input_tokens")
+            .and_then(|v| v.as_i64())
+        {
             effective_in_tokens = Some(t);
         }
-        if let Some(t) = merged_payload.get("total_output_tokens").and_then(|v| v.as_i64()) {
+        if let Some(t) = merged_payload
+            .get("total_output_tokens")
+            .and_then(|v| v.as_i64())
+        {
             effective_out_tokens = Some(t);
         }
-        if let Some(t) = merged_payload.get("total_duration_ms").and_then(|v| v.as_i64()) {
+        if let Some(t) = merged_payload
+            .get("total_duration_ms")
+            .and_then(|v| v.as_i64())
+        {
             effective_duration = Some(t);
         }
 
