@@ -179,6 +179,23 @@
               <option value="">全部项目</option>
               <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
             </Select>
+
+            <Select v-model="filterEnvironment" @change="fetchIssues">
+              <option value="">全部环境</option>
+              <option value="dev">dev</option>
+              <option value="development">development</option>
+              <option value="preprod">preprod</option>
+              <option value="production">production</option>
+              <option value="unknown">unknown</option>
+            </Select>
+
+            <Select v-model="filterLevel">
+              <option value="">全部等级</option>
+              <option value="fatal">fatal</option>
+              <option value="error">error</option>
+              <option value="warning">warning</option>
+              <option value="info">info</option>
+            </Select>
           </div>
 
           <div class="text-xs text-stone-400 font-mono">
@@ -193,9 +210,11 @@
             <table class="w-full text-left border-collapse table-fixed">
               <thead>
                 <tr class="border-b border-stone-800 text-stone-400 text-[11px] font-mono uppercase bg-stone-900/60">
-                  <th class="py-2.5 px-3.5 w-[42%]">Issue / Culprit</th>
-                  <th class="py-2.5 px-3.5 w-[10%]">平台</th>
-                  <th class="py-2.5 px-3.5 w-[12%]">项目</th>
+                  <th class="py-2.5 px-3.5 w-[32%]">Issue / Culprit</th>
+                  <th class="py-2.5 px-3.5 w-[9%]">平台</th>
+                  <th class="py-2.5 px-3.5 w-[9%]">环境</th>
+                  <th class="py-2.5 px-3.5 w-[8%]">等级</th>
+                  <th class="py-2.5 px-3.5 w-[11%]">项目</th>
                   <th class="py-2.5 px-3.5 w-[10%]">状态</th>
                   <th class="py-2.5 px-3.5 w-[7%] text-center">频次</th>
                   <th class="py-2.5 px-3.5 w-[11%]">指派</th>
@@ -206,7 +225,7 @@
                 <!-- 骨架屏 -->
                 <template v-if="initialLoading && issues.length === 0">
                   <tr v-for="n in 5" :key="'issue-skel-' + n">
-                    <td colspan="7" class="py-3 px-3.5">
+                    <td colspan="9" class="py-3 px-3.5">
                       <Skeleton class="h-3.5 w-3/5 mb-1.5" />
                       <Skeleton class="h-3 w-2/5" />
                     </td>
@@ -214,7 +233,7 @@
                 </template>
                 <!-- 空态 -->
                 <tr v-else-if="filteredIssues.length === 0">
-                  <td colspan="7" class="py-12 text-center text-stone-500 font-mono">
+                  <td colspan="9" class="py-12 text-center text-stone-500 font-mono">
                     {{ showLoadError ? '数据加载失败' : '无匹配记录' }}
                   </td>
                 </tr>
@@ -239,6 +258,16 @@
                   </td>
                   <td class="py-2.5 px-3.5 truncate">
                     <Badge variant="outline">{{ issue.platform }}</Badge>
+                  </td>
+                  <td class="py-2.5 px-3.5 truncate">
+                    <Badge :variant="environmentBadgeVariant(issue.environment)" data-testid="issue-environment">
+                      {{ issue.environment || 'unknown' }}
+                    </Badge>
+                  </td>
+                  <td class="py-2.5 px-3.5 truncate">
+                    <Badge :variant="levelBadgeVariant(issue.level)" data-testid="issue-level">
+                      {{ issue.level || 'error' }}
+                    </Badge>
                   </td>
                   <td class="py-2.5 px-3.5 truncate font-mono text-stone-300">
                     {{ issue.project || '-' }}
@@ -292,6 +321,12 @@
                       {{ formatStatusText(selected.status) }}
                     </Badge>
                     <Badge variant="outline">{{ selected.platform }}</Badge>
+                    <Badge :variant="environmentBadgeVariant(selected.environment)" data-testid="drawer-environment">
+                      {{ selected.environment || 'unknown' }}
+                    </Badge>
+                    <Badge :variant="levelBadgeVariant(selected.level)" data-testid="drawer-level">
+                      {{ selected.level || 'error' }}
+                    </Badge>
                     <Badge v-if="selected.project" variant="neutral">{{ selected.project }}</Badge>
                   </div>
                   <h2 class="text-sm font-semibold text-stone-100 break-all leading-snug">{{ selected.title }}</h2>
@@ -840,6 +875,9 @@ let currentIssueEventsReqId = 0
 const filterStatus = ref('attention')
 const filterPlatform = ref('')
 const filterProject = ref('')
+// 多环境维度筛选（服务端支持 ?environment=，等级为客户端过滤）
+const filterEnvironment = ref('')
+const filterLevel = ref('')
 const searchKeyword = ref('')
 const isRefreshing = ref(false)
 const copySuccess = ref(null)
@@ -861,6 +899,34 @@ const gatewayStateText = computed(() => {
   if (gatewayState.value === 'degraded') return '异常'
   return '探测中'
 })
+// 控制台令牌：构建期 VITE_PONY_SENTRY_TOKEN 优先，其次运行时 localStorage.pony_sentry_token
+// （README「config」节说明二选一；管理侧接口在配置 ADMIN_TOKEN 后必须携带）。
+const PONY_SENTRY_TOKEN = (import.meta.env.VITE_PONY_SENTRY_TOKEN
+  || (typeof localStorage !== 'undefined' ? localStorage.getItem('pony_sentry_token') : '')
+  || '').trim()
+
+const authHeaders = () => (PONY_SENTRY_TOKEN ? { 'x-admin-token': PONY_SENTRY_TOKEN } : {})
+
+const environmentBadgeVariant = (environment) => {
+  switch (environment) {
+    case 'production': return 'danger'
+    case 'preprod': return 'warning'
+    case 'dev':
+    case 'development': return 'info'
+    default: return 'neutral'
+  }
+}
+
+const levelBadgeVariant = (level) => {
+  switch (level) {
+    case 'fatal':
+    case 'error': return 'danger'
+    case 'warning': return 'warning'
+    case 'info': return 'info'
+    default: return 'outline'
+  }
+}
+
 const gatewayBadgeClass = (state) => {
   switch (state) {
     case 'ready':
@@ -924,7 +990,11 @@ async function apiFetchJson(url, options = {}) {
     controller.abort()
   }, timeoutMs)
   try {
-    const response = await fetch(url, { ...fetchOptions, signal: controller.signal })
+    const response = await fetch(url, {
+      ...fetchOptions,
+      headers: { ...authHeaders(), ...(fetchOptions.headers || {}) },
+      signal: controller.signal,
+    })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     return await response.json()
   } catch (e) {
@@ -978,7 +1048,9 @@ async function checkHealth() {
   const timeoutId = setTimeout(() => healthController.abort(), API_TIMEOUT_MS)
   try {
     const res = await fetch('/healthz', { signal: healthController.signal })
-    gatewayState.value = res.ok ? 'ready' : 'degraded'
+    // /healthz 返回 JSON {status, db}；DB 不通时服务端给 503 + db=down
+    const health = res.ok ? await res.json().catch(() => ({})) : {}
+    gatewayState.value = res.ok && health.db !== 'down' ? 'ready' : 'degraded'
   } catch {
     gatewayState.value = 'degraded'
   } finally {
@@ -1231,6 +1303,12 @@ const filteredIssues = computed(() => {
   if (filterProject.value) {
     list = list.filter(i => i.project === filterProject.value)
   }
+  if (filterEnvironment.value) {
+    list = list.filter(i => (i.environment || 'unknown') === filterEnvironment.value)
+  }
+  if (filterLevel.value) {
+    list = list.filter(i => (i.level || 'error') === filterLevel.value)
+  }
 
   if (!searchKeyword.value.trim()) return list
   const kw = searchKeyword.value.trim().toLowerCase()
@@ -1246,6 +1324,7 @@ const fetchIssues = async () => {
   let url = '/api/v1/issues?'
   if (filterPlatform.value) url += `platform=${filterPlatform.value}&`
   if (filterProject.value) url += `project=${encodeURIComponent(filterProject.value)}&`
+  if (filterEnvironment.value) url += `environment=${encodeURIComponent(filterEnvironment.value)}&`
   try {
     issues.value = await apiFetchJson(url, { refreshScope: true })
     issueLoadFailed.value = false
