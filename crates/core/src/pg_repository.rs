@@ -18,8 +18,12 @@ const ISSUE_COLUMNS: &str =
      first_seen_at, last_seen_at";
 
 /// events 表全量列（含 0004 新增 event_key / level）。
+///
+/// **payload 必须显式 `::text`**：PG 里 `events.payload` 是 JSONB，而读取侧按 `String` 解码后
+/// 再 `serde_json` 解析（与 traces 读取路径保持一致）。直接 SELECT `payload` 会得到
+/// `ColumnDecode … Rust type String (as SQL type TEXT) is not compatible with SQL type JSONB`。
 const EVENT_COLUMNS: &str =
-    "id, issue_id, payload, release, environment, event_key, level, created_at";
+    "id, issue_id, payload::text AS payload, release, environment, event_key, level, created_at";
 
 #[derive(Clone)]
 pub struct PgIssueRepository {
@@ -107,7 +111,10 @@ fn issue_from_row(row: &sqlx::postgres::PgRow) -> Issue {
 }
 
 fn event_from_row(row: &sqlx::postgres::PgRow) -> Result<Event, RepositoryError> {
-    let payload_text: String = row.get("payload");
+    // try_get（而非 get）把解码失败归一为 RepositoryError：单条事件解码异常只影响该请求
+    // （500 persistence_error），绝不允许 panic 打断连接（历史上正是这样丢掉 duplicate 响应、
+    // 让消费侧把 200 幂等命中当成传输故障重试）。
+    let payload_text: String = row.try_get("payload")?;
     let payload: serde_json::Value =
         serde_json::from_str(&payload_text).unwrap_or_else(|_| serde_json::json!({}));
     Ok(Event {
@@ -120,6 +127,13 @@ fn event_from_row(row: &sqlx::postgres::PgRow) -> Result<Event, RepositoryError>
         level: row.get("level"),
         created_at: row.get("created_at"),
     })
+}
+
+/// PG 的 `TIMESTAMPTZ` 精度是微秒，而 `chrono::Utc::now()` 带纳秒。
+/// 写入前统一截断到微秒，保证「本次响应返回的时间 == 再次读取的时间」——
+/// 否则客户端会看到「没有重复投递，last_seen_at 却变了」的假漂移。
+fn to_micros(dt: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(dt.timestamp_micros()).unwrap_or(dt)
 }
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
@@ -150,8 +164,8 @@ impl IssueRepository for PgIssueRepository {
         &self,
         record: NewEventRecord<'_>,
     ) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
-        let now = Utc::now();
-        let occurred_at: DateTime<Utc> = record.occurred_at.unwrap_or(now);
+        let now = to_micros(Utc::now());
+        let occurred_at: DateTime<Utc> = to_micros(record.occurred_at.unwrap_or(now));
         let environment = normalize_environment(record.environment);
 
         // 1. 幂等前置检查（契约 R4.1）：命中即不产生新 events 行、不动计数与时间戳。
@@ -594,14 +608,23 @@ impl IssueRepository for PgIssueRepository {
 
 #[async_trait]
 impl TraceRepository for PgIssueRepository {
-    async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
+    async fn record_trace(&self, mut trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
+        // TIMESTAMPTZ 微秒归一：保证写回的时间与再次读取一致（同 events 路径）。
+        trace.reported_at = to_micros(trace.reported_at);
+        trace.created_at = to_micros(trace.created_at);
+        trace.updated_at = to_micros(trace.updated_at);
         // 同 session_id 增量上报：先取旧 payload，按 turns 轮次去重合并（旧轮保留、新轮按序追加）。
+        // 此处读的是 JSONB 列，解码目标必须同样是 `serde_json::Value`（Value ↔ JSONB）；
+        // 与读取接口"`payload::text` → String → serde_json"两条路径各自配对，不得交叉。
         let existing_payload: Option<serde_json::Value> =
-            sqlx::query("SELECT payload FROM traces WHERE session_id = $1")
+            match sqlx::query("SELECT payload FROM traces WHERE session_id = $1")
                 .bind(&trace.session_id)
                 .fetch_optional(&self.pool)
                 .await?
-                .map(|row| row.get("payload"));
+            {
+                Some(row) => row.try_get("payload")?,
+                None => None,
+            };
 
         let merged_payload = match existing_payload {
             Some(old) => crate::trace_merge::merge_trace_payloads(&old, &trace.payload),
@@ -808,7 +831,8 @@ impl PgIssueRepository {
         let eval_status = eval_status_str
             .parse::<EvalStatus>()
             .unwrap_or(EvalStatus::Unreviewed);
-        let payload_str: String = row.get("payload");
+        // 调用方的 SQL 必须写 `payload::text AS payload`（JSONB → TEXT），与 events 同约定。
+        let payload_str: String = row.try_get("payload")?;
         let payload: serde_json::Value =
             serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({}));
 

@@ -123,5 +123,7 @@ localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
   `/healthz`；`/api/v1/traces` 与全部读接口仅集群内 svc / tailnet 可达，公网访问返回 404。
   Web 控制台同样只走 tailnet。
 - **单副本**：无多副本 HA / leader 选举；retention 与指纹重索引假设单进程运行。
+  `migrate()` 也按单进程启动设计：多副本并发首次迁移可能撞 PG 目录表竞态
+  （`CREATE TABLE IF NOT EXISTS` 不是原子 DDL），多副本场景需先加 advisory lock。
 - **备份**：`pg_dump -Fc | age`，每日 03:30 由 timer 触发；恢复演练（`age -d` + `pg_restore`）
   需人工按 runbook 执行，未纳入自动化。
