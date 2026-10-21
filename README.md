@@ -57,6 +57,19 @@ localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
 | `AGE_RECIPIENT` | 必填 | age 收件人公钥；私钥离线保管 |
 | `BACKUP_DIR` | `/var/backups/pony-sentry` | 备份目录，自动创建（750） |
 | `BACKUP_RETENTION_DAYS` | `14` | 按 mtime 清理更早的备份与校验和 |
+| `PG_DUMP_MODE` | `local` | `cluster` 时经 `kubectl exec` 在数据库 Pod 内执行 `pg_dump`；宿主 `pg_dump` 主版本低于服务端时（如宿主 16 / 服务端 18）为唯一可行路径 |
+| `PONY_PG_NAMESPACE` / `PONY_PG_POD` / `PONY_PG_DB` / `PONY_PG_USER` | — | 仅 `PG_DUMP_MODE=cluster` 必填；`KUBECONFIG` 由 `backup.env` 提供 |
+
+通知 relay（`deploy/systemd/pony-sentry-notify.service` + `deploy/scripts/notify-webhook.py`）：
+把 `WEBHOOK_URL` 指向 `http://127.0.0.1:<NOTIFY_PORT>/webhook`，relay 将 `issue.created` /
+`issue.regression` payload 转为企微文本投递（仅回环监听，失败只记 journal 不重试）。
+
+| 环境变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `WX_WORK_EXTERNAL_API_URL` / `WX_WORK_EXTERNAL_API_KEY` | 必填 | 企微 relay 地址与 `X-API-KEY` |
+| `WX_WORK_USER_ID` / `MY_USER_ID` | 空 | 通知接收人（中继 payload `to_user`）；为空则只发内容 |
+| `NOTIFY_PORT` | `3091` | relay 监听端口（`3090` 在 devserver 已被其它服务占用） |
+| `NOTIFY_PROJECTS` | 空（全部项目） | 逗号分隔的项目白名单，如 `job_copilot` |
 
 ## semantics
 

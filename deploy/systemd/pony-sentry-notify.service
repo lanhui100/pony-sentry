@@ -1,0 +1,25 @@
+[Unit]
+Description=PonySentry -> WeCom notification relay (webhook dispatcher)
+Documentation=file:///etc/pony-sentry/notify.env
+After=network-online.target pony-sentry.service
+Wants=network-online.target
+# 与 PonySentry 主服务解耦：relay 故障不影响 ingest；主服务重启不阻塞通知进程。
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/pony-sentry/notify.env
+ExecStart=/usr/bin/python3 /usr/local/bin/pony-sentry-notify.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=256M
+# 仅监听 127.0.0.1:3090，PonySentry 同机投递；不开放公网。
+
+[Install]
+WantedBy=multi-user.target

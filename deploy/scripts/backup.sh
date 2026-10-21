@@ -6,6 +6,11 @@
 #   AGE_RECIPIENT           必填，age 公钥（age1...）；解密需对应私钥，由运维离线保管
 #   BACKUP_DIR              可选，默认 /var/backups/pony-sentry
 #   BACKUP_RETENTION_DAYS   可选，默认 14（按 mtime 清理更早的备份与校验和）
+#   PG_DUMP_MODE            可选，local（默认，本机 pg_dump）| cluster（经 kubectl exec
+#                           在数据库 Pod 内执行 pg_dump，用于宿主 pg_dump 主版本落后于
+#                           PostgreSQL 服务端、无法直连导出 PG18 库的场景）
+#   PONY_PG_NAMESPACE/PONY_PG_POD/PONY_PG_DB/PONY_PG_USER
+#                           仅 cluster 模式必填；KUBECONFIG 由 EnvironmentFile 提供
 #
 # 行为保证：
 #   - `set -euo pipefail`：任一环节失败即非零退出（systemd 记录 failed）；
@@ -41,7 +46,17 @@ trap cleanup EXIT
 mkdir -p "$BACKUP_DIR"
 log "starting backup -> ${OUT}"
 
-pg_dump -Fc "$DATABASE_URL" | age -r "$AGE_RECIPIENT" >"$OUT"
+if [ "${PG_DUMP_MODE:-local}" = "cluster" ]; then
+  : "${PONY_PG_NAMESPACE:?PONY_PG_NAMESPACE is required in cluster mode}"
+  : "${PONY_PG_POD:?PONY_PG_POD is required in cluster mode}"
+  : "${PONY_PG_DB:?PONY_PG_DB is required in cluster mode}"
+  : "${PONY_PG_USER:?PONY_PG_USER is required in cluster mode}"
+  # 数据库 Pod 提权失败/连接失败时 pipefail 会传播非零退出，不会留下伪成功产物。
+  kubectl -n "$PONY_PG_NAMESPACE" exec "$PONY_PG_POD" -- \
+    pg_dump -Fc -U "$PONY_PG_USER" -d "$PONY_PG_DB" | age -r "$AGE_RECIPIENT" >"$OUT"
+else
+  pg_dump -Fc "$DATABASE_URL" | age -r "$AGE_RECIPIENT" >"$OUT"
+fi
 sha256sum "$OUT" | tee "$OUT.sha256" >/dev/null
 
 log "backup complete: ${OUT} size=$(stat -c %s "$OUT") bytes"
