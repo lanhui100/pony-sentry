@@ -13,5 +13,37 @@
     "abort_controllers",
     "event_listeners",
     "background_timers"
-  ]
+  ],
+  "tailnet_trust": {
+    "contract": ".dev-team/contract-tailnet-trust.md",
+    "default_enabled": false,
+    "default_cidrs": "100.64.0.0/10,fd7a:115c:a1e0::/48",
+    "default_trusted_hosts": [],
+    "enable_env": "CONSOLE_TAILNET_TRUST",
+    "enable_values": ["1", "true", "on"],
+    "kill_switch_env": "CONSOLE_TAILNET_TRUST=0",
+    "cidrs_env": "CONSOLE_TAILNET_CIDRS",
+    "hosts_env": "CONSOLE_TRUSTED_HOSTS",
+    "proxied_header_gate": true,
+    "proxied_headers": ["x-forwarded-for", "x-real-ip"],
+    "host_allowlist_gate": true,
+    "host_match_ignores_port_and_case": true,
+    "empty_host_allowlist_disables_trust": true,
+    "startup_warn_on_degraded_config": true,
+    "trust_grants": "read_only_get",
+    "csrf_exempt": false,
+    "logging": {
+      "format": "json",
+      "fields": ["trust_decision", "peer", "host"],
+      "forbidden_fields": [
+        "admin_token",
+        "client_token",
+        "session_token",
+        "csrf_token",
+        "authorization",
+        "cookie"
+      ]
+    },
+    "fail_closed": true
+  }
 }
