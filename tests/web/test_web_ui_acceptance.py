@@ -276,15 +276,17 @@ def _open(session=None):
 
 
 def _switch_to_traces():
-    _eval_json(
+    clicked = _eval_json(
         """(() => {
-      const btns = Array.from(document.querySelectorAll('nav button'));
-      const b = btns.find(x => (x.textContent || '').indexOf('Traces') !== -1) || btns[1];
+      const btns = Array.from(document.querySelectorAll('button'));
+      const b = btns.find(x => (x.textContent || '').trim() === 'Traces');
       if (!b) return JSON.stringify(false);
       b.click();
       return JSON.stringify(true);
     })()"""
     )
+    if not clicked:
+        raise AssertionError("找不到 Traces 视图切换按钮")
 
 
 def _open_issues_drawer():

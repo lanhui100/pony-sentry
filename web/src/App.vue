@@ -210,7 +210,7 @@
               >&times;</button>
             </div>
 
-            <Select v-model="filterStatus">
+            <Select v-model="filterStatus" aria-label="Issue 状态筛选">
               <option value="attention">需关注 (默认)</option>
               <option value="unresolved">待处理</option>
               <option value="in_progress">处理中</option>
@@ -220,7 +220,7 @@
               <option value="">全部状态</option>
             </Select>
 
-            <Select v-model="filterPlatform" @change="fetchIssues">
+            <Select v-model="filterPlatform" aria-label="Issue 平台筛选" @change="fetchIssues">
               <option value="">全部平台</option>
               <option value="rust">Rust</option>
               <option value="tauri">Tauri</option>
@@ -228,12 +228,12 @@
               <option value="python">FastAPI</option>
             </Select>
 
-            <Select v-model="filterProject" @change="fetchIssues">
+            <Select v-model="filterProject" aria-label="Issue 项目筛选" @change="fetchIssues">
               <option value="">全部项目</option>
               <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
             </Select>
 
-            <Select v-model="filterEnvironment" @change="fetchIssues">
+            <Select v-model="filterEnvironment" aria-label="Issue 环境筛选" @change="fetchIssues">
               <option value="">全部环境</option>
               <option value="dev">dev</option>
               <option value="development">development</option>
@@ -242,7 +242,7 @@
               <option value="unknown">unknown</option>
             </Select>
 
-            <Select v-model="filterLevel">
+            <Select v-model="filterLevel" aria-label="Issue 等级筛选">
               <option value="">全部等级</option>
               <option value="fatal">fatal</option>
               <option value="error">error</option>
@@ -606,7 +606,7 @@
               >&times;</button>
             </div>
 
-            <Select v-model="filterTraceStatus">
+            <Select v-model="filterTraceStatus" aria-label="Trace 评估状态筛选">
               <option value="">全部状态</option>
               <option value="unreviewed">待评估</option>
               <option value="triage_good">标杆样本</option>
@@ -616,7 +616,7 @@
               <option value="wontfix">已放弃</option>
             </Select>
 
-            <Select v-model="traceProjectFilter" @change="fetchTraces">
+            <Select v-model="traceProjectFilter" aria-label="Trace 项目筛选" @change="fetchTraces">
               <option value="">全部项目</option>
               <option v-for="p in traceProjectOptions" :key="p" :value="p">{{ p }}</option>
             </Select>

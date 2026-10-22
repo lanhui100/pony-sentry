@@ -30,3 +30,5 @@ Status: implemented
 - 与前端错误诊断决策见 `implemented/bug-fix/2026-10-22-console-load-error-diagnostics.md`。
 - 控制台认证已演进为服务端 HttpOnly 会话；dist 无内嵌 token 的断言继续保留，
   且新增登录/注销 E2E。见 `implemented/architecture/2026-10-22-console-server-side-session-auth.md`。
+- 同批修正 E2E 的 Traces 视图切换选择器：旧实现只查 `nav button`（当前 Tabs 不使用 `<nav>`），
+  导致假阴性；现按按钮文本定位并显式断言点击成功。
