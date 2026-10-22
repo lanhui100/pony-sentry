@@ -155,7 +155,7 @@ wait_for_service || { echo "ERROR: 服务未存活" >&2; exit 1; }
 echo "==> 4/6 自检：健康、匿名拒绝、短期会话登录、Cookie 读接口与 CSRF、产物无 token"
 HEALTH="$(curl -fsS -m 5 --retry 5 --retry-connrefused --retry-delay 1 "$BASE_URL/healthz")"
 echo "healthz: $HEALTH"
-echo "$HEALTH" | grep -q '"db":"up"' || { echo "ERROR: DB 不健康" >&2; exit 1; }
+grep -q '"db":"up"' <<<"$HEALTH" || { echo "ERROR: DB 不健康" >&2; exit 1; }
 
 # 管理读接口匿名必须 401（若服务端配置了 ADMIN_TOKEN / CLIENT_TOKEN）。
 check_http_status 401 "$BASE_URL/api/v1/issues?" \
@@ -189,11 +189,11 @@ check_http_status 403 "$BASE_URL/api/v1/issues/00000000-0000-0000-0000-000000000
 
 # 产物必须不包含 ADMIN_TOKEN；登录页与诊断文案应存在。
 ROOT_HTML="$(curl -fsS -m 5 "$BASE_URL/")"
-if printf '%s' "$ROOT_HTML" | grep -qF "$ADMIN_TOKEN"; then
+if grep -qF -- "$ADMIN_TOKEN" <<<"$ROOT_HTML"; then
   echo "ERROR: 控制台产物仍包含 ADMIN_TOKEN" >&2
   exit 1
 fi
-printf '%s' "$ROOT_HTML" | grep -q '控制台登录' \
+grep -qF -- '控制台登录' <<<"$ROOT_HTML" \
   || { echo "ERROR: 控制台产物缺少登录入口" >&2; exit 1; }
 
 # 注销后旧 Cookie 必须立即失效。

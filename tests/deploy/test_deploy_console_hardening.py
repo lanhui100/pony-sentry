@@ -55,8 +55,9 @@ class TestDeployConsoleHardening(unittest.TestCase):
     def test_build_does_not_inject_static_admin_token(self):
         self.assertIn('pnpm build', self.text)
         self.assertNotIn('VITE_PONY_SENTRY_TOKEN', self.text)
-        self.assertIn('grep -qF "$ADMIN_TOKEN"', self.text)
+        self.assertIn('grep -qF -- "$ADMIN_TOKEN" <<<"$ROOT_HTML"', self.text)
         self.assertIn('控制台产物仍包含 ADMIN_TOKEN', self.text)
+        self.assertNotIn('| grep -q', self.text, "避免 pipefail 下 grep -q 提前退出导致 SIGPIPE 假失败")
 
 
 if __name__ == "__main__":
