@@ -7,7 +7,15 @@
 //! 设计约束：
 //! - `crates/**` 属实施者写域，本夹具零 crate 内部类型依赖，只依赖进程级契约面；
 //! - 进程级接缝（Lead 冻结口径）：`DATABASE_URL` / `PORT` / `CLIENT_TOKEN` / `ADMIN_TOKEN`；
+//!   扩展（`.dev-team/contract-tailnet-trust.md` ver 2）：`CONSOLE_TAILNET_TRUST` /
+//!   `CONSOLE_TAILNET_CIDRS` / `CONSOLE_TRUSTED_HOSTS`。
+//! - 三个 tailnet 接缝键在 spawn 前一律 `env_remove`，防止开发者 shell 导出的同名变量
+//!   污染用例（假绿/假红）。用例只能通过 `extra_env` 显式注入。
 //! - 每个用例独立 sqlite 文件库 + 独立端口 + 独立临时目录，互不污染，绝不复用生产库。
+
+// 本模块被多个 `[[test]]` target 以 `#[path]` 共享，任何单个 target 都只用到其中一部分接缝；
+// 逐 target 的 `dead_code` 告警属噪声，统一抑制（不影响任何断言强度）。
+#![allow(dead_code)]
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -71,7 +79,17 @@ pub struct Server {
     child: Child,
     pub base_url: String,
     workdir: PathBuf,
+    /// `Some` 时子进程 stdout 被重定向到该文件（用于机械断言启动 WARN / 审计日志脱敏）。
+    log_path: Option<PathBuf>,
 }
+
+/// 契约 R-T4/R-T5b/R-T8b 的进程级 env 接缝：spawn 前必须从继承环境里剔除，
+/// 否则开发机导出的同名变量会让「默认关闭」用例假绿。
+const TAILNET_ENV_KEYS: [&str; 3] = [
+    "CONSOLE_TAILNET_TRUST",
+    "CONSOLE_TAILNET_CIDRS",
+    "CONSOLE_TRUSTED_HOSTS",
+];
 
 fn repo_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -162,11 +180,23 @@ impl Server {
 
     /// 定制 env 实例（额外 env 覆盖默认值）。
     pub fn start_with(extra_env: &[(&str, &str)]) -> Self {
+        Self::spawn(extra_env, false)
+    }
+
+    /// 定制 env 实例 + 捕获子进程 stdout 到临时文件（供启动 WARN / 日志脱敏断言读取）。
+    ///
+    /// stdout 用文件重定向而非管道：避免长时间运行的服务写满管道缓冲区阻塞（防死锁）。
+    pub fn start_with_log_capture(extra_env: &[(&str, &str)]) -> Self {
+        Self::spawn(extra_env, true)
+    }
+
+    fn spawn(extra_env: &[(&str, &str)], capture_logs: bool) -> Self {
         let binary = server_binary().clone();
         let port = free_port();
         let workdir = unique_workdir();
         let db_path = workdir.join("ponysentry.db");
         let base_url = format!("http://127.0.0.1:{port}");
+        let log_path = workdir.join("server-stdout.log");
 
         let mut cmd = Command::new(&binary);
         cmd.current_dir(&workdir)
@@ -177,8 +207,17 @@ impl Server {
             )
             .env("RUST_LOG", "info")
             .env_remove("PONY_REINDEX_FINGERPRINTS")
-            .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        // 契约接缝：先无条件剔除继承来的 tailnet 配置，再由 extra_env 显式注入。
+        for key in TAILNET_ENV_KEYS {
+            cmd.env_remove(key);
+        }
+        if capture_logs {
+            let file = std::fs::File::create(&log_path).expect("无法创建子进程 stdout 日志文件");
+            cmd.stdout(Stdio::from(file));
+        } else {
+            cmd.stdout(Stdio::null());
+        }
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -190,9 +229,18 @@ impl Server {
             child,
             base_url,
             workdir,
+            log_path: capture_logs.then_some(log_path),
         };
         server.wait_ready();
         server
+    }
+
+    /// 读取子进程至今写入的 stdout（未启用捕获时为空串）。
+    pub fn captured_log(&self) -> String {
+        match self.log_path.as_ref() {
+            Some(path) => std::fs::read_to_string(path).unwrap_or_default(),
+            None => String::new(),
+        }
     }
 
     fn wait_ready(&mut self) {
@@ -228,6 +276,13 @@ impl Server {
 
     pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    /// `host:port` 形态的 TCP 地址：供必须逐字节控制请求头（如伪造 `Host`）的原始 HTTP 用例。
+    pub fn tcp_addr(&self) -> String {
+        self.base_url
+            .trim_start_matches("http://")
+            .to_string()
     }
 
     // ── 契约动词（显式区分 token 形态，避免「双头同时发送」掩盖鉴权语义）──────

@@ -24,6 +24,11 @@ path = "api_ingest_v1_contract.rs"
 name = "api_admin_auth_contract"
 path = "api_admin_auth_contract.rs"
 
+# 契约：.dev-team/contract-tailnet-trust.md（FROZEN ver 2，R-T1..R-T13）
+[[test]]
+name = "api_tailnet_trust_contract"
+path = "api_tailnet_trust_contract.rs"
+
 [dev-dependencies]
 serde_json = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

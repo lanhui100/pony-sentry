@@ -1,0 +1,339 @@
+# 红相凭证：Tailnet 可信对端免 admin token（R-T1..R-T13）
+
+- **契约真源**：`.dev-team/contract-tailnet-trust.md`（FROZEN ver 2，18 条规则含 3 条红线）
+- **被测状态**：`crates/server/src/trust.rs` 全部函数体仍为 `unimplemented!()`，且尚未接线
+  （`main.rs` 未取 connect_info、`routes.rs` 未调用 `decide` / `is_proxied`）
+- **测试写域**：`tests/api_tailnet_trust_contract.rs`（新增）、`tests/harness.rs`（env 接缝隔离 + 日志捕获）、
+  `tests/Cargo.toml`（新增 `[[test]]`）、`crates/server/tests/trust_unit.rs`（新增）
+- **执行环境**：本地 /home/dm/pony-sentry，`--offline`，日期 2026-10-22（Asia/Shanghai）
+- **红相口径**：用例存在且失败原因 = 能力缺失（`unimplemented!` panic / 401 与期望 200 不符 / 启动 WARN 缺失）。
+  未使用 `#[should_panic]`：空桩 panic 若被 `#[should_panic]` 吸收会变成「假绿」，与本口径相反；
+  「非法输入不得 panic」一律用 `catch_unwind` 表达为真实断言。
+
+---
+
+## 一、红相命令 1：`cargo test --offline --manifest-path tests/Cargo.toml`
+
+**Exit Code：101**
+
+结果分布：`api_admin_auth_contract` 4 passed（绿）；`api_ingest_v1_contract` 4 passed（绿）；
+`api_tailnet_trust_contract` **12 passed / 5 failed**（红相失败 5 条见下）。
+
+红相失败（原因 = 能力缺失）：
+
+    test rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials ... FAILED
+    test rt1_trusted_peer_readonly_get_without_credentials_is_allowed ... FAILED
+    test rt5d_empty_host_allowlist_disables_trust_and_warns ... FAILED
+    test rt7_trust_never_bypasses_csrf_on_mutation ... FAILED
+    test rt8b_invalid_cidr_config_degrades_without_crashing ... FAILED
+    assertion `left == right` failed: [R-T6 可信对端无 Cookie GET /api/v1/auth/session] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+    assertion `left == right` failed: [R-T1 可信对端无凭证 GET /api/v1/issues] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+    [R-T5d 未设置白名单必须启动 WARN] 启动日志缺少 WARN 级别行：
+    assertion `left == right` failed: [R-T7 前置：可信对端取会话必须 200] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+    [R-T8b 非法 CIDR 配置必须启动 WARN] 启动日志缺少 WARN 级别行：
+
+```text
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running api_admin_auth_contract.rs (tests/target/debug/deps/api_admin_auth_contract-4a29bb05aa7d30eb)
+
+running 4 tests
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.45
+   Compiling rustls-webpki v0.103.15
+   Compiling sqlx-core v0.8.6
+   Compiling tokio-rustls v0.26.6
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.12.28
+   Compiling sqlx-postgres v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+   Compiling pony-sentry-fingerprint v0.1.0 (/home/dm/pony-sentry/crates/fingerprint)
+   Compiling pony-sentry-ingest v0.1.0 (/home/dm/pony-sentry/crates/ingest)
+   Compiling pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.86s
+test r10_fail_closed_when_no_tokens_configured ... ok
+test r11_2_healthz_reports_db_status ... ok
+test r10_admin_surfaces_require_token ... ok
+test console_session_requires_csrf_and_invalidates_on_logout ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.39s
+
+     Running api_ingest_v1_contract.rs (tests/target/debug/deps/api_ingest_v1_contract-ecbf08021415e8db)
+
+running 4 tests
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+test r2_invalid_level_degrades_to_warning ... ok
+test r4_duplicate_delivery_is_idempotent ... ok
+test r6_environment_scopes_fingerprint_and_filter ... ok
+test r2_r3_ingest_accepts_all_v1_fields_and_both_stacktrace_shapes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running api_tailnet_trust_contract.rs (tests/target/debug/deps/api_tailnet_trust_contract-e8f28402b1af86e4)
+
+running 17 tests
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+test rt3_default_cidrs_do_not_include_loopback ... ok
+test rt12_static_token_still_wins_over_deny_signals ... ok
+test rt13_cidr_match_without_host_match_is_denied ... ok
+test rt11_proxy_header_never_grants_trust_via_first_hop_inference ... ok
+test rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials ... FAILED
+test rt1_trusted_peer_readonly_get_without_credentials_is_allowed ... FAILED
+test rt5b_x_real_ip_blocks_trust_even_when_cidr_and_host_match ... ok
+test rt13_host_match_without_cidr_match_is_denied ... ok
+test rt5_x_forwarded_for_blocks_trust_even_when_cidr_and_host_match ... ok
+test rt2_trust_disabled_when_enable_env_absent ... ok
+test rt6b_untrusted_peer_never_gets_session ... ok
+test rt5d_empty_host_allowlist_disables_trust_and_warns ... FAILED
+test rt5c_host_not_in_allowlist_blocks_trust_with_raw_host_header ... ok
+test rt10_logs_never_contain_credentials ... ok
+test rt7_trust_never_bypasses_csrf_on_mutation ... FAILED
+test rt8b_invalid_cidr_config_degrades_without_crashing ... FAILED
+test rt4_kill_switch_values_disable_trust_even_on_match ... ok
+
+failures:
+
+---- rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials stdout ----
+
+thread 'rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials' (2729190) panicked at api_tailnet_trust_contract.rs:64:5:
+assertion `left == right` failed: [R-T6 可信对端无 Cookie GET /api/v1/auth/session] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+  left: 401
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt1_trusted_peer_readonly_get_without_credentials_is_allowed stdout ----
+
+thread 'rt1_trusted_peer_readonly_get_without_credentials_is_allowed' (2729182) panicked at api_tailnet_trust_contract.rs:64:5:
+assertion `left == right` failed: [R-T1 可信对端无凭证 GET /api/v1/issues] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+  left: 401
+ right: 200
+
+---- rt5d_empty_host_allowlist_disables_trust_and_warns stdout ----
+
+thread 'rt5d_empty_host_allowlist_disables_trust_and_warns' (2729189) panicked at api_tailnet_trust_contract.rs:322:5:
+[R-T5d 未设置白名单必须启动 WARN] 启动日志缺少 WARN 级别行：
+2026-10-22T11:40:53.529815Z  INFO pony_sentry_server: Connecting to SQLite database (default)...
+2026-10-22T11:40:53.892847Z  INFO pony_sentry_server: retention 任务已启用 events_days=180 traces_days=90 dry_run=false
+2026-10-22T11:40:53.892964Z  INFO pony_sentry_server: 控制台服务端会话已启用（HttpOnly + SameSite=Strict） session_ttl_secs=28800 cookie_secure=false
+2026-10-22T11:40:53.893900Z  INFO pony_sentry_server: PonySentry server listening on http://0.0.0.0:35581
+
+
+---- rt7_trust_never_bypasses_csrf_on_mutation stdout ----
+
+thread 'rt7_trust_never_bypasses_csrf_on_mutation' (2729192) panicked at api_tailnet_trust_contract.rs:64:5:
+assertion `left == right` failed: [R-T7 前置：可信对端取会话必须 200] 期望 HTTP 200，实际 status=401 body={"error":"unauthorized"}
+  left: 401
+ right: 200
+
+---- rt8b_invalid_cidr_config_degrades_without_crashing stdout ----
+
+thread 'rt8b_invalid_cidr_config_degrades_without_crashing' (2729541) panicked at api_tailnet_trust_contract.rs:322:5:
+[R-T8b 非法 CIDR 配置必须启动 WARN] 启动日志缺少 WARN 级别行：
+2026-10-22T11:40:53.934057Z  INFO pony_sentry_server: Connecting to SQLite database (default)...
+2026-10-22T11:40:54.216759Z  INFO pony_sentry_server: retention 任务已启用 events_days=180 traces_days=90 dry_run=false
+2026-10-22T11:40:54.216910Z  INFO pony_sentry_server: 控制台服务端会话已启用（HttpOnly + SameSite=Strict） session_ttl_secs=28800 cookie_secure=false
+2026-10-22T11:40:54.218181Z  INFO pony_sentry_server: PonySentry server listening on http://0.0.0.0:46263
+
+
+
+failures:
+    rt1_trusted_peer_readonly_get_without_credentials_is_allowed
+    rt5d_empty_host_allowlist_disables_trust_and_warns
+    rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials
+    rt7_trust_never_bypasses_csrf_on_mutation
+    rt8b_invalid_cidr_config_degrades_without_crashing
+
+test result: FAILED. 12 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+
+error: test failed, to rerun pass `--test api_tailnet_trust_contract`
+```
+
+---
+
+## 二、既有用例绿相证据（R-T9：不可回归，既有文件一行未改）
+
+```text
+         Running api_admin_auth_contract.rs (tests/target/debug/deps/api_admin_auth_contract-4a29bb05aa7d30eb)
+    test r10_fail_closed_when_no_tokens_configured ... ok
+    test r11_2_healthz_reports_db_status ... ok
+    test r10_admin_surfaces_require_token ... ok
+    test console_session_requires_csrf_and_invalidates_on_logout ... ok
+    test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.39s
+         Running api_ingest_v1_contract.rs (tests/target/debug/deps/api_ingest_v1_contract-ecbf08021415e8db)
+    test r2_invalid_level_degrades_to_warning ... ok
+    test r4_duplicate_delivery_is_idempotent ... ok
+    test r6_environment_scopes_fingerprint_and_filter ... ok
+    test r2_r3_ingest_accepts_all_v1_fields_and_both_stacktrace_shapes ... ok
+    test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+         Running api_tailnet_trust_contract.rs (tests/target/debug/deps/api_tailnet_trust_contract-e8f28402b1af86e4)
+    test rt3_default_cidrs_do_not_include_loopback ... ok
+    test rt12_static_token_still_wins_over_deny_signals ... ok
+    test rt13_cidr_match_without_host_match_is_denied ... ok
+    test rt11_proxy_header_never_grants_trust_via_first_hop_inference ... ok
+    test rt5b_x_real_ip_blocks_trust_even_when_cidr_and_host_match ... ok
+    test rt13_host_match_without_cidr_match_is_denied ... ok
+    test rt5_x_forwarded_for_blocks_trust_even_when_cidr_and_host_match ... ok
+    test rt2_trust_disabled_when_enable_env_absent ... ok
+    test rt6b_untrusted_peer_never_gets_session ... ok
+    test rt5c_host_not_in_allowlist_blocks_trust_with_raw_host_header ... ok
+    test rt10_logs_never_contain_credentials ... ok
+    test rt4_kill_switch_values_disable_trust_even_on_match ... ok
+```
+
+- `api_admin_auth_contract`：**4 passed; 0 failed**（该 test target 自身 Exit Code 0）
+- `api_ingest_v1_contract`：**4 passed; 0 failed**（该 test target 自身 Exit Code 0）
+- 整体 Exit Code 非 0 仅由新增 target `api_tailnet_trust_contract` 的红相失败贡献（红相预期）。
+- `git status` 显示既有契约测试文件与 `crates/server/src/**` 零改动（仅新增文件 + harness 接缝扩展）：
+
+     M tests/Cargo.toml
+     M tests/harness.rs
+    ?? .agents/notes/implemented/process/2026-10-20-clear-traces-for-testing.md
+    ?? .dev-team/red-phase-tailnet-trust.txt
+    ?? crates/server/tests/trust_unit.rs
+    ?? tests/api_tailnet_trust_contract.rs
+
+---
+
+## 三、红相命令 2：`cargo test --offline -p pony-sentry-server --test trust_unit`
+
+**Exit Code：101**
+
+结果：**1 passed / 10 failed**。10 条失败原因全部为 `unimplemented!`（判定层能力缺失）；
+唯一通过的是 `rt8_default_trusted_cidrs_match_frozen_contract`（比对公共常量 `DEFAULT_TRUSTED_CIDRS`，
+常量在空桩中已冻结，属预期绿）。
+
+```text
+   Compiling pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.39s
+     Running tests/trust_unit.rs (target/debug/deps/trust_unit-f40bba491981b076)
+
+running 11 tests
+test rt5b_trusted_host_matches_ignoring_case_and_port ... FAILED
+test rt5d_empty_allowlist_or_empty_cidrs_never_trusts ... FAILED
+test rt5_is_proxied_detects_header_presence_only ... FAILED
+test rt8_cidr_contains_ipv4_boundaries ... FAILED
+test rt8_contract_decide_chain_returns_trusted ... FAILED
+test rt8_cidr_contains_ipv6_ula_boundaries ... FAILED
+test rt8_decide_priority_matrix_is_frozen ... FAILED
+test rt8_default_trusted_cidrs_match_frozen_contract ... ok
+test rt8_invalid_cidr_returns_err_without_panicking ... FAILED
+test rt8_normalize_peer_maps_ipv4_mapped_ipv6 ... FAILED
+test rt8b_illegal_cidr_config_returns_err_without_panicking ... FAILED
+
+failures:
+
+---- rt5b_trusted_host_matches_ignoring_case_and_port stdout ----
+
+thread 'rt5b_trusted_host_matches_ignoring_case_and_port' (2745627) panicked at crates/server/src/trust.rs:56:9:
+not implemented: 契约空桩：TrustedHost::parse 由 Executor 实现（见 R-T5b）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt5d_empty_allowlist_or_empty_cidrs_never_trusts stdout ----
+
+thread 'rt5d_empty_allowlist_or_empty_cidrs_never_trusts' (2745628) panicked at crates/server/src/trust.rs:127:9:
+not implemented: 契约空桩：TrustConfig::parse 由 Executor 实现（见 R-T5b/R-T8）
+
+---- rt5_is_proxied_detects_header_presence_only stdout ----
+
+thread 'rt5_is_proxied_detects_header_presence_only' (2745626) panicked at crates/server/src/trust.rs:152:5:
+not implemented: 契约空桩：is_proxied 由 Executor 实现（见 R-T5）
+
+---- rt8_cidr_contains_ipv4_boundaries stdout ----
+
+thread 'rt8_cidr_contains_ipv4_boundaries' (2745629) panicked at crates/server/src/trust.rs:34:9:
+not implemented: 契约空桩：Cidr::parse 由 Executor 实现（见 R-T8）
+
+---- rt8_contract_decide_chain_returns_trusted stdout ----
+
+thread 'rt8_contract_decide_chain_returns_trusted' (2745631) panicked at crates/server/src/trust.rs:127:9:
+not implemented: 契约空桩：TrustConfig::parse 由 Executor 实现（见 R-T5b/R-T8）
+
+---- rt8_cidr_contains_ipv6_ula_boundaries stdout ----
+
+thread 'rt8_cidr_contains_ipv6_ula_boundaries' (2745630) panicked at crates/server/src/trust.rs:34:9:
+not implemented: 契约空桩：Cidr::parse 由 Executor 实现（见 R-T8）
+
+---- rt8_decide_priority_matrix_is_frozen stdout ----
+
+thread 'rt8_decide_priority_matrix_is_frozen' (2745632) panicked at crates/server/src/trust.rs:127:9:
+not implemented: 契约空桩：TrustConfig::parse 由 Executor 实现（见 R-T5b/R-T8）
+
+---- rt8_invalid_cidr_returns_err_without_panicking stdout ----
+
+thread 'rt8_invalid_cidr_returns_err_without_panicking' (2745634) panicked at crates/server/src/trust.rs:34:9:
+not implemented: 契约空桩：Cidr::parse 由 Executor 实现（见 R-T8）
+
+thread 'rt8_invalid_cidr_returns_err_without_panicking' (2745634) panicked at crates/server/tests/trust_unit.rs:145:9:
+[R-T8] Cidr::parse("not-a-cidr") 不得 panic（fail-closed 必须可降级）
+
+---- rt8_normalize_peer_maps_ipv4_mapped_ipv6 stdout ----
+
+thread 'rt8_normalize_peer_maps_ipv4_mapped_ipv6' (2745635) panicked at crates/server/src/trust.rs:146:5:
+not implemented: 契约空桩：normalize_peer 由 Executor 实现（见 R-T8）
+
+---- rt8b_illegal_cidr_config_returns_err_without_panicking stdout ----
+
+thread 'rt8b_illegal_cidr_config_returns_err_without_panicking' (2745636) panicked at crates/server/src/trust.rs:127:9:
+not implemented: 契约空桩：TrustConfig::parse 由 Executor 实现（见 R-T5b/R-T8）
+
+thread 'rt8b_illegal_cidr_config_returns_err_without_panicking' (2745636) panicked at crates/server/tests/trust_unit.rs:326:5:
+[R-T8b] 非法 CIDR 配置不得 panic（进程必须存活）
+
+
+failures:
+    rt5_is_proxied_detects_header_presence_only
+    rt5b_trusted_host_matches_ignoring_case_and_port
+    rt5d_empty_allowlist_or_empty_cidrs_never_trusts
+    rt8_cidr_contains_ipv4_boundaries
+    rt8_cidr_contains_ipv6_ula_boundaries
+    rt8_contract_decide_chain_returns_trusted
+    rt8_decide_priority_matrix_is_frozen
+    rt8_invalid_cidr_returns_err_without_panicking
+    rt8_normalize_peer_maps_ipv4_mapped_ipv6
+    rt8b_illegal_cidr_config_returns_err_without_panicking
+
+test result: FAILED. 1 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p pony-sentry-server --test trust_unit`
+```
+
+---
+
+## 四、规则 → 用例映射（逐条落地，无遗漏）
+
+| 规则 | 用例 | 当前相 |
+| --- | --- | --- |
+| R-T1 | `rt1_trusted_peer_readonly_get_without_credentials_is_allowed` | 红（401≠200） |
+| R-T2 | `rt2_trust_disabled_when_enable_env_absent` | 绿（空桩全拒，等价于默认关闭；实现后必须保持） |
+| R-T3 | `rt3_default_cidrs_do_not_include_loopback`；`trust_unit::rt8_cidr_contains_ipv4_boundaries` / `rt8_cidr_contains_ipv6_ula_boundaries` | 黑盒绿 / 单测红 |
+| R-T4 | `rt4_kill_switch_values_disable_trust_even_on_match`（0/false/off/空串/yes 五变体）；`trust_unit::rt8_decide_priority_matrix_is_frozen`（Disabled 优先） | 绿 / 红 |
+| R-T5 | `rt5_x_forwarded_for_blocks_trust_even_when_cidr_and_host_match`；`trust_unit::rt5_is_proxied_detects_header_presence_only` | 绿 / 红 |
+| R-T5b | `rt5b_x_real_ip_blocks_trust_even_when_cidr_and_host_match`；`trust_unit::rt5b_trusted_host_matches_ignoring_case_and_port` | 绿 / 红 |
+| R-T5c | `rt5c_host_not_in_allowlist_blocks_trust_with_raw_host_header`（原始 HTTP 逐字节写 `Host: evil.example:3000`）；`trust_unit::rt5b_trusted_host_matches_ignoring_case_and_port` | 绿 / 红 |
+| R-T5d | `rt5d_empty_host_allowlist_disables_trust_and_warns`（未设置 + 空串两变体）；`trust_unit::rt5d_empty_allowlist_or_empty_cidrs_never_trusts` | 红（WARN 缺失）/ 红 |
+| R-T6 | `rt6_trusted_peer_gets_session_cookie_and_csrf_without_credentials` | 红（401≠200） |
+| R-T6b | `rt6b_untrusted_peer_never_gets_session` | 绿（空桩不发会话） |
+| R-T7 | `rt7_trust_never_bypasses_csrf_on_mutation`（①401 ②403 csrf_invalid ③200 且 PATCH 真实生效） | 红（前置取会话 401≠200） |
+| R-T8 | `trust_unit::{rt8_normalize_peer_maps_ipv4_mapped_ipv6, rt8_contract_decide_chain_returns_trusted, rt8_cidr_contains_ipv4_boundaries, rt8_cidr_contains_ipv6_ula_boundaries, rt8_invalid_cidr_returns_err_without_panicking, rt8_decide_priority_matrix_is_frozen}` | 红（unimplemented） |
+| R-T8b | `rt8b_invalid_cidr_config_degrades_without_crashing`（存活 + /healthz 200 + 401 + WARN）；`trust_unit::rt8b_illegal_cidr_config_returns_err_without_panicking` | 红（WARN 缺失）/ 红 |
+| R-T9 | 既有 `api_admin_auth_contract` / `api_ingest_v1_contract` 全绿 + 既有文件零改动 | 绿 |
+| R-T10 | `rt10_logs_never_contain_credentials`（捕获真实 stdout：凭证值不出现、禁止字段不出现、trust_decision 行必须带 peer+host） | 绿（当前无信任日志，防回归守卫） |
+| R-T11 | `rt11_proxy_header_never_grants_trust_via_first_hop_inference`（XFF 首 hop 伪装 100.64.0.1）；`trust_unit::rt5_is_proxied_detects_header_presence_only` | 绿 / 红 |
+| R-T12 | `rt12_static_token_still_wins_over_deny_signals`（ADMIN_TOKEN + 代理头 → 200；ADMIN_TOKEN + 伪造 Host → 200） | 绿（既有语义保持） |
+| R-T13 | `rt13_host_match_without_cidr_match_is_denied`；`rt13_cidr_match_without_host_match_is_denied`；`trust_unit::rt8_decide_priority_matrix_is_frozen` | 绿 / 红 |
+
+---
+
+## 五、契约不可机械验证处（显式标注 `[REVIEW-ONLY]`，未伪造断言）
+
+1. **R-T5d / R-T8b 的启动 WARN**：机械断言只到「子进程 stdout 出现 WARN 级别行」（日志经文件重定向捕获，
+   非 stderr 管道）。WARN 的具体文案是否说清「空白名单 → 信任不生效」「非法 CIDR → 回退默认网段」靠 review。
+2. **R-T10「信任日志只含 trust_decision / peer / host 三字段」的完备性**：机械断言覆盖「凭证值与
+   Authorization/Cookie/Set-Cookie/csrf_token 不得出现」「出现 trust_decision 的行必须同时含 peer 与 host」；
+   「只含三字段、无第四字段」靠 review。
+3. **R-T7 的判定层不可测**：契约 §0③ 要求 trust 模块不提供写权限判定函数，Rust 无法在运行时枚举公共项，
+   故写权限隔离只用黑盒 HTTP（`rt7_trust_never_bypasses_csrf_on_mutation`）验证。
+4. **R-T9「响应逐字节一致」**：以「既有用例文件一行未改且全绿」为代理证据，未做响应体逐字节 diff。
