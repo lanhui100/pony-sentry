@@ -7,7 +7,8 @@
   "concurrency_lock": "optimistic_or_mutex",
   "logging": {
     "format": "json",
-    "require_trace_id": true
+    "require_trace_id": true,
+    "trace_id": "request_id"
   },
   "resource_release": [
     "abort_controllers",
@@ -25,7 +26,7 @@
     "cidrs_env": "CONSOLE_TAILNET_CIDRS",
     "hosts_env": "CONSOLE_TRUSTED_HOSTS",
     "proxied_header_gate": true,
-    "proxied_headers": ["x-forwarded-for", "x-real-ip"],
+    "proxied_headers": ["x-forwarded-for", "x-real-ip", "forwarded"],
     "host_allowlist_gate": true,
     "host_match_ignores_port_and_case": true,
     "empty_host_allowlist_disables_trust": true,
@@ -34,7 +35,7 @@
     "csrf_exempt": false,
     "logging": {
       "format": "json",
-      "fields": ["trust_decision", "peer", "host"],
+      "fields": ["scope", "request_id", "trust_decision", "peer", "host"],
       "forbidden_fields": [
         "admin_token",
         "client_token",

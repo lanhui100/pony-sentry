@@ -137,7 +137,7 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
 仍必须持有会话 Cookie 并携带匹配的 `x-csrf-token`**，否则 401 / 403 `csrf_invalid`（信任不兑换写权限）。
 放行需同时满足三个条件，缺一即 401：① 对端 IP 命中 `CONSOLE_TAILNET_CIDRS` ② `Host` 精确命中
 `CONSOLE_TRUSTED_HOSTS`（**Host 白名单是 DNS rebinding 的唯一防线**，`Host: evil.example:3000` 即使 CIDR
-命中也不放行）③ 请求不带 `x-forwarded-for`/`x-real-ip`（代理头只拒不放，不取首 hop 推断对端）。
+命中也不放行）③ 请求不带 `x-forwarded-for`/`x-real-ip`/`forwarded`（代理头只拒不放，不取首 hop 推断对端）。
 可信对端 `GET /api/v1/auth/session` 在无可验证会话时自动签发会话（同形 JSON + `Set-Cookie`），
 控制台因此零输入进入；不可信来源一律 401。每次信任放行写一条结构化审计日志
 （含 `request_id`/`trust_decision`/`peer`/`host` 四个字段，不含任何 token/CSRF/Cookie 值；

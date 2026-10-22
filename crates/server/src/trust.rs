@@ -178,7 +178,7 @@ pub enum TrustDecision {
     Disabled,
     /// 拿不到对端地址（未接线 connect_info 或非 TCP）：按不可信处理（R-T2）。
     PeerUnknown,
-    /// 请求携带 `x-forwarded-for` / `x-real-ip`：一律不信任（R-T5）。
+    /// 请求携带 `x-forwarded-for` / `x-real-ip` / `forwarded`：一律不信任（R-T5/R-T4c）。
     Proxied,
     /// 对端地址明确落在可信 CIDR 之外（R-T3/R-T13）。
     OutsideCidrs,
@@ -200,20 +200,37 @@ impl TrustConfig {
     /// - `CONSOLE_TRUSTED_HOSTS`：逗号分隔 `host`/`host:port`；未设置或为空 → **无白名单（信任恒不生效）**，
     ///   开启状态下启动打印 WARN。
     ///
-    /// 任一解析失败 → 信任关闭（fail-closed）并回退默认 CIDR，**不得 panic**（R-T8b）。
+    /// 任一解析失败、或显式给出的 CIDR 列表里**零个有效 CIDR** → 信任关闭（fail-closed）并回退默认 CIDR，
+    /// **不得 panic**（R-T8b）。空串/未设置仍走默认网段且不告警。
     pub fn from_env() -> TrustConfig {
-        let enabled = std::env::var("CONSOLE_TAILNET_TRUST")
-            .map(|value| is_enabled_value(&value))
-            .unwrap_or(false);
-        let cidrs_src = std::env::var("CONSOLE_TAILNET_CIDRS")
-            .map(|value| value.trim().to_string())
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| DEFAULT_TRUSTED_CIDRS.to_string());
-        let hosts_src = std::env::var("CONSOLE_TRUSTED_HOSTS").unwrap_or_default();
+        let enabled = std::env::var("CONSOLE_TAILNET_TRUST").ok();
+        let cidrs = std::env::var("CONSOLE_TAILNET_CIDRS").ok();
+        let hosts = std::env::var("CONSOLE_TRUSTED_HOSTS").ok();
+        TrustConfig::from_components(enabled.as_deref(), cidrs.as_deref(), hosts.as_deref())
+    }
 
-        let config = match TrustConfig::parse(enabled, &cidrs_src, &hosts_src) {
-            Ok(config) => config,
+    /// [`Self::from_env`] 的纯函数内核（env 只读一次）：单独暴露给本模块单测，避免测试并发改 env。
+    fn from_components(
+        enabled_env: Option<&str>,
+        cidrs_env: Option<&str>,
+        hosts_env: Option<&str>,
+    ) -> TrustConfig {
+        let enabled = enabled_env.map(is_enabled_value).unwrap_or(false);
+        // 空串 = 未设置（走默认网段，不告警）；非空但解析后零个有效 CIDR（如 ","）= 非法配置。
+        let cidrs_override = cidrs_env.map(str::trim).filter(|value| !value.is_empty());
+        let cidrs_src = cidrs_override.unwrap_or(DEFAULT_TRUSTED_CIDRS);
+        let hosts_src = hosts_env.unwrap_or_default();
+
+        let config = match TrustConfig::parse(enabled, cidrs_src, hosts_src) {
+            Ok(config) if !(cidrs_override.is_some() && config.cidrs.is_empty()) => config,
+            Ok(_) => {
+                warn!(
+                    trust_enabled = false,
+                    fallback_cidrs = DEFAULT_TRUSTED_CIDRS,
+                    "CONSOLE_TAILNET_CIDRS 未解析出任何有效 CIDR（显式设置为空白/逗号串）：已关闭信任并回退默认 CIDR（fail-closed）"
+                );
+                default_config()
+            }
             Err(err) => {
                 warn!(
                     trust_enabled = false,
@@ -221,12 +238,7 @@ impl TrustConfig {
                     fallback_cidrs = DEFAULT_TRUSTED_CIDRS,
                     "tailnet trust 配置非法：已关闭信任并回退默认 CIDR（fail-closed）"
                 );
-                // DEFAULT_TRUSTED_CIDRS 恒可解析；`unwrap_or` 只是防御，绝不 panic（R-T8b）。
-                TrustConfig::parse(false, DEFAULT_TRUSTED_CIDRS, "").unwrap_or(TrustConfig {
-                    enabled: false,
-                    cidrs: Vec::new(),
-                    trusted_hosts: Vec::new(),
-                })
+                default_config()
             }
         };
 
@@ -302,6 +314,17 @@ impl TrustConfig {
     }
 }
 
+/// 降级兜底配置：信任关闭 + 默认 CIDR + 空白名单。
+///
+/// [`DEFAULT_TRUSTED_CIDRS`] 恒可解析，`unwrap_or` 只是防御，绝不 panic（R-T8b）。
+fn default_config() -> TrustConfig {
+    TrustConfig::parse(false, DEFAULT_TRUSTED_CIDRS, "").unwrap_or(TrustConfig {
+        enabled: false,
+        cidrs: Vec::new(),
+        trusted_hosts: Vec::new(),
+    })
+}
+
 /// `CONSOLE_TAILNET_TRUST` 的唯一开启口径：`1` / `true` / `on`（大小写不敏感，容忍首尾空白）。
 fn is_enabled_value(value: &str) -> bool {
     matches!(
@@ -322,7 +345,70 @@ pub fn normalize_peer(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// 请求是否携带代理头：存在 `x-forwarded-for` 或 `x-real-ip` 即 `true`（R-T5）。
+/// 请求是否携带代理头：存在 `x-forwarded-for`、`x-real-ip` 或 RFC 7239 `forwarded` 即 `true`（R-T5/R-T4c）。
+///
+/// 只看存在性（HeaderMap 大小写不敏感），**不解析取值**——绝不据首 hop 推断真实对端（R-T11）。
 pub fn is_proxied(headers: &HeaderMap) -> bool {
-    headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip")
+    headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::panic::catch_unwind;
+
+    use axum::http::HeaderValue;
+
+    use super::*;
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    /// R-T4c：RFC 7239 `forwarded` 与 XFF/X-Real-IP 同等视为代理头（只看存在性）。
+    #[test]
+    fn is_proxied_detects_forwarded_header() {
+        assert!(!is_proxied(&HeaderMap::new()), "无代理头时必须为 false");
+
+        let mut forwarded = HeaderMap::new();
+        forwarded.insert("forwarded", HeaderValue::from_static("for=100.64.0.1"));
+        assert!(
+            is_proxied(&forwarded),
+            "[R-T4c] 仅带 Forwarded 头也必须判定为经过代理"
+        );
+
+        // 大小写不敏感（HTTP 头名语义）+ 空值同样算「存在」。
+        let mut upper = HeaderMap::new();
+        upper.insert("Forwarded", HeaderValue::from_static(""));
+        assert!(is_proxied(&upper), "Forwarded 头存在即拒绝，与取值无关");
+    }
+
+    /// 变更 2：显式 `CONSOLE_TAILNET_CIDRS=,`（零个有效 CIDR）按非法配置降级，不 panic、不信任、回退默认；
+    /// 而未设置/空串仍走默认网段并保持开启（不降级）。
+    #[test]
+    fn empty_cidr_override_degrades_to_disabled_without_panicking() {
+        let outcome =
+            catch_unwind(|| TrustConfig::from_components(Some("1"), Some(","), Some("127.0.0.1")));
+        let config = outcome.expect("零个有效 CIDR 的配置不得 panic");
+        assert!(!config.enabled, "零个有效 CIDR 必须关闭信任（fail-closed）");
+        assert_eq!(
+            config.cidrs.len(),
+            2,
+            "必须回退 DEFAULT_TRUSTED_CIDRS（CGNAT + ULA 两段）"
+        );
+        assert_ne!(
+            config.decide(Some(v4(127, 0, 0, 1)), false, Some("127.0.0.1")),
+            TrustDecision::Trusted,
+            "降级后即使 CIDR/Host 文本命中也不得判定 Trusted"
+        );
+
+        // 未设置 / 空串：走默认网段，不降级（enabled 保持开启）。
+        for unset in [None, Some(""), Some("   ")] {
+            let config = TrustConfig::from_components(Some("1"), unset, Some("127.0.0.1"));
+            assert!(config.enabled, "未设置/空串不得降级为关闭");
+            assert_eq!(config.cidrs.len(), 2, "未设置/空串应使用默认网段");
+        }
+    }
 }
