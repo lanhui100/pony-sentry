@@ -1,0 +1,31 @@
++ date -Is
+2026-10-22T20:43:15+08:00
++ tailscale ip -4
++ head -1
+100.95.193.103
++ curl -sS -o /dev/null -w 'anon tailnet-IP+Host-IP  GET /api/v1/issues -> %{http_code}\n' -m 5 http://100.95.193.103:3000/api/v1/issues
+anon tailnet-IP+Host-IP  GET /api/v1/issues -> 200
++ curl -sS -o /dev/null -w 'anon magicdns Host    GET /api/v1/issues -> %{http_code}\n' -m 5 -H 'Host: devserver.taildb165c.ts.net' http://100.95.193.103:3000/api/v1/issues
+anon magicdns Host    GET /api/v1/issues -> 200
++ curl -sS -o /dev/null -w 'anon evil Host        GET /api/v1/issues -> %{http_code}\n' -m 5 -H 'Host: evil.example:3000' http://100.95.193.103:3000/api/v1/issues
+anon evil Host        GET /api/v1/issues -> 401
++ curl -sS -o /dev/null -w 'anon XFF              GET /api/v1/issues -> %{http_code}\n' -m 5 -H 'X-Forwarded-For: 203.0.113.9' http://100.95.193.103:3000/api/v1/issues
+anon XFF              GET /api/v1/issues -> 401
++ curl -sS -o /dev/null -w 'loopback              GET /api/v1/issues -> %{http_code}\n' -m 5 http://127.0.0.1:3000/api/v1/issues
+loopback              GET /api/v1/issues -> 401
++ curl -sS -D /tmp/sess.hdr -o /tmp/sess.json -w 'anon magicdns Host    GET /auth/session -> %{http_code}\n' -m 5 -H 'Host: devserver.taildb165c.ts.net' http://100.95.193.103:3000/api/v1/auth/session
+anon magicdns Host    GET /auth/session -> 200
++ grep -i '^set-cookie' /tmp/sess.hdr
++ sed 's/=.*/=<redacted>/'
+set-cookie: pony_sentry_session=<redacted>
++ python3 -c 'import json;d=json.load(open('\''/tmp/sess.json'\''));print('\''authenticated='\'',d.get('\''authenticated'\''),'\''csrf_len='\'',len(d.get('\''csrf_token'\'','\'''\'')),'\''expires_in='\'',d.get('\''expires_in'\''))'
+authenticated= True csrf_len= 32 expires_in= 28800
++ systemctl is-active pony-sentry
+active
+
+### E2E（真实浏览器 agent-browser，2026-10-22 20:44-20:47）
+URL: http://devserver.taildb165c.ts.net:3000/
+- 首屏无需登录遮罩，直接渲染 Issues 列表（截图 docs/screenshots/2026-10-22-console-tailnet-trust-load.png）
+- Console 消息总数 0，error 数 0（agent-browser console --json，独立 session）
+- 真实写路径：issue dc00f3a6 状态 处理中→已解决 成功（侧栏统计 已解决 18→19、处理中 3→2），截图 docs/screenshots/2026-10-22-console-tailnet-trust-patch.png
+- 已用 admin API 回滚该 issue 状态为 in_progress（PATCH 200，复核状态=['in_progress']）
