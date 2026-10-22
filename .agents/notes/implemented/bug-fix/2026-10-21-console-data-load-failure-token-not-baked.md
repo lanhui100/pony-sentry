@@ -10,7 +10,7 @@ Status: implemented
 - `GET /healthz` → `200 {"db":"up","status":"ok"}`，服务与 DB 正常；
 - `GET /api/v1/issues`、`GET /api/v1/traces?limit=100`、`GET /api/v1/projects`
   不带任何凭证 → **`401 {"error":"unauthorized"}`**（响应 <1ms）；
-- 同上带 `ADMIN_TOKEN`（`/etc/pony-sentry/pony-sentry.env` 内 `a72330…`）→ 全部 `200`（2–10ms）；
+- 同上带环境文件 `/etc/pony-sentry/pony-sentry.env` 中已配置的 `ADMIN_TOKEN` → 全部 `200`（2–10ms）；
 - `GET /` 提供的 `index.html` 与仓库 `web/dist/index.html` 同字节（343603），
   且**不含任何 64 位十六进制 token**——`VITE_PONY_SENTRY_TOKEN` 未烘焙，产物无构建期凭证。
 
@@ -68,3 +68,5 @@ localStorage 干预。配套落地（本次提交内完成）：
   `VITE_PONY_SENTRY_TOKEN` 覆盖（`App.vue:904` 优先取构建期值）。
 - 若未来迁移到公网暴露 console，需重新评估 token 内嵌在静态产物中的暴露面
   （届时应回退到服务端登录会话或短期令牌）。
+- 后续部署加固见 `implemented/process/2026-10-22-console-deploy-rollback-and-secret-hardening.md`；
+  可诊断错误文案见 `implemented/bug-fix/2026-10-22-console-load-error-diagnostics.md`。

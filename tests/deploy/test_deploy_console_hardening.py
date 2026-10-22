@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""部署脚本的机械加固门禁。
+
+这些断言不替代真实部署，但能阻止回退到“无备份、无回滚、无 EXIT 还原、
+二进制 world-readable”的旧实现。
+"""
+import subprocess
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "deploy" / "scripts" / "deploy-console.sh"
+
+
+class TestDeployConsoleHardening(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SCRIPT.read_text(encoding="utf-8")
+
+    def test_shell_syntax(self):
+        result = subprocess.run(
+            ["bash", "-n", str(SCRIPT)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exit_trap_restores_worktree_dist(self):
+        self.assertIn("trap cleanup EXIT", self.text)
+        self.assertIn("restore_worktree_dist", self.text)
+        self.assertIn("git -C \"$REPO_DIR\" checkout -- web/dist", self.text)
+
+    def test_previous_binary_is_backed_up_and_rollback_restarts_service(self):
+        self.assertIn('BIN_BACKUP="$TMP_DIR/pony-sentry-server.previous"', self.text)
+        self.assertIn("rollback_previous_binary", self.text)
+        self.assertIn('systemctl restart "$SERVICE"', self.text)
+        self.assertIn("DEPLOY_OK", self.text)
+
+    def test_embedded_token_binary_is_not_world_readable(self):
+        self.assertIn('BIN_MODE="${PONY_SENTRY_BIN_MODE:-0750}"', self.text)
+        self.assertIn('-m "$BIN_MODE" -o root -g "$SERVICE_GROUP"', self.text)
+        self.assertIn("-perm /004", self.text)
+
+    def test_all_authenticated_read_endpoints_are_smoke_checked(self):
+        for path in ("/api/v1/issues?", "/api/v1/projects", "/api/v1/traces?limit=100"):
+            self.assertIn(path, self.text)
+        self.assertIn('x-admin-token: $ADMIN_TOKEN', self.text)
+
+
+if __name__ == "__main__":
+    unittest.main()

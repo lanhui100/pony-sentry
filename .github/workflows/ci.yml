@@ -40,6 +40,11 @@ jobs:
           fi
           echo "No hardcoded secrets detected."
 
+      - name: Deployment & Web Hardening Gates
+        run: |
+          bash -n deploy/scripts/deploy-console.sh
+          python3 -m unittest tests.deploy.test_deploy_console_hardening -v
+
       - name: Run Test Suite
         run: cargo test --workspace --verbose
 
@@ -66,10 +71,11 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: 'web/pnpm-lock.yaml'
 
-      - name: Build Web Frontend
+      - name: Test & Build Web Frontend
         run: |
           cd web
           pnpm install --frozen-lockfile
+          pnpm test
           pnpm run build
 
       - name: Install Rust toolchain

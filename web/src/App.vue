@@ -62,6 +62,11 @@
         <div class="flex items-center gap-2 min-w-0">
           <AlertTriangle class="w-4 h-4 text-red-400 shrink-0" />
           <span>数据加载失败</span>
+          <span
+            v-if="loadErrorDetail"
+            data-testid="load-error-detail"
+            class="text-red-300/80 truncate"
+          >{{ loadErrorDetail }}</span>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <Button variant="destructive" size="sm" @click="refreshAll">重试</Button>
@@ -860,6 +865,7 @@ import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import Tabs from '@/components/ui/Tabs.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
+import { classifyLoadFailure, loadFailureDetail } from '@/lib/loadError'
 
 const API_TIMEOUT_MS = 3000
 
@@ -883,14 +889,20 @@ const isRefreshing = ref(false)
 const copySuccess = ref(null)
 
 const initialLoading = ref(true)
-const issueLoadFailed = ref(false)
-const traceLoadFailed = ref(false)
-const projectLoadFailed = ref(false)
-const showLoadError = computed(() => issueLoadFailed.value || traceLoadFailed.value || projectLoadFailed.value)
+const loadFailures = ref({})
+const showLoadError = computed(() => Object.keys(loadFailures.value).length > 0)
+const loadErrorDetail = computed(() => loadFailureDetail(loadFailures.value))
+const recordLoadFailure = (source, error) => {
+  loadFailures.value = { ...loadFailures.value, [source]: classifyLoadFailure(error) }
+}
+const clearLoadFailure = (source) => {
+  if (!(source in loadFailures.value)) return
+  const next = { ...loadFailures.value }
+  delete next[source]
+  loadFailures.value = next
+}
 const dismissLoadError = () => {
-  issueLoadFailed.value = false
-  traceLoadFailed.value = false
-  projectLoadFailed.value = false
+  loadFailures.value = {}
 }
 
 const gatewayState = ref('checking')
@@ -995,7 +1007,12 @@ async function apiFetchJson(url, options = {}) {
       headers: { ...authHeaders(), ...(fetchOptions.headers || {}) },
       signal: controller.signal,
     })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status}`)
+      err.name = response.status === 401 || response.status === 403 ? 'AuthError' : 'HttpError'
+      err.status = response.status
+      throw err
+    }
     return await response.json()
   } catch (e) {
     if (e && e.name === 'AbortError') {
@@ -1225,11 +1242,11 @@ const fetchTraces = async () => {
     let url = '/api/v1/traces?limit=100'
     if (traceProjectFilter.value) url += `&project=${encodeURIComponent(traceProjectFilter.value)}`
     traces.value = await apiFetchJson(url, { refreshScope: true })
-    traceLoadFailed.value = false
+    clearLoadFailure('traces')
   } catch (e) {
     if (e.name === 'AbortError') return
     console.error('加载 Trace 列表失败', e)
-    traceLoadFailed.value = true
+    recordLoadFailure('traces', e)
   }
 }
 
@@ -1327,22 +1344,22 @@ const fetchIssues = async () => {
   if (filterEnvironment.value) url += `environment=${encodeURIComponent(filterEnvironment.value)}&`
   try {
     issues.value = await apiFetchJson(url, { refreshScope: true })
-    issueLoadFailed.value = false
+    clearLoadFailure('issues')
   } catch (e) {
     if (e.name === 'AbortError') return
     console.error('加载缺陷列表失败', e)
-    issueLoadFailed.value = true
+    recordLoadFailure('issues', e)
   }
 }
 
 const fetchProjects = async () => {
   try {
     projects.value = await apiFetchJson('/api/v1/projects', { refreshScope: true })
-    projectLoadFailed.value = false
+    clearLoadFailure('projects')
   } catch (e) {
     if (e.name === 'AbortError') return
     console.error('加载项目列表失败', e)
-    projectLoadFailed.value = true
+    recordLoadFailure('projects', e)
   }
 }
 
