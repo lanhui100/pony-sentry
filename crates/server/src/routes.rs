@@ -1,7 +1,10 @@
+use crate::session::{
+    csrf_token_from_header, session_token_from_bearer, session_token_from_cookie, SessionStore,
+};
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -69,6 +72,8 @@ pub struct AppState {
     pub admin_token: Option<String>,
     pub webhook_url: Option<String>,
     pub metrics: Arc<IngestMetrics>,
+    /// 控制台服务端会话（HttpOnly Cookie / 短期 Bearer 令牌）。
+    pub sessions: Arc<SessionStore>,
 }
 
 impl AppState {
@@ -80,24 +85,13 @@ impl AppState {
             admin_token: None,
             webhook_url: None,
             metrics: Arc::new(IngestMetrics::default()),
+            sessions: Arc::new(SessionStore::default()),
         }
     }
 
     pub fn with_trace_repo(mut self, trace_repo: Option<Arc<dyn TraceRepository>>) -> Self {
         self.trace_repo = trace_repo;
         self
-    }
-
-    /// 管理侧请求的失败策略（契约 R10 / R10.1）：
-    /// - 两个 token 都没配置 → `NotConfigured`（503 fail-closed）；
-    /// - 提供了 `admin_token` 或 `client_token` 之一且匹配 → `Allowed`；
-    /// - 其余 → `Unauthorized`。
-    fn check_admin_auth(&self, headers: &HeaderMap) -> AuthOutcome {
-        check_admin_auth(
-            self.admin_token.as_deref(),
-            self.client_token.as_deref(),
-            headers,
-        )
     }
 
     /// 写入端点（ingest / traces）的鉴权，沿用既有 CLIENT_TOKEN 语义（契约 R10.1 收窄版）：
@@ -109,6 +103,51 @@ impl AppState {
             headers,
         )
     }
+
+    /// 管理侧鉴权：静态 token（API 客户端/运维）优先；否则接受服务端短期会话。
+    /// Cookie 会话执行状态变更时必须额外携带匹配的 CSRF token。
+    fn authorize_admin(
+        &self,
+        headers: &HeaderMap,
+        method: &Method,
+    ) -> Result<AdminCredential, AdminAuthError> {
+        if let Some(provided) = extract_provided_token(headers) {
+            if static_token_matches(
+                self.admin_token.as_deref(),
+                self.client_token.as_deref(),
+                provided,
+            ) {
+                return Ok(AdminCredential::Static);
+            }
+        }
+        if self.admin_token.is_none() && self.client_token.is_none() {
+            return Err(AdminAuthError::NotConfigured);
+        }
+
+        if let Some(token) = session_token_from_cookie(headers) {
+            if let Some(info) = self.sessions.validate(&token) {
+                let is_mutation =
+                    !matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS);
+                if is_mutation {
+                    let Some(csrf) = csrf_token_from_header(headers) else {
+                        return Err(AdminAuthError::CsrfInvalid);
+                    };
+                    if !self.sessions.csrf_matches(&info.csrf_token, csrf) {
+                        return Err(AdminAuthError::CsrfInvalid);
+                    }
+                }
+                return Ok(AdminCredential::SessionCookie);
+            }
+        }
+
+        if let Some(token) = session_token_from_bearer(headers) {
+            if self.sessions.validate(&token).is_some() {
+                return Ok(AdminCredential::SessionBearer);
+            }
+        }
+
+        Err(AdminAuthError::Unauthorized)
+    }
 }
 
 /// 鉴权判定结果。
@@ -116,24 +155,43 @@ impl AppState {
 enum AuthOutcome {
     Allowed,
     Unauthorized,
+    #[cfg_attr(not(test), allow(dead_code))]
     NotConfigured,
+}
+
+/// 管理侧请求使用的凭证类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminCredential {
+    Static,
+    SessionCookie,
+    SessionBearer,
+}
+
+/// 管理侧鉴权失败原因（CSRF 与认证失败分开返回）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminAuthError {
+    Unauthorized,
+    NotConfigured,
+    CsrfInvalid,
+}
+
+fn static_token_matches(admin: Option<&str>, client: Option<&str>, provided: &str) -> bool {
+    [admin, client]
+        .into_iter()
+        .flatten()
+        .any(|expected| token_matches(provided, expected))
 }
 
 /// 管理侧（读 + PATCH）鉴权规则（契约 R10 / R10.1）：
 /// - `admin` 与 `client` 都未配置 → `NotConfigured`（503 fail-closed）；
 /// - 任一配置且请求令牌与之匹配 → `Allowed`；否则 `Unauthorized`。
+#[cfg(test)]
 fn check_admin_auth(admin: Option<&str>, client: Option<&str>, headers: &HeaderMap) -> AuthOutcome {
     match (admin, client) {
         (None, None) => AuthOutcome::NotConfigured,
         _ => {
             let provided = extract_provided_token(headers);
-            let matched = provided.is_some_and(|token| {
-                [admin, client]
-                    .into_iter()
-                    .flatten()
-                    .any(|expected| token_matches(token, expected))
-            });
-            if matched {
+            if provided.is_some_and(|token| static_token_matches(admin, client, token)) {
                 AuthOutcome::Allowed
             } else {
                 AuthOutcome::Unauthorized
@@ -151,13 +209,7 @@ fn check_write_auth(client: Option<&str>, admin: Option<&str>, headers: &HeaderM
         return AuthOutcome::Allowed;
     }
     let provided = extract_provided_token(headers);
-    let matched = provided.is_some_and(|token| {
-        [client, admin]
-            .into_iter()
-            .flatten()
-            .any(|expected| token_matches(token, expected))
-    });
-    if matched {
+    if provided.is_some_and(|token| static_token_matches(admin, client, token)) {
         AuthOutcome::Allowed
     } else {
         AuthOutcome::Unauthorized
@@ -212,6 +264,13 @@ fn unauthorized() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({"error": "unauthorized"})),
+    )
+}
+
+fn csrf_invalid() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "csrf_invalid"})),
     )
 }
 
@@ -323,6 +382,11 @@ pub struct UpdateTraceRequest {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateSessionRequest {
+    token: String,
+}
+
 pub fn create_app_with_state(state: AppState) -> Router {
     // 1. Ingest 专用 CORS：仅开放 POST，收敛跨域能力
     let ingest_cors = CorsLayer::new()
@@ -343,8 +407,19 @@ pub fn create_app_with_state(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(ingest_cors);
 
-    // 3. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
-    //    鉴权（契约 R10）：ADMIN_TOKEN 优先，回退 CLIENT_TOKEN；两者皆无 → 503 fail-closed。
+    // 3. 控制台会话路由：静态 ADMIN_TOKEN 只用于一次性交换短期会话，
+    //    会话 Cookie 为 HttpOnly + SameSite=Strict，不进入前端构建产物。
+    let auth_routes = Router::new()
+        .route(
+            "/api/v1/auth/session",
+            post(handle_create_session)
+                .get(handle_get_session)
+                .delete(handle_delete_session),
+        )
+        .layer(DefaultBodyLimit::max(4 * 1024));
+
+    // 4. 面向 Web 控制台的管理路由 (不挂载通配跨域，防止 CSRF 跨域窃取)
+    //    鉴权（契约 R10）：静态 ADMIN_TOKEN / CLIENT_TOKEN，或服务端短期会话。
     let admin_routes = Router::new()
         .route("/api/v1/issues", get(handle_list_issues))
         .route("/api/v1/projects", get(handle_list_projects))
@@ -375,6 +450,7 @@ pub fn create_app_with_state(state: AppState) -> Router {
         .route("/healthz", get(handle_healthz))
         .route("/metrics", get(handle_metrics))
         .merge(ingest_routes)
+        .merge(auth_routes)
         .merge(admin_routes)
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .with_state(state)
@@ -386,11 +462,101 @@ async fn admin_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match state.check_admin_auth(request.headers()) {
-        AuthOutcome::Allowed => next.run(request).await,
-        AuthOutcome::Unauthorized => unauthorized().into_response(),
-        AuthOutcome::NotConfigured => admin_token_not_configured().into_response(),
+    let method = request.method().clone();
+    match state.authorize_admin(request.headers(), &method) {
+        Ok(_) => next.run(request).await,
+        Err(AdminAuthError::Unauthorized) => unauthorized().into_response(),
+        Err(AdminAuthError::NotConfigured) => admin_token_not_configured().into_response(),
+        Err(AdminAuthError::CsrfInvalid) => csrf_invalid().into_response(),
     }
+}
+
+/// `POST /api/v1/auth/session`：用 ADMIN_TOKEN / CLIENT_TOKEN 交换短期 HttpOnly 会话。
+async fn handle_create_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateSessionRequest>,
+) -> Response {
+    if state.admin_token.is_none() && state.client_token.is_none() {
+        return admin_token_not_configured().into_response();
+    }
+
+    let login_key = SessionStore::login_key(&headers);
+    if !state.sessions.login_allowed(&login_key) {
+        let mut response = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "too_many_attempts"})),
+        )
+            .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return response;
+    }
+
+    let token = body.token.trim();
+    if !static_token_matches(
+        state.admin_token.as_deref(),
+        state.client_token.as_deref(),
+        token,
+    ) {
+        state.sessions.record_login_failure(&login_key);
+        return unauthorized().into_response();
+    }
+    state.sessions.record_login_success(&login_key);
+    let created = state.sessions.create();
+    let mut response = (
+        StatusCode::OK,
+        Json(json!({
+            "authenticated": true,
+            "expires_at": created.info.expires_at.to_rfc3339(),
+            "expires_in": state.sessions.ttl_secs(),
+            "csrf_token": created.info.csrf_token,
+        })),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&state.sessions.cookie_header(&created.token)) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// `GET /api/v1/auth/session`：返回当前短期会话状态与 CSRF token。
+async fn handle_get_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let token = session_token_from_cookie(&headers).or_else(|| session_token_from_bearer(&headers));
+    let Some(info) = token.and_then(|token| state.sessions.validate(&token)) else {
+        return unauthorized().into_response();
+    };
+    let mut response = Json(json!({
+        "authenticated": true,
+        "expires_at": info.expires_at.to_rfc3339(),
+        "csrf_token": info.csrf_token,
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// `DELETE /api/v1/auth/session`：注销当前会话并清除 Cookie。
+async fn handle_delete_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) =
+        session_token_from_cookie(&headers).or_else(|| session_token_from_bearer(&headers))
+    {
+        state.sessions.remove(&token);
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(value) = HeaderValue::from_str(&state.sessions.clear_cookie_header()) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// `GET /healthz`：DB 探活（契约 R11.2）。DB 不可达 → 503 且 body 带 `db:"down"`。

@@ -28,3 +28,5 @@ Status: implemented
 - Web 构建门禁现在有真实副作用与内容断言；no-match 会以非零退出或缺少 `built in` 失败。
 - 仓库提交的 `web/dist/index.html` 必须与 `web/src` 同步，由该测试机械兜底。
 - 与前端错误诊断决策见 `implemented/bug-fix/2026-10-22-console-load-error-diagnostics.md`。
+- 控制台认证已演进为服务端 HttpOnly 会话；dist 无内嵌 token 的断言继续保留，
+  且新增登录/注销 E2E。见 `implemented/architecture/2026-10-22-console-server-side-session-auth.md`。

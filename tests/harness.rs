@@ -31,6 +31,7 @@ pub struct Resp {
     pub status: u16,
     pub raw: String,
     pub json: serde_json::Value,
+    pub headers: reqwest::header::HeaderMap,
 }
 
 impl Resp {
@@ -283,7 +284,16 @@ impl Server {
         self.send(reqwest::Method::GET, "/healthz", &[], None)
     }
 
-    fn send(
+    pub fn login_admin(&self) -> Resp {
+        self.send(
+            reqwest::Method::POST,
+            "/api/v1/auth/session",
+            &[],
+            Some(&serde_json::json!({"token": TEST_ADMIN_TOKEN})),
+        )
+    }
+
+    pub fn send(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -302,9 +312,10 @@ impl Server {
             .send()
             .unwrap_or_else(|err| panic!("请求 {path} 失败：{err}"));
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let raw = response.text().unwrap_or_default();
         let json = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-        Resp { status, raw, json }
+        Resp { status, raw, json, headers }
     }
 }
 

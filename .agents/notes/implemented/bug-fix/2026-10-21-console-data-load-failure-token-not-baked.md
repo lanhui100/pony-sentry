@@ -70,3 +70,5 @@ localStorage 干预。配套落地（本次提交内完成）：
   （届时应回退到服务端登录会话或短期令牌）。
 - 后续部署加固见 `implemented/process/2026-10-22-console-deploy-rollback-and-secret-hardening.md`；
   可诊断错误文案见 `implemented/bug-fix/2026-10-22-console-load-error-diagnostics.md`。
+- 后续已被服务端会话方案取代：`implemented/architecture/2026-10-22-console-server-side-session-auth.md`；
+  产物不再内嵌 ADMIN_TOKEN，控制台改为登录交换 HttpOnly 短期会话。

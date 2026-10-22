@@ -45,10 +45,18 @@ class TestDeployConsoleHardening(unittest.TestCase):
         self.assertIn('if [ "$(id -u)" -eq 0 ]; then', self.text)
         self.assertIn("请以普通部署用户运行本脚本", self.text)
 
-    def test_all_authenticated_read_endpoints_are_smoke_checked(self):
+    def test_authenticated_read_endpoints_use_short_lived_cookie_session(self):
         for path in ("/api/v1/issues?", "/api/v1/projects", "/api/v1/traces?limit=100"):
             self.assertIn(path, self.text)
-        self.assertIn('x-admin-token: $ADMIN_TOKEN', self.text)
+        self.assertIn('/api/v1/auth/session', self.text)
+        self.assertIn('-b "$COOKIE_JAR"', self.text)
+        self.assertIn('Cookie 会话 PATCH 未强制 CSRF', self.text)
+
+    def test_build_does_not_inject_static_admin_token(self):
+        self.assertIn('pnpm build', self.text)
+        self.assertNotIn('VITE_PONY_SENTRY_TOKEN', self.text)
+        self.assertIn('grep -qF "$ADMIN_TOKEN"', self.text)
+        self.assertIn('控制台产物仍包含 ADMIN_TOKEN', self.text)
 
 
 if __name__ == "__main__":

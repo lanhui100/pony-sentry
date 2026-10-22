@@ -26,7 +26,9 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `DATABASE_URL` | `sqlite:ponysentry.db?mode=rwc` | `postgres://`/`postgresql://` 前缀切 PG，否则 SQLite |
 | `PORT` | `3000` | 监听端口 |
 | `CLIENT_TOKEN` | 空（关闭写入鉴权） | 写入端点凭证：`x-client-token` 或 `Authorization: Bearer` |
-| `ADMIN_TOKEN` | 空（回退 `CLIENT_TOKEN`） | 读接口与 PATCH 凭证：`x-admin-token` 或 `Authorization: Bearer` |
+| `ADMIN_TOKEN` | 空（回退 `CLIENT_TOKEN`） | 读接口与 PATCH 的静态 API 凭证；也是控制台登录时交换短期会话的凭据 |
+| `CONSOLE_SESSION_TTL_SECS` | `28800` | 控制台服务端会话有效期（秒，最小 60、最大 86400；重启即全部失效） |
+| `CONSOLE_COOKIE_SECURE` | 未设置 | `=1` 时会话 Cookie 加 `Secure`；HTTPS 反向代理下应开启，纯 tailnet HTTP 保持关闭 |
 | `WEBHOOK_URL` | 空（关闭通知） | issue 新建/回归时的旁路通知（5s 超时，失败不重试） |
 | `RETENTION_DAYS_EVENTS` | `180` | events 保留天数 |
 | `RETENTION_DAYS_TRACES` | `90` | traces 保留天数 |
@@ -35,24 +37,27 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `PONY_REINDEX_FINGERPRINTS` | 未设置 | `=1` 执行一次全量指纹重索引后退出。**会重塑 issue 分组，仅运维手动执行** |
 | `RUST_LOG` | — | tracing 过滤（结构化日志带 `request_id`/`issue_id` 关联字段） |
 
-Web 控制台令牌二选一（构建期或运行时）：
+### Web 控制台会话
 
-```bash
-# 方式 A（构建期，产物内嵌，适合内网自建 console）：构建前导出
-VITE_PONY_SENTRY_TOKEN=<admin 或 client token> pnpm build
+Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态令牌。打开控制台后输入
+`ADMIN_TOKEN`（或 `CLIENT_TOKEN`）登录：
 
-# 方式 B（运行时，无需重建）：浏览器控制台执行一次
-localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
-```
+1. `POST /api/v1/auth/session` 用静态 token 交换短期会话；服务端返回
+   `HttpOnly; SameSite=Strict` Cookie，并只在响应体中返回 CSRF token。
+2. `GET /api/v1/auth/session` 恢复页面刷新后的会话状态与 CSRF token。
+3. Cookie 会话执行 PATCH 时必须带 `x-csrf-token`；静态 `x-admin-token` / Bearer API 客户端
+   语义保持兼容，不走 CSRF 分支。
+4. `DELETE /api/v1/auth/session` 注销并立即失效服务端会话；服务重启也会清空全部会话。
+
+会话存储在进程内存中，当前部署为单副本；若未来多副本，需要改为共享会话存储。
 
 生产部署请以普通用户直接执行 `bash deploy/scripts/deploy-console.sh`（不要 `sudo bash`；脚本内部
-按需 sudo）——从 `/etc/pony-sentry/pony-sentry.env` 读取 `ADMIN_TOKEN` 烘焙进产物并重装二进制，
-幂等可重跑。脚本在 `EXIT` trap 中无条件还原无 token 的 `web/dist`；安装前备份上一版本，
-服务/健康/三个鉴权读接口/token 内嵌/文件权限任一自检失败即自动回滚。构建期 `umask 077`
-且 build artifact 置 `0600`，内嵌 token 的二进制安装为 `0750 root:<service-group>`，
-避免同机其他用户读取。
+按需 sudo）——脚本从 `/etc/pony-sentry/pony-sentry.env` 读取 ADMIN_TOKEN，仅用于部署后的
+登录冒烟，不写进 web 产物或二进制。部署自检覆盖：健康、匿名请求拒绝、登录换取 Cookie、
+三个读接口、Cookie PATCH 缺 CSRF 必须 403、产物不包含 ADMIN_TOKEN、注销后旧 Cookie 失效。
+脚本在 `EXIT` trap 中无条件还原 `web/dist`；安装前备份上一版本，任一步失败自动回滚。
 
-控制台数据加载失败时会按原因显示可诊断文案：401/403 提示令牌缺失或失效，超时提示网络/服务
+控制台数据加载失败时会按原因显示可诊断文案：会话失效提示重新登录，超时提示网络/服务
 响应过慢，网络错误与 5xx 分别提示；不再统一显示无法归因的“数据加载失败”。
 
 备份（`deploy/systemd/pony-sentry-backup.{service,timer}` + `deploy/scripts/backup.sh`）：
@@ -112,14 +117,17 @@ localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
 
 **鉴权矩阵（契约 R10）**：
 
-| 端点 | 无 token | 仅配 `CLIENT_TOKEN` | 配了 `ADMIN_TOKEN` |
+| 端点 | 无凭证 | 仅配 `CLIENT_TOKEN` | 配了 `ADMIN_TOKEN` |
 | :--- | :--- | :--- | :--- |
 | `POST /api/v1/ingest`、`POST /api/v1/traces` | 未配置 token 时放行；配置后 401 | ✅ | ✅ |
-| `GET /api/v1/issues*`、`/projects`、`/traces*` | `401` | ✅ | ✅ |
-| `PATCH /api/v1/issues/:id`、`/traces/:id` | `401` | ✅ | ✅ |
+| `GET /api/v1/issues*`、`/projects`、`/traces*` | `401` | ✅ 静态 token 或会话 Cookie | ✅ 静态 token 或会话 Cookie |
+| `PATCH /api/v1/issues/:id`、`/traces/:id` | `401` | ✅ 静态 token；Cookie 会话需 CSRF | ✅ 静态 token；Cookie 会话需 CSRF |
+| `POST/GET/DELETE /api/v1/auth/session` | 登录/查询/注销会话 | 登录可用 CLIENT_TOKEN | 登录可用 ADMIN_TOKEN |
 
 - 两个 token 都未配置时，读接口与 PATCH **fail-closed** 返回 `503 {"error":"admin_token_not_configured"}`，
   启动时打一条 WARN；写入端点沿用「未配置即放行」的历史语义。
+- 静态 token 请求头为 `x-admin-token` / `x-client-token` / `Authorization: Bearer`；控制台 Cookie 会话的
+  PATCH 必须额外携带 `x-csrf-token`，缺失或不匹配返回 `403 {"error":"csrf_invalid"}`。
 - `/healthz` 与 `/metrics` 不鉴权（探针/抓取面）；`/healthz` 做 DB 探活（2s 超时），
   DB 不通 → `503 {"status":"degraded","db":"down"}`；`/metrics` 暴露
   `pony_sentry_issues_total{status,environment}`、`pony_sentry_events_total`、
@@ -145,7 +153,8 @@ localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
 - **公网暴露面**：`deploy/k3s/app.yaml` 的公网 Ingress 只放行 `POST /api/v1/ingest`（Exact）与
   `/healthz`；`/api/v1/traces` 与全部读接口仅集群内 svc / tailnet 可达，公网访问返回 404。
   Web 控制台同样只走 tailnet。
-- **单副本**：无多副本 HA / leader 选举；retention 与指纹重索引假设单进程运行。
+- **单副本**：无多副本 HA / leader 选举；retention、指纹重索引与控制台会话都假设单进程运行。
+  控制台会话存在进程内存中，服务重启即全部失效；多副本需改为共享会话存储并加过期清理。
   `migrate()` 也按单进程启动设计：多副本并发首次迁移可能撞 PG 目录表竞态
   （`CREATE TABLE IF NOT EXISTS` 不是原子 DDL），多副本场景需先加 advisory lock。
 - **备份**：`pg_dump -Fc | age`，每日 03:30 由 timer 触发；恢复演练（`age -d` + `pg_restore`）

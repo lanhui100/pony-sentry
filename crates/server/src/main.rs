@@ -2,7 +2,7 @@ use chrono::Utc;
 use pony_sentry_core::{
     create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository,
 };
-use pony_sentry_server::{create_app_with_state, AppState};
+use pony_sentry_server::{create_app_with_state, session::SessionStore, AppState};
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -216,6 +216,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => info!("retention 任务已通过 RETENTION_DISABLED=1 关闭"),
     }
 
+    let session_ttl_secs = std::env::var("CONSOLE_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 60)
+        .unwrap_or(pony_sentry_server::session::DEFAULT_SESSION_TTL_SECS)
+        .min(86_400);
+    let cookie_secure = std::env::var("CONSOLE_COOKIE_SECURE").as_deref() == Ok("1");
+    info!(
+        session_ttl_secs,
+        cookie_secure, "控制台服务端会话已启用（HttpOnly + SameSite=Strict）"
+    );
     let state = AppState {
         repo,
         trace_repo,
@@ -223,6 +234,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_token,
         webhook_url,
         metrics: Arc::default(),
+        sessions: Arc::new(SessionStore::new(
+            Duration::from_secs(session_ttl_secs),
+            cookie_secure,
+        )),
     };
     let app = create_app_with_state(state);
 

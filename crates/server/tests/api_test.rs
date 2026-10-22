@@ -18,6 +18,7 @@ async fn test_ingest_and_agent_api_flow() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -129,6 +130,7 @@ async fn test_ingest_requires_client_token_when_configured() {
         webhook_url: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -172,6 +174,7 @@ async fn test_sql_injection_is_safely_parametrized() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -225,6 +228,7 @@ async fn test_project_path_is_surfaced_and_filterable() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -321,6 +325,7 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -419,6 +424,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
         webhook_url: Some(webhook_url),
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -521,6 +527,7 @@ async fn test_traces_api_project_filter_and_aggregation() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -599,6 +606,7 @@ async fn test_traces_server_side_sanitization() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -691,6 +699,7 @@ async fn test_traces_large_payload_limit_2mb() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -729,6 +738,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
@@ -851,4 +861,117 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
     assert!(warnings
         .iter()
         .any(|w| w.as_str().unwrap().contains("missing_culprit")));
+}
+
+#[tokio::test]
+async fn test_console_session_login_cookie_csrf_and_logout() {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: None,
+        client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        webhook_url: None,
+        metrics: std::sync::Arc::default(),
+        sessions: Default::default(),
+    };
+    let app = create_app_with_state(state);
+    let server = TestServer::new(app).unwrap();
+
+    // 先造一个可 PATCH 的 issue。
+    let payload = json!({
+        "platform": "rust",
+        "release": "v0.1.0",
+        "environment": "production",
+        "message": "session csrf test",
+        "exception": {"error_type": "SessionTestError"}
+    });
+    let created = server.post("/api/v1/ingest").json(&payload).await;
+    created.assert_status(StatusCode::CREATED);
+    let issue_id = created.json::<serde_json::Value>()["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 错误 token 登录失败。
+    let bad_login = server
+        .post("/api/v1/auth/session")
+        .json(&json!({"token": "wrong-token"}))
+        .await;
+    bad_login.assert_status(StatusCode::UNAUTHORIZED);
+
+    // 正确 token 换取 HttpOnly + SameSite=Strict Cookie 和 CSRF token。
+    let login = server
+        .post("/api/v1/auth/session")
+        .json(&json!({"token": "test-admin-token"}))
+        .await;
+    login.assert_status(StatusCode::OK);
+    let set_cookie = login.header("set-cookie").to_str().unwrap().to_string();
+    assert!(
+        set_cookie.contains("HttpOnly"),
+        "session cookie: {set_cookie}"
+    );
+    assert!(
+        set_cookie.contains("SameSite=Strict"),
+        "session cookie: {set_cookie}"
+    );
+    let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+    let login_body = login.json::<serde_json::Value>();
+    let csrf_token = login_body["csrf_token"].as_str().unwrap().to_string();
+    assert!(login_body["expires_in"].as_u64().unwrap() >= 60);
+
+    // Cookie 会话可读，且会话查询返回同一 CSRF token。
+    let session = server
+        .get("/api/v1/auth/session")
+        .add_header("cookie", &cookie_pair)
+        .await;
+    session.assert_status(StatusCode::OK);
+    assert_eq!(
+        session.json::<serde_json::Value>()["csrf_token"]
+            .as_str()
+            .unwrap(),
+        csrf_token
+    );
+    let list = server
+        .get("/api/v1/issues")
+        .add_header("cookie", &cookie_pair)
+        .await;
+    list.assert_status(StatusCode::OK);
+
+    // Cookie 会话的 PATCH 必须带 CSRF；缺失 403、匹配则成功。
+    let no_csrf = server
+        .patch(&format!("/api/v1/issues/{issue_id}"))
+        .json(&json!({"status": "resolved"}))
+        .add_header("cookie", &cookie_pair)
+        .await;
+    no_csrf.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        no_csrf.json::<serde_json::Value>()["error"]
+            .as_str()
+            .unwrap(),
+        "csrf_invalid"
+    );
+    let with_csrf = server
+        .patch(&format!("/api/v1/issues/{issue_id}"))
+        .json(&json!({"status": "resolved"}))
+        .add_header("cookie", &cookie_pair)
+        .add_header("x-csrf-token", &csrf_token)
+        .await;
+    with_csrf.assert_status(StatusCode::OK);
+    assert_eq!(with_csrf.json::<serde_json::Value>()["status"], "resolved");
+
+    // 注销后旧 Cookie 立即失效。
+    let logout = server
+        .delete("/api/v1/auth/session")
+        .add_header("cookie", &cookie_pair)
+        .await;
+    logout.assert_status(StatusCode::NO_CONTENT);
+    let after_logout = server
+        .get("/api/v1/issues")
+        .add_header("cookie", &cookie_pair)
+        .await;
+    after_logout.assert_status(StatusCode::UNAUTHORIZED);
 }

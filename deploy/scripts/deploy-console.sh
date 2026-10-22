@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# deploy-console.sh —— PonySentry 生产控制台部署（构建期烘焙 ADMIN_TOKEN）
+# deploy-console.sh —— PonySentry 生产控制台部署（服务端短期会话）
 #
 # 用法: bash deploy/scripts/deploy-console.sh
-# 幂等可重复执行；token 轮换后重跑一次即整体更新。
+# 幂等可重复执行；ADMIN_TOKEN 轮换后重跑一次即整体更新。
 # 设计约束：
-#   - ADMIN_TOKEN 从 /etc/pony-sentry/pony-sentry.env 读取，不落库、不入 git；
-#   - token 经 VITE_PONY_SENTRY_TOKEN 烘焙进 web 产物，再经 include_str! 内嵌进
-#     服务端二进制（README 方式 A）——浏览器无需 localStorage；
-#   - 构建完成后无条件把工作区 web/dist 还原为无 token 版本（EXIT trap），
-#     任一失败路径都不把 token 产物留在 git 工作区；
-#   - 安装前备份上一版本，服务/健康/鉴权读接口任一自检失败即自动回滚；
-#   - 内嵌 token 的二进制只允许 root 和 service group 读取（默认 0750）；
+#   - ADMIN_TOKEN 从 /etc/pony-sentry/pony-sentry.env 读取，仅用于部署冒烟登录；
+#     它不再进入 web 产物或服务端二进制；
+#   - 构建完成后无条件把工作区 web/dist 还原为 committed 版本（EXIT trap）；
+#   - 安装前备份上一版本，服务/健康/登录/会话读接口/CSRF 任一自检失败即自动回滚；
+#   - 二进制只允许 root 和 service group 读取（默认 0750，纵深防御）；
 #   - 任一步失败即非零退出（set -Eeuo pipefail）。
 set -Eeuo pipefail
 umask 077
@@ -43,6 +41,8 @@ BIN_MODE="${PONY_SENTRY_BIN_MODE:-0750}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pony-sentry-deploy.XXXXXX")"
 BIN_BACKUP="$TMP_DIR/pony-sentry-server.previous"
 BIN_STAGE="$BIN_DEST.new"
+COOKIE_JAR="$TMP_DIR/session.cookies"
+LOGIN_JSON="$TMP_DIR/login.json"
 INSTALL_STARTED=0
 DEPLOY_OK=0
 
@@ -132,8 +132,8 @@ if [ -z "$ADMIN_TOKEN" ]; then
   exit 1
 fi
 
-echo "==> 1/6 构建 web（烘焙 VITE_PONY_SENTRY_TOKEN）"
-( cd "$REPO_DIR/web" && VITE_PONY_SENTRY_TOKEN="$ADMIN_TOKEN" pnpm build )
+echo "==> 1/6 构建 web（不注入任何令牌）"
+( cd "$REPO_DIR/web" && pnpm build )
 
 echo "==> 2/6 编译 release 二进制（include_str! 内嵌产物）"
 ( cd "$REPO_DIR" && cargo build --release -p pony-sentry-server )
@@ -152,18 +152,55 @@ INSTALL_STARTED=1
 $SUDO systemctl restart "$SERVICE"
 wait_for_service || { echo "ERROR: 服务未存活" >&2; exit 1; }
 
-echo "==> 4/6 自检：健康、鉴权读接口、内嵌 token、二进制权限"
+echo "==> 4/6 自检：健康、匿名拒绝、短期会话登录、Cookie 读接口与 CSRF、产物无 token"
 HEALTH="$(curl -fsS -m 5 --retry 5 --retry-connrefused --retry-delay 1 "$BASE_URL/healthz")"
 echo "healthz: $HEALTH"
 echo "$HEALTH" | grep -q '"db":"up"' || { echo "ERROR: DB 不健康" >&2; exit 1; }
 
+# 管理读接口匿名必须 401（若服务端配置了 ADMIN_TOKEN / CLIENT_TOKEN）。
+check_http_status 401 "$BASE_URL/api/v1/issues?" \
+  || { echo "ERROR: 匿名读接口未按预期拒绝" >&2; exit 1; }
+
+# 静态 ADMIN_TOKEN 仅用于交换短期会话；token 经 stdin 传递，不进入 curl 命令行。
+LOGIN_CODE="$(printf '%s' "$ADMIN_TOKEN"   | python3 -c 'import json,sys; print(json.dumps({"token": sys.stdin.read()}))'   | curl -sS -o "$LOGIN_JSON" -c "$COOKIE_JAR" -w '%{http_code}' -m 5 \
+      -X POST -H 'Content-Type: application/json' --data-binary @- \
+      "$BASE_URL/api/v1/auth/session")"
+[ "$LOGIN_CODE" = "200" ] || { echo "ERROR: 会话登录自检 HTTP $LOGIN_CODE（期待 200）" >&2; exit 1; }
+python3 - "$LOGIN_JSON" <<'PYLOGIN'
+import json, re, sys
+body = json.load(open(sys.argv[1], encoding="utf-8"))
+assert body.get("authenticated") is True, "session login response missing authenticated=true"
+assert re.fullmatch(r"[0-9a-f]{32}", body.get("csrf_token", "")), "invalid csrf_token"
+assert isinstance(body.get("expires_in"), int) and body["expires_in"] >= 60, "invalid expires_in"
+PYLOGIN
+
+check_http_status 200 "$BASE_URL/api/v1/auth/session" -b "$COOKIE_JAR" \
+  || { echo "ERROR: 会话状态接口自检失败" >&2; exit 1; }
 for path in '/api/v1/issues?' '/api/v1/projects' '/api/v1/traces?limit=100'; do
-  check_http_status 200 "$BASE_URL$path" -H "x-admin-token: $ADMIN_TOKEN" \
-    || { echo "ERROR: 读接口自检失败 $path" >&2; exit 1; }
+  check_http_status 200 "$BASE_URL$path" -b "$COOKIE_JAR" \
+    || { echo "ERROR: Cookie 会话读接口自检失败 $path" >&2; exit 1; }
 done
 
-curl -fsS -m 5 "$BASE_URL/" | grep -qF "$ADMIN_TOKEN" \
-  || { echo "ERROR: 产物未内嵌 token（构建期烘焙失效）" >&2; exit 1; }
+# Cookie 会话执行 PATCH 但缺 CSRF 头必须 403；请求在中间件层被拒绝，不会触达业务。
+check_http_status 403 "$BASE_URL/api/v1/issues/00000000-0000-0000-0000-000000000000" \
+  -b "$COOKIE_JAR" -X PATCH -H 'Content-Type: application/json' \
+  --data '{"status":"resolved"}' \
+  || { echo "ERROR: Cookie 会话 PATCH 未强制 CSRF" >&2; exit 1; }
+
+# 产物必须不包含 ADMIN_TOKEN；登录页与诊断文案应存在。
+ROOT_HTML="$(curl -fsS -m 5 "$BASE_URL/")"
+if printf '%s' "$ROOT_HTML" | grep -qF "$ADMIN_TOKEN"; then
+  echo "ERROR: 控制台产物仍包含 ADMIN_TOKEN" >&2
+  exit 1
+fi
+printf '%s' "$ROOT_HTML" | grep -q '控制台登录' \
+  || { echo "ERROR: 控制台产物缺少登录入口" >&2; exit 1; }
+
+# 注销后旧 Cookie 必须立即失效。
+check_http_status 204 "$BASE_URL/api/v1/auth/session" -b "$COOKIE_JAR" -X DELETE \
+  || { echo "ERROR: 会话注销自检失败" >&2; exit 1; }
+check_http_status 401 "$BASE_URL/api/v1/issues?" -b "$COOKIE_JAR" \
+  || { echo "ERROR: 注销后旧 Cookie 仍可读" >&2; exit 1; }
 
 ACTUAL_MODE="$($SUDO stat -c '%a' "$BIN_DEST")"
 if [ "$ACTUAL_MODE" != "${BIN_MODE#0}" ] && [ "$ACTUAL_MODE" != "$BIN_MODE" ]; then
@@ -171,11 +208,11 @@ if [ "$ACTUAL_MODE" != "${BIN_MODE#0}" ] && [ "$ACTUAL_MODE" != "$BIN_MODE" ]; t
   exit 1
 fi
 if [ -n "$($SUDO find "$BIN_DEST" -perm /004 -print -quit)" ]; then
-  echo "ERROR: 二进制对 other 可读，内嵌 token 可能泄漏" >&2
+  echo "ERROR: 二进制对 other 可读" >&2
   exit 1
 fi
 
 echo "==> 5/6 部署自检通过"
 DEPLOY_OK=1
-echo "==> 6/6 还原工作区 web/dist 为无 token 版本"
-echo "部署完成：控制台令牌已随二进制内嵌（无 localStorage 依赖），读接口冒烟 200，失败可自动回滚。"
+echo "==> 6/6 还原工作区 web/dist 为 committed 版本"
+echo "部署完成：控制台使用服务端短期会话（HttpOnly Cookie + CSRF），静态 ADMIN_TOKEN 不进入产物，失败可自动回滚。"

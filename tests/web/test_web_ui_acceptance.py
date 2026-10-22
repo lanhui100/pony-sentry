@@ -18,6 +18,7 @@ PonySentry Web 控制台 UI/UX 验收测试（真实浏览器 E2E）。
 
 环境变量 : PONY_WEB_PHASE=red|green（截图文件名阶段标记，默认 red）
           PONY_WEB_SESSION=ponyt2（独立浏览器会话，默认 ponyt2，避免与其他 agent 共用浏览器）
+          PONY_WEB_ADMIN_TOKEN=<ADMIN_TOKEN>（控制台服务端会话登录；仅从环境读取，不落库）
 
 契约条目 → 测试方法映射：
   §1.1 T1.1 gateway-status testid/状态三态    → test_10_t1_1_gateway_status_testid
@@ -62,6 +63,8 @@ from datetime import datetime, timezone
 
 BASE_URL = "http://127.0.0.1:3000"
 SESSION = os.environ.get("PONY_WEB_SESSION", "ponyt2")
+# 生产/本机 E2E 登录用 ADMIN_TOKEN（仅从环境读，不写入仓库）。
+WEB_ADMIN_TOKEN = os.environ.get("PONY_WEB_ADMIN_TOKEN", "")
 ISO_SESSION = os.environ.get("PONY_WEB_ISO_SESSION", "ponytfresh")
 PHASE = os.environ.get("PONY_WEB_PHASE", "red")
 SHOT_DIR = "/tmp/pony-web-audit"
@@ -205,8 +208,37 @@ def _screenshot(kind):
     return path
 
 
+def _login_if_needed(session=None):
+    """新架构控制台必须先交换服务端短期会话；旧 Cookie 仍有效时自动跳过登录。"""
+    visible = _eval_json(
+        """(() => {
+      const el = document.querySelector('[data-testid="login-dialog"]');
+      return JSON.stringify(!!el && getComputedStyle(el).display !== 'none');
+    })()""",
+        timeout=20,
+    )
+    if not visible:
+        return
+    if not WEB_ADMIN_TOKEN:
+        raise AssertionError(
+            "控制台要求登录，但未设置 PONY_WEB_ADMIN_TOKEN（仅用于本地/生产 E2E）"
+        )
+    # agent-browser 的 fill 直接改 value，未触发 Vue 的 input 事件；用 focus + type 走真实键盘输入。
+    _ab("click", '[data-testid="login-token"]', timeout=30, session=session)
+    _ab("type", '[data-testid="login-token"]', WEB_ADMIN_TOKEN, timeout=30, session=session)
+    _ab("press", "Enter", timeout=30, session=session)
+    _wait_for(
+        """(() => {
+      const el = document.querySelector('[data-testid="login-dialog"]');
+      return JSON.stringify(!el || getComputedStyle(el).display === 'none');
+    })()""",
+        10,
+        "提交 ADMIN_TOKEN 后登录遮罩应消失",
+    )
+
+
 def _open(session=None):
-    """打开被测页面（同源 127.0.0.1:3000）。
+    """打开被测页面（同源 127.0.0.1:3000）并在需要时完成服务端会话登录。
 
     首开存在浏览器会话瞬态超时（rc=1 "Operation timed out"）的已知抖动：
     失败时 close 会话后重开（OPEN_RETRIES 次），并打印重试证据到 stdout；
@@ -217,6 +249,7 @@ def _open(session=None):
     for attempt in range(OPEN_RETRIES + 1):
         try:
             _ab("open", BASE_URL, timeout=90, session=session)
+            _login_if_needed(session=session)
             return
         except Exception as exc:
             last = exc
@@ -431,6 +464,26 @@ class TestWebUIAcceptance(unittest.TestCase):
         shot = journey_traces_view()
         self.assertIsNotNone(shot, "Traces 视图截图未生成")
         self._assert_no_console_errors("Traces 视图旅程")
+
+    def test_03_session_logout_and_relogin(self):
+        """服务端会话：注销后登录遮罩出现，重新输入 ADMIN_TOKEN 可恢复数据。"""
+        _open()
+        _wait_for(ISSUE_ROWS_JS, 10, "登录后 Issues 列表数据行未渲染")
+        _ab("click", '[data-testid="logout-button"]', timeout=30)
+        _wait_for(
+            """(() => {
+          const el = document.querySelector('[data-testid="login-dialog"]');
+          return JSON.stringify(!!el && getComputedStyle(el).display !== 'none');
+        })()""",
+            5,
+            "注销后登录遮罩应出现",
+        )
+        login_text = _eval_json(
+            "JSON.stringify((document.querySelector('[data-testid=\"login-dialog\"]') || {}).textContent || '')"
+        )
+        self.assertIn("ADMIN_TOKEN", login_text, "登录遮罩必须提示输入 ADMIN_TOKEN")
+        _login_if_needed()
+        _wait_for(ISSUE_ROWS_JS, 10, "重新登录后 Issues 列表数据行未渲染")
 
     def _assert_no_console_errors(self, where):
         """硬门禁 a 的分步判定：读取会话 console 消息与页面异常，断言 0 错误。"""

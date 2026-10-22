@@ -122,3 +122,69 @@ fn r11_2_healthz_reports_db_status() {
         health.describe()
     );
 }
+
+/// 控制台服务端会话：静态 ADMIN_TOKEN 只交换短期 HttpOnly Cookie；
+/// Cookie PATCH 必须带 CSRF；注销后旧 Cookie 立即失效。
+#[test]
+fn console_session_requires_csrf_and_invalidates_on_logout() {
+    let server = Server::start();
+    let payload = full_v1_ingest_payload(
+        "evt-contract-session-0001",
+        "preprod",
+        "PermissionError: console session",
+    );
+    let created = server.post_ingest_client(&payload);
+    assert_status(&created, 201, "session test ingest");
+    let issue_id = created.str_field("issue_id");
+
+    let bad = server.send(
+        reqwest::Method::POST,
+        "/api/v1/auth/session",
+        &[],
+        Some(&serde_json::json!({"token": "wrong-token"})),
+    );
+    assert_status(&bad, 401, "错误 ADMIN_TOKEN 不得换到会话");
+
+    let login = server.login_admin();
+    assert_status(&login, 200, "正确 ADMIN_TOKEN 必须换到短期会话");
+    let set_cookie = login
+        .headers
+        .get("set-cookie")
+        .expect("登录响应缺 Set-Cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set_cookie.contains("HttpOnly"), "Set-Cookie: {set_cookie}");
+    assert!(set_cookie.contains("SameSite=Strict"), "Set-Cookie: {set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+    let csrf = login.str_field("csrf_token");
+
+    let read = server.send(reqwest::Method::GET, "/api/v1/issues", &[("cookie", &cookie)], None);
+    assert_status(&read, 200, "Cookie 会话读接口");
+
+    let no_csrf = server.send(
+        reqwest::Method::PATCH,
+        &format!("/api/v1/issues/{issue_id}"),
+        &[("cookie", &cookie)],
+        Some(&serde_json::json!({"status": "resolved"})),
+    );
+    assert_status(&no_csrf, 403, "Cookie 会话 PATCH 缺 CSRF");
+
+    let with_csrf = server.send(
+        reqwest::Method::PATCH,
+        &format!("/api/v1/issues/{issue_id}"),
+        &[("cookie", &cookie), ("x-csrf-token", &csrf)],
+        Some(&serde_json::json!({"status": "resolved"})),
+    );
+    assert_status(&with_csrf, 200, "Cookie 会话 PATCH 带 CSRF");
+
+    let logout = server.send(
+        reqwest::Method::DELETE,
+        "/api/v1/auth/session",
+        &[("cookie", &cookie)],
+        None,
+    );
+    assert_status(&logout, 204, "注销会话");
+    let after = server.send(reqwest::Method::GET, "/api/v1/issues", &[("cookie", &cookie)], None);
+    assert_status(&after, 401, "注销后旧 Cookie 必须失效");
+}

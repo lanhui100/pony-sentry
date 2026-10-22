@@ -1,5 +1,44 @@
 <template>
   <div class="min-h-screen bg-[#0c0a09] text-stone-200 flex flex-col font-sans selection:bg-stone-700 selection:text-stone-100 antialiased">
+    <!-- 服务端会话登录遮罩：静态 ADMIN_TOKEN 只在登录时交换短期 HttpOnly Cookie -->
+    <div
+      v-if="authRequired"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/90 backdrop-blur-sm p-5"
+      data-testid="login-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="控制台登录"
+    >
+      <form class="w-full max-w-md bg-stone-900 border border-stone-800 rounded-xl shadow-2xl p-6 space-y-4" @submit.prevent="login">
+        <div class="space-y-1">
+          <div class="text-sm font-semibold text-stone-100">PonySentry 控制台登录</div>
+          <p class="text-xs text-stone-400 leading-relaxed">
+            输入服务端 <span class="font-mono text-stone-300">ADMIN_TOKEN</span> 创建短期会话。
+            令牌不会写入前端产物；会话 Cookie 为 HttpOnly，过期后需重新登录。
+          </p>
+        </div>
+        <label class="block space-y-1.5">
+          <span class="text-[11px] font-mono uppercase tracking-wider text-stone-400">Admin Token</span>
+          <Input
+            v-model="loginToken"
+            data-testid="login-token"
+            type="password"
+            autocomplete="current-password"
+            spellcheck="false"
+            placeholder="输入 ADMIN_TOKEN"
+          />
+        </label>
+        <p v-if="loginError" data-testid="login-error" class="text-xs text-red-300">{{ loginError }}</p>
+        <Button
+          type="submit"
+          variant="accent"
+          class="w-full"
+          data-testid="login-submit"
+          :disabled="loginPending || !loginToken.trim()"
+        >{{ loginPending ? '验证中…' : '登录' }}</Button>
+      </form>
+    </div>
+
     <!-- 顶部导航栏 -->
     <header class="border-b border-stone-800/70 bg-[#0c0a09]/90 backdrop-blur-md px-5 py-3 flex items-center justify-between sticky top-0 z-40">
       <div class="flex items-center gap-6">
@@ -43,10 +82,19 @@
           size="sm"
           @click="refreshAll"
           title="快捷键: R"
+          :disabled="authRequired || authChecking"
         >
           <RefreshCw class="w-3.5 h-3.5 text-stone-400" :class="{ 'animate-spin': isRefreshing }" />
           <span>刷新</span>
         </Button>
+        <Button
+          v-if="!authRequired && !authChecking"
+          variant="ghost"
+          size="sm"
+          @click="logout"
+          data-testid="logout-button"
+          title="注销当前控制台会话"
+        >退出</Button>
       </div>
     </header>
 
@@ -889,8 +937,15 @@ const isRefreshing = ref(false)
 const copySuccess = ref(null)
 
 const initialLoading = ref(true)
+const authChecking = ref(true)
+const authRequired = ref(false)
+const sessionCsrf = ref('')
+const sessionExpiresAt = ref('')
+const loginToken = ref('')
+const loginError = ref('')
+const loginPending = ref(false)
 const loadFailures = ref({})
-const showLoadError = computed(() => Object.keys(loadFailures.value).length > 0)
+const showLoadError = computed(() => !authRequired.value && Object.keys(loadFailures.value).length > 0)
 const loadErrorDetail = computed(() => loadFailureDetail(loadFailures.value))
 const recordLoadFailure = (source, error) => {
   loadFailures.value = { ...loadFailures.value, [source]: classifyLoadFailure(error) }
@@ -911,13 +966,15 @@ const gatewayStateText = computed(() => {
   if (gatewayState.value === 'degraded') return '异常'
   return '探测中'
 })
-// 控制台令牌：构建期 VITE_PONY_SENTRY_TOKEN 优先，其次运行时 localStorage.pony_sentry_token
-// （README「config」节说明二选一；管理侧接口在配置 ADMIN_TOKEN 后必须携带）。
-const PONY_SENTRY_TOKEN = (import.meta.env.VITE_PONY_SENTRY_TOKEN
-  || (typeof localStorage !== 'undefined' ? localStorage.getItem('pony_sentry_token') : '')
-  || '').trim()
-
-const authHeaders = () => (PONY_SENTRY_TOKEN ? { 'x-admin-token': PONY_SENTRY_TOKEN } : {})
+// 控制台只持有服务端签发的短期会话：Cookie 由浏览器自动携带（HttpOnly），
+// CSRF token 仅保存在当前页面内存中，不写 localStorage，也不进入构建产物。
+const sessionHeaders = (method = 'GET') => {
+  const upper = String(method || 'GET').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(upper) && sessionCsrf.value) {
+    return { 'x-csrf-token': sessionCsrf.value }
+  }
+  return {}
+}
 
 const environmentBadgeVariant = (environment) => {
   switch (environment) {
@@ -1004,9 +1061,13 @@ async function apiFetchJson(url, options = {}) {
   try {
     const response = await fetch(url, {
       ...fetchOptions,
-      headers: { ...authHeaders(), ...(fetchOptions.headers || {}) },
+      credentials: 'same-origin',
+      headers: { ...sessionHeaders(fetchOptions.method), ...(fetchOptions.headers || {}) },
       signal: controller.signal,
     })
+    if (response.status === 401) {
+      markAuthRequired()
+    }
     if (!response.ok) {
       const err = new Error(`HTTP ${response.status}`)
       err.name = response.status === 401 || response.status === 403 ? 'AuthError' : 'HttpError'
@@ -1045,6 +1106,114 @@ function abortAllControllers() {
   allControllers.forEach((c) => c.abort())
   allControllers.clear()
   refreshControllers.clear()
+}
+
+function focusLoginInput() {
+  nextTick(() => {
+    const input = document.querySelector('[data-testid="login-token"]')
+    if (input) input.focus()
+  })
+}
+
+function markAuthRequired() {
+  authRequired.value = true
+  sessionCsrf.value = ''
+  sessionExpiresAt.value = ''
+  loadFailures.value = {}
+  focusLoginInput()
+}
+
+function applySession(payload) {
+  sessionCsrf.value = payload?.csrf_token || ''
+  sessionExpiresAt.value = payload?.expires_at || ''
+  authRequired.value = false
+}
+
+async function loadSession() {
+  authChecking.value = true
+  try {
+    const response = await fetch('/api/v1/auth/session', {
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+    })
+    if (response.ok) {
+      applySession(await response.json())
+      loginError.value = ''
+      return true
+    }
+    markAuthRequired()
+    if (response.status === 503) {
+      loginError.value = '服务端未配置 ADMIN_TOKEN，无法创建控制台会话'
+    } else if (response.status !== 401) {
+      loginError.value = `会话检查失败（HTTP ${response.status}）`
+    }
+    return false
+  } catch (e) {
+    markAuthRequired()
+    loginError.value = '无法连接服务端，请检查网络后重试'
+    console.error('控制台会话检查失败', e)
+    return false
+  } finally {
+    authChecking.value = false
+  }
+}
+
+async function login() {
+  const token = loginToken.value.trim()
+  if (!token || loginPending.value) return
+  loginPending.value = true
+  loginError.value = ''
+  try {
+    const response = await fetch('/api/v1/auth/session', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+    if (!response.ok) {
+      if (response.status === 401) {
+        loginError.value = '令牌无效，请检查 ADMIN_TOKEN'
+      } else if (response.status === 429) {
+        loginError.value = '登录尝试过于频繁，请稍后再试'
+      } else if (response.status === 503) {
+        loginError.value = '服务端未配置 ADMIN_TOKEN'
+      } else {
+        loginError.value = `登录失败（HTTP ${response.status}）`
+      }
+      return
+    }
+    applySession(await response.json())
+    loginToken.value = ''
+    loadFailures.value = {}
+    initialLoading.value = true
+    await refreshAll()
+  } catch (e) {
+    loginError.value = '登录请求失败，请检查网络后重试'
+    console.error('控制台登录失败', e)
+  } finally {
+    loginPending.value = false
+    if (authRequired.value) focusLoginInput()
+  }
+}
+
+async function logout() {
+  try {
+    await fetch('/api/v1/auth/session', {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+  } catch (e) {
+    console.error('控制台注销请求失败', e)
+  }
+  if (selected.value) closeIssueDrawer()
+  if (selectedTrace.value) closeTraceDrawer()
+  issues.value = []
+  traces.value = []
+  projects.value = []
+  initialLoading.value = true
+  loginToken.value = ''
+  loginError.value = ''
+  markAuthRequired()
 }
 
 let healthTimer = null
@@ -1519,6 +1688,7 @@ const statusBadgeVariant = (status) => {
 }
 
 const handleKeydown = (e) => {
+  if (authRequired.value || authChecking.value) return
   if (e.key === 'Escape') {
     if (selected.value) {
       closeIssueDrawer()
@@ -1551,11 +1721,16 @@ const handleKeydown = (e) => {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   checkHealth()
   healthTimer = setInterval(checkHealth, 15000)
   relTimeTimer = setInterval(() => { nowRef.value = Date.now() }, 30000)
-  refreshAll()
+  const authenticated = await loadSession()
+  if (authenticated) {
+    await refreshAll()
+  } else {
+    initialLoading.value = false
+  }
   window.addEventListener('keydown', handleKeydown)
 })
 

@@ -12,7 +12,7 @@ export function classifyLoadFailure(error) {
 export function loadFailureDetail(failures) {
   const kinds = new Set(Object.values(failures || {}))
   if (kinds.has('auth')) {
-    return '鉴权失败：控制台令牌缺失或已失效，请核对 ADMIN_TOKEN 并重新部署'
+    return '鉴权失败：登录会话已失效，请重新登录'
   }
   if (kinds.has('timeout')) {
     return '请求超时：服务响应过慢或网络不稳定，请稍后重试'

@@ -39,3 +39,6 @@ Status: implemented
 - 部署机上的二进制必须由 service group 可执行；当前 systemd 为 `User=dm`，脚本自动读取 unit 的 User/Group 或回退到 `id -gn dm`。
 - 若进程被 `SIGKILL` 打断，EXIT trap 无法执行；这是当前方案的剩余风险，彻底消除需要隔离构建目录。
 - 生产已用新脚本重装，并验证 `0750` 权限、健康检查、三个读接口与浏览器渲染。
+- 构建期内嵌 token 的部署语义已被服务端会话方案取代：静态 ADMIN_TOKEN 不再进入产物；
+  部署脚本保留回滚/权限/EXIT trap，并把自检改为登录→Cookie→CSRF→注销。见
+  `implemented/architecture/2026-10-22-console-server-side-session-auth.md`。
