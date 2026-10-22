@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "findings": [],
+  "notes": [
+    "Host 来源协议漂移（非阻断，已实测）：crates/server/src/routes.rs:492-497 只读 `Host` 头，不看 absolute-form 请求行的 authority；crates/server/src/trust.rs:32-50 把 `[127.0.0.1]` 归一为 `127.0.0.1`；重复 Host 由 HeaderMap::get 取首值。反例（真实进程，CONSOLE_TAILNET_TRUST=1 / CONSOLE_TAILNET_CIDRS=127.0.0.1/32 / CONSOLE_TRUSTED_HOSTS=127.0.0.1）：`GET http://evil.example/api/v1/issues HTTP/1.1` + `Host: 127.0.0.1:<port>` → 200；`Host: [127.0.0.1]` → 200；`Host: 127.0.0.1` 在前、`Host: evil.example` 在后 → 200（顺序反转 → 401）；`Host: evil.example:3000` → 401。无提权路径（仍须对端在可信 CIDR 且 Host 等于白名单项，浏览器也发不出这些形态），建议 absolute-form 时校验 request-target authority、拒绝括号包裹的非 IPv6 与重复 Host，或显式记录为不支持形态。",
+    "代理头枚举缺口（非阻断）：crates/server/src/trust.rs:326-327 仅拒 `x-forwarded-for` / `x-real-ip`。若前置代理只注入 RFC 7239 `Forwarded` 或 `X-Client-IP` / `CF-Connecting-IP` 而不写这两个头，请求仍会凭「代理地址 ∈ 可信 CIDR + Host ∈ 白名单」被判 Trusted——ADR 004 已把无 XFF 代理列为残余风险，但 env 模板/k3s 注释只列 nginx/ssh -L/port-forward，仍可能被读成绝对的 fail-closed。契约只冻结两个头名，故不阻断；建议把 `forwarded` 也做存在性拒绝，或在部署文档明确「代理必须注入 XFF/X-Real-IP」。",
+    "降级配置与审计口径（非阻断）：(a) `CONSOLE_TAILNET_CIDRS=,`（或 `,,`/全空白段）被 crates/server/src/trust.rs:251-255 跳过成空列表，from_env 仍返回 `enabled=true`、`trust_cidrs=0` 且没有 WARN（crates/server/src/trust.rs:233 仅检查 trusted_hosts 为空；实测启动 0 条 WARN、匿名读 401），与 NFR `startup_warn_on_degraded_config=true` 及空白名单必 WARN 的同类处理不一致，建议补 `config.enabled && config.cidrs.is_empty()` 的 WARN。(b) R-T10 冻结「信任日志只含 trust_decision/peer/host 三个结构化字段」（.dev-team/contract-tailnet-trust.md:65），现实现每行另有 `scope` 与 `request_id`（crates/server/src/routes.rs:514-528），docs/decisions/004-console-tailnet-trust.md:45 仍写三字段、README.md:143 写四字段——无凭证泄露，但冻结契约/ADR/README/代码四方口径不一致，建议 Lead 升 ver 3 或显式豁免 request_id/scope。"
+  ]
+}

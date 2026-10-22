@@ -1,0 +1,36 @@
+{
+  "review": ".dev-team/review-l3b-tailnet-trust.json",
+  "reviewer_verdict": "FAIL",
+  "lead_verdict": "RESOLVED",
+  "wave": 5,
+  "branch": "wave-5-tailnet-trust",
+  "items": [
+    {
+      "id": "L3B-1",
+      "finding": "crates/server/src/routes.rs:646 + session.rs:85-96 —— 可信对端无 Cookie 的 GET /auth/session 免凭证 create()；满 512 时按 expires_at 最早驱逐、不问签发主体，可用未认证流量驱逐其它主体的手动会话",
+      "lead_verification": "confirmed — 真实进程复现：手动 token 会话 PATCH 200 → 520 次无 Cookie GET /auth/session → 原实现下该手动会话 PATCH 变 401",
+      "disposition": "FIXED",
+      "fix": "session 增加 SessionOrigin{Manual,TrustedPeer}；create_with_origin；驱逐顺序改为 ① 清过期 ② 仅驱逐 TrustedPeer 最早者 ③ 全为 Manual 时回退既有兜底。routes 可信自动签发使用 TrustedPeer，POST /auth/session 保持 Manual。新增 2 条 session 单测。",
+      "verification": "Lead 独立复验（.dev-team/smoke-tailnet-trust.txt 第 4 节）：520 次可信无 Cookie flood（520/520 → 200）后，手动会话 PATCH 仍 200；/healthz 200。executor 侧另测 520 flood 后手动会话仍 200。"
+    },
+    {
+      "id": "L3B-note-1",
+      "finding": "SessionStore 全站点 expect(\"poisoned\")，锁毒化会 panic 全管理面",
+      "disposition": "WAIVED (pre-existing)",
+      "waiver_reason": "既有实现，本次未引入新的 panic 源（锁内无 IO/无 panic 路径）；本次扩大的仅是「无凭证请求可进入 create()」。转 backlog 跟踪可恢复锁策略。"
+    },
+    {
+      "id": "L3B-note-2",
+      "finding": "Set-Cookie 构造失败被静默吞（routes.rs:606/658）",
+      "disposition": "FIXED",
+      "fix": "不再静默：warn!（不含 token）+ 返回 500 {\"error\":\"session_cookie_invalid\"}，避免谎报 authenticated:true"
+    },
+    {
+      "id": "L3B-note-3",
+      "finding": "ADR 写 GET/HEAD/OPTIONS 与代码 GET|HEAD 不一致",
+      "disposition": "FIXED",
+      "fix": "ADR 004 与 README 统一为 GET/HEAD（OPTIONS 不放行），代码 doc 注释同步"
+    }
+  ],
+  "blocking": false
+}

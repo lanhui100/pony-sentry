@@ -2,7 +2,9 @@ use chrono::Utc;
 use pony_sentry_core::{
     create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository,
 };
-use pony_sentry_server::{create_app_with_state, session::SessionStore, AppState};
+use pony_sentry_server::{
+    create_app_with_trust, session::SessionStore, trust::TrustConfig, AppState,
+};
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -239,7 +241,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cookie_secure,
         )),
     };
-    let app = create_app_with_state(state);
+    // Tailnet 信任配置（契约 §1）：默认关闭，仅由部署 env 显式开启；非法配置 fail-closed + WARN。
+    let trust = TrustConfig::from_env();
+    info!(
+        trust_enabled = trust.enabled,
+        "tailnet 信任判定已接入管理读路由与会话自动签发（变更请求仍需会话 Cookie + CSRF）"
+    );
+    let app = create_app_with_trust(state, trust);
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -249,6 +257,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("PonySentry server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // 必须取得 TCP 对端地址：`TrustConfig::decide` 的 peer 来源，缺省即 PeerUnknown（绝不 fail-open）。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

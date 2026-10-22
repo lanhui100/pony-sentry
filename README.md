@@ -29,6 +29,9 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `ADMIN_TOKEN` | 空（回退 `CLIENT_TOKEN`） | 读接口与 PATCH 的静态 API 凭证；也是控制台登录时交换短期会话的凭据 |
 | `CONSOLE_SESSION_TTL_SECS` | `28800` | 控制台服务端会话有效期（秒，最小 60、最大 86400；重启即全部失效） |
 | `CONSOLE_COOKIE_SECURE` | 未设置 | `=1` 时会话 Cookie 加 `Secure`；HTTPS 反向代理下应开启，纯 tailnet HTTP 保持关闭 |
+| `CONSOLE_TAILNET_TRUST` | 未设置（关闭） | tailnet 可信对端免 token 的**唯一开关**：只有 `1`/`true`/`on`（大小写不敏感）开启；未设置或其它任何值一律关闭 |
+| `CONSOLE_TAILNET_CIDRS` | `100.64.0.0/10,fd7a:115c:a1e0::/48` | 可信对端网段（逗号分隔 CIDR，IPv4/IPv6）；未设置用默认（Tailscale CGNAT + ULA）；含任一非法段 → 不崩溃、信任关闭 + 回退默认 + 启动 WARN |
+| `CONSOLE_TRUSTED_HOSTS` | 空（无白名单） | Host 白名单（逗号分隔 `host` / `host:port`，比较忽略大小写与端口）；**空 = 信任恒不生效**（fail-closed）+ 开启状态下启动 WARN |
 | `WEBHOOK_URL` | 空（关闭通知） | issue 新建/回归时的旁路通知（5s 超时，失败不重试） |
 | `RETENTION_DAYS_EVENTS` | `180` | events 保留天数 |
 | `RETENTION_DAYS_TRACES` | `90` | traces 保留天数 |
@@ -128,6 +131,27 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
   启动时打一条 WARN；写入端点沿用「未配置即放行」的历史语义。
 - 静态 token 请求头为 `x-admin-token` / `x-client-token` / `Authorization: Bearer`；控制台 Cookie 会话的
   PATCH 必须额外携带 `x-csrf-token`，缺失或不匹配返回 `403 {"error":"csrf_invalid"}`。
+
+**Tailnet 可信对端（契约 `.dev-team/contract-tailnet-trust.md`，默认关闭）**：开启后来自 tailnet 的对端
+**只免 admin token 的只读请求**——`GET`/`HEAD` 管理路由直接放行（`OPTIONS` 不在放行面内）；**变更请求（PATCH/POST/DELETE）
+仍必须持有会话 Cookie 并携带匹配的 `x-csrf-token`**，否则 401 / 403 `csrf_invalid`（信任不兑换写权限）。
+放行需同时满足三个条件，缺一即 401：① 对端 IP 命中 `CONSOLE_TAILNET_CIDRS` ② `Host` 精确命中
+`CONSOLE_TRUSTED_HOSTS`（**Host 白名单是 DNS rebinding 的唯一防线**，`Host: evil.example:3000` 即使 CIDR
+命中也不放行）③ 请求不带 `x-forwarded-for`/`x-real-ip`（代理头只拒不放，不取首 hop 推断对端）。
+可信对端 `GET /api/v1/auth/session` 在无可验证会话时自动签发会话（同形 JSON + `Set-Cookie`），
+控制台因此零输入进入；不可信来源一律 401。每次信任放行写一条结构化审计日志
+（含 `request_id`/`trust_decision`/`peer`/`host` 四个字段，不含任何 token/CSRF/Cookie 值；
+`request_id` 供同一请求的审计行关联）。
+
+**残余风险（信任自动签发会话）**：
+- **会话累积**：每次无 Cookie 的可信请求都会现场签发新会话；脚本轮询、多标签页刷新等重复/并发无 Cookie
+  请求会持续累积会话（单进程内存表，上限 512 条）。
+- **可能踢掉在用会话**：会话表满 512 条时先清理已过期，仍满则**只**驱逐 `TrustedPeer`（可信自动签发）来源中
+  最早过期者——**手动 token 会话不会被无 Cookie 的可信流量驱逐**；仅当表内全部是手动会话时才回退驱逐最早过期者。
+  被驱逐的可信会话影响仅限于需重新签发（可恢复），**不构成越权**——可信对端本身已等价管理员，
+  重新 `GET /api/v1/auth/session` 即拿回同权限会话。
+- **真正吊销**：`DELETE /api/v1/auth/session` 只清当前 Cookie，对可信对端没有阻断力（再次 GET 会重新签发）；
+  要真正吊销读权限请置 `CONSOLE_TAILNET_TRUST=0`（kill switch）或收紧 tailnet ACL / `CONSOLE_TAILNET_CIDRS`。
 - `/healthz` 与 `/metrics` 不鉴权（探针/抓取面）；`/healthz` 做 DB 探活（2s 超时），
   DB 不通 → `503 {"status":"degraded","db":"down"}`；`/metrics` 暴露
   `pony_sentry_issues_total{status,environment}`、`pony_sentry_events_total`、
@@ -152,7 +176,9 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
   不覆盖任意 `keyword=value` 组合；命中不了的自定义密钥仍需上报侧先行脱敏。
 - **公网暴露面**：`deploy/k3s/app.yaml` 的公网 Ingress 只放行 `POST /api/v1/ingest`（Exact）与
   `/healthz`；`/api/v1/traces` 与全部读接口仅集群内 svc / tailnet 可达，公网访问返回 404。
-  Web 控制台同样只走 tailnet。
+  Web 控制台同样只走 tailnet。**管理路由（`/api/v1/issues*`、`/api/v1/projects`、`/api/v1/traces*`、
+  `/api/v1/auth/session`）不得加任何公网 Ingress**——尤其开启 tailnet 信任后，公网入口会把「免 token 读」
+  直接暴露给外网。
 - **单副本**：无多副本 HA / leader 选举；retention、指纹重索引与控制台会话都假设单进程运行。
   控制台会话存在进程内存中，服务重启即全部失效；多副本需改为共享会话存储并加过期清理。
   `migrate()` 也按单进程启动设计：多副本并发首次迁移可能撞 PG 目录表竞态

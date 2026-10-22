@@ -70,6 +70,12 @@ spec:
 # 3. 生产公网 Ingress（仅暴露 /api/v1/ingest 与 /healthz）
 #    暴露面收敛（契约 R10.2 / R10.3）：/api/v1/traces 与全部读接口只走集群内 svc 或 tailnet，
 #    公网访问必须返回 404。新增公网路径前先过安全评审。
+#    【硬约束】管理路由不得加公网 Ingress：
+#      /api/v1/issues、/api/v1/issues/:id、/api/v1/issues/:id/events、/api/v1/projects、
+#      /api/v1/traces、/api/v1/traces/:id、/api/v1/auth/session 一律保持集群内 / tailnet 可达。
+#      开启 CONSOLE_TAILNET_TRUST 后，可信 tailnet 对端对这些读接口免 admin token
+#      （见 .dev-team/contract-tailnet-trust.md）；一旦挂到公网 Ingress，等于把「免 token 读」
+#      交给外网来源（Host 白名单只挡 DNS rebinding，不构成公网鉴权）。
 # -------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -114,3 +120,10 @@ spec:
 # 不暴露公网域名/Ingress：仅限 Tailscale 内网 MagicDNS 访问宿主机服务：
 #   http://devserver.taildb165c.ts.net:3000
 # 根路径与控制台页面对外网返回 HTTP 404，天然杜绝泄露风险。
+#
+# 【控制台仅 tailnet】控制台（/ 与全部管理读接口）的唯一入口是 tailnet MagicDNS 直连。
+#   不要为控制台创建公网 Ingress / NodePort / 公网 LB；也不要把它挂到上面的 sentry.ponyjob.top。
+#   如需启用 CONSOLE_TAILNET_TRUST，Host 白名单必须填 tailnet 侧的真实 Host
+#   （例如 devserver.taildb165c.ts.net），因为 Host 白名单是 DNS rebinding 的唯一防线。
+#   经反代/隧道（nginx、ssh -L、kubectl port-forward）访问会引入代理头或改写 Host，
+#   服务端按 fail-closed 拒绝信任，此时仍用 ADMIN_TOKEN 登录。

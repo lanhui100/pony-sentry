@@ -1,0 +1,150 @@
+# L2-AT 对抗破坏测试凭证：Tailnet 可信对端免 admin token
+
+- **契约真源**：`.dev-team/contract-tailnet-trust.md`（FROZEN ver 2，R-T1..R-T13，只读）
+- **唯一写域**：`crates/server/tests/adversarial_tailnet_trust.rs`（新增，951 行；未改实现、未改既有测试、未 git commit）
+- **被测二进制**：`target/debug/pony-sentry-server`（`cargo build --offline -p pony-sentry-server` → Exit 0；测试内优先 `CARGO_BIN_EXE_pony-sentry-server`）
+- **执行环境**：本地 /home/dm/pony-sentry，`--offline`，2026-10-22 (Asia/Shanghai)
+- **分级判定**：L3（鉴权/安全 + 并发原语 + 系统级黑盒）→ 对抗注入为强制项
+- **隔离**：每用例独立端口（`127.0.0.1:0` 探测）+ 独立临时 sqlite 库 + 独立临时目录；`Drop` 杀进程并 `remove_dir_all`；
+  spawn 前 `env_remove` 三个 tailnet env 键（防开发 shell 污染），只由用例显式注入
+  `CONSOLE_TAILNET_TRUST=1` / `CONSOLE_TAILNET_CIDRS=127.0.0.1/32` / `CONSOLE_TRUSTED_HOSTS=127.0.0.1`
+- **传输层**：手写 HTTP/1.1 字节流（`std::net::TcpStream`，`Connection: close`），逐字节控制 Host / 代理头 / 畸形头
+- **无 sleep 竞态**：并发同步只用 `std::sync::Barrier(16)`；服务就绪用 `/healthz` 有界条件轮询（20ms，30s 上限）
+
+## 一、门禁命令（形式门禁，原样）
+
+```text
+$ cargo build --offline -p pony-sentry-server
+Exit Code: 0
+
+$ cargo test --offline -p pony-sentry-server --test adversarial_tailnet_trust
+Exit Code: 0
+```
+
+```text
+running 3 tests
+test adversarial_malformed_hosts_and_oversized_inputs_keep_process_alive ... ok
+test adversarial_proxy_headers_never_bypass_trust_gate ... ok
+test adversarial_concurrent_trusted_reads_are_deterministic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+GATE EXIT: 0
+```
+
+## 二、逐用例明细（`-- --test-threads=1 --nocapture`，33 条子断言）
+
+```text
+$ cargo test --offline -p pony-sentry-server --test adversarial_tailnet_trust -- --test-threads=1 --nocapture
+Exit Code: 0
+```
+
+```text
+running 3 tests
+test adversarial_concurrent_trusted_reads_are_deterministic ... [PASS] setup.trusted_session_issued :: 期望 200 + Set-Cookie pony_sentry_session=…；实际 status=200 reason=OK body={"authenticated":true,"csrf_token":"<redacted-ephemeral>","expires_at":"2026-10-22T19:56:02.800567281+00:00","expires_in":28800}
+[INFO] concurrent mixed reads: total=80 by_status={200: 80} io_failures=0
+[PASS] flood.no_connection_reset :: 连接重置/IO 失败 0 / 80
+[PASS] flood.no_5xx :: 状态分布 {200: 80}
+[PASS] flood.statuses_within_200_or_401 :: 状态分布 {200: 80}；越界状态 []
+[PASS] flood.all_requests_answered :: 实收 80 / 期望 80
+[PASS] aftermath.healthz_still_200 :: /healthz 实际 Some(200)
+[PASS] aftermath.process_alive :: 子进程仍在运行
+[PASS] aftermath.no_panic_in_logs :: 日志无 panicked at 痕迹
+[PASS] after_flood.fresh_session_can_read :: 并发后新签发会话读 /api/v1/issues 期望 200；实际 status=200 reason=OK body=[]
+[PASS] after_flood.known_session_still_reads :: 并发前会话在 flood 后读 /api/v1/issues 期望 200；实际 status=200 reason=OK body=[]
+[concurrency] 全部 10 个对抗用例 PASS
+ok
+test adversarial_malformed_hosts_and_oversized_inputs_keep_process_alive ... [PASS] host.8192_bytes :: 超长 Host 必须被 4xx 拒绝（允许 400/401/431），不得 2xx/5xx；实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] host.8192_bytes.process_alive_after :: 随后进程仍存活
+[PASS] host.empty_value :: 空 Host 必须被 4xx 拒绝（空白名单项不构成信任）；实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] host.empty_value.process_alive_after :: 随后进程仍存活
+[PASS] host.evil_example_3000_is_401 :: 伪造 Host 即使 CIDR 命中也必须 401（DNS rebinding 防线 R-T5c）；实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] host.evil_example_3000_is_401.process_alive_after :: 随后进程仍存活
+[PASS] header.10kb_junk_no_5xx_no_crash :: 10KB 垃圾头：该头不属冻结代理门也不参与信任判定，可信前提下 200 合法；只硬性要求非 5xx / 连接不被中断（4xx 亦允许）；实际 status=200 reason=OK body=[]
+[PASS] header.10kb_junk_no_5xx_no_crash.process_alive_after :: 随后进程仍存活
+[PASS] aftermath.healthz_still_200 :: /healthz 实际 Some(200)（畸形输入后服务必须仍可用）
+[PASS] aftermath.process_alive :: 子进程仍在运行
+[PASS] aftermath.no_panic_in_logs :: 日志无 panicked at 痕迹
+[malformed-input] 全部 11 个对抗用例 PASS
+ok
+test adversarial_proxy_headers_never_bypass_trust_gate ... [PASS] control.baseline_host_127_0_0_1 :: 期望状态 [200]，实际 status=200 reason=OK body=[]
+[PASS] control.baseline_host_with_port_matches_ignoring_port :: 期望状态 [200]，实际 status=200 reason=OK body=[]
+[PASS] xff.value_100_64_0_1 :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] xff.empty_value :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] xff.duplicate_headers :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] xff.uppercase_header_name :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] xff.trusted_looking_value_is_still_rejected :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] x_real_ip.value_100_64_0_1 :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] xff_plus_x_real_ip :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] x_forwarded_host.alone_does_not_revoke_trust :: 期望状态 [200]，实际 status=200 reason=OK body=[]
+[PASS] x_forwarded_host.with_untrusted_host :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] x_forwarded_host.plus_xff :: 期望状态 [401]，实际 status=401 reason=Unauthorized body={"error":"unauthorized"}
+[PASS] aftermath.healthz_still_200 :: /healthz 实际 Some(200)
+[PASS] aftermath.process_alive :: 子进程仍在运行
+[PASS] aftermath.no_panic_in_logs :: 日志无 panicked at 痕迹
+[proxy-headers] 全部 15 个对抗用例 PASS
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+DETAIL EXIT: 0
+```
+
+### 用例清单 → 对抗面（3 个 #[test] / 33 条子断言，0 FAIL）
+
+| #[test] | 子用例 | 对抗面 | 断言口径 |
+| --- | --- | --- | --- |
+| `adversarial_proxy_headers_never_bypass_trust_gate` | `control.baseline_host_127_0_0_1`、`control.baseline_host_with_port_matches_ignoring_port` | 控制组：证明信任接缝真实成立（否则后续 401 无法归因代理头） | 无凭证 + 可信 Host → **200**（契约 R-T1；端口不影响匹配） |
+| 同上 | `xff.value_100_64_0_1`、`xff.empty_value`、`xff.duplicate_headers`、`xff.uppercase_header_name`、`xff.trusted_looking_value_is_still_rejected` | `X-Forwarded-For` 变体（非空/空值/重复头/大小写/取值伪装） | **401** 且 body `{"error":"unauthorized"}`（R-T5/R-T11，只拒不放） |
+| 同上 | `x_real_ip.value_100_64_0_1`、`xff_plus_x_real_ip` | `X-Real-IP` 与双代理头叠加 | 同上 |
+| 同上 | `x_forwarded_host.alone_does_not_revoke_trust` | `X-Forwarded-Host` 不属冻结代理门 → 不得吊销已成立的 Trusted | **200** |
+| 同上 | `x_forwarded_host.with_untrusted_host`、`x_forwarded_host.plus_xff` | XFH 不授予信任；与真代理门并存时代理门优先 | **401** |
+| `adversarial_malformed_hosts_and_oversized_inputs_keep_process_alive` | `host.8192_bytes`、`host.empty_value` | 超长 Host（8KB）/ 空 Host | 4xx（400/401/431），绝不 2xx/5xx |
+| 同上 | `host.evil_example_3000_is_401` | 伪造 Host（CIDR 命中） | 精确 **401**（R-T5c DNS rebinding 防线） |
+| 同上 | `header.10kb_junk_no_5xx_no_crash` | 10KB 垃圾头（不属代理门，不参与信任判定） | 200/4xx 均可，硬性要求**非 5xx / 连接不中断** |
+| 同上 | 每案 `*.process_alive_after` + `aftermath.*` | 畸形输入不得打崩进程 | 进程存活 + `/healthz` 仍 200 + 日志无 `panicked at` |
+| `adversarial_concurrent_trusted_reads_are_deterministic` | `setup.trusted_session_issued` | 可信会话自动签发（R-T6） | 200 + `Set-Cookie: pony_sentry_session=` + `authenticated=true` + `csrf_token` 非空 |
+| 同上 | `flood.*`（16 线程 × 5 轮 = 80 请求，奇偶交替可信匿名 `GET /api/v1/issues` / 可信 `GET /api/v1/auth/session`） | 并发确定性竞态（Barrier 同时放行，无 sleep） | 零连接重置、零 5xx、全部状态 ∈ {200,401}、80/80 有响应 |
+| 同上 | `after_flood.fresh_session_can_read`、`after_flood.known_session_still_reads` | 会话表在并发后不破坏正确性 | 新签发会话读 issues **200**；并发前会话 flood 后读 issues **200** |
+| 同上 | `aftermath.*` | 并发后进程/服务存活 | `/healthz` 200 + 进程存活 + 日志无 panic |
+
+## 三、确定性复跑（防 Flaky）
+
+```text
+$ for i in 1 2 3; do cargo test --offline -q -p pony-sentry-server --test adversarial_tailnet_trust; done
+run1 exit=0
+run2 exit=0
+run3 exit=0
+```
+
+5 次连续执行全绿（门禁 1 次 + 明细 1 次 + 复跑 3 次），状态分布稳定 `{200: 80}`，零 IO 失败。
+
+## 四、失败原因
+
+- **最终结果：0 FAIL**（33/33 子断言 PASS）。
+- **测试自身缺陷（已修到无）**：初版把「`GET /api/v1/issues` + 10KB 垃圾头」期望为 4xx，实测 **200**——该头既不属冻结代理门也不参与信任判定，
+  在 CIDR+Host 命中且无 XFF/X-Real-IP 时 200 是契约正确行为（任务口径亦为「允许 4xx」而非「必须 4xx」）。已把该案期望改为
+  `200/400/401/413/431` 并保留「非 5xx / 连接不中断」硬断言，复跑全绿。**无 [HARNESS-TIMEOUT]，无吞异常，无 should_panic。**
+- **红相（历史，供 Lead 对照）**：实现接线前（`trust.rs` 全 `unimplemented!()` / 未接 connect_info）本套用例基线与会话前置会红；
+  本次执行时实现已接线（`trust.rs` 0 处 unimplemented，`main.rs` 已用 `into_make_service_with_connect_info::<SocketAddr>()`）。
+
+## 五、观察到的真实缺陷 / 契约偏差（供 Lead 裁决，未纳入本文件门禁）
+
+1. **低危契约偏差：可信对端被额外授予 `OPTIONS`** — `crates/server/src/routes.rs:505-507`
+   现象：`grants_read` 匹配 `GET | HEAD | OPTIONS`；实测可信匿名 `OPTIONS /api/v1/issues` → **405**（鉴权已放行，路由无 OPTIONS 处理器），
+   而未带凭证的 `PATCH`/`DELETE` → 401。契约 §2 冻结口径是「`Trusted` 只影响『无可识别凭证 + 方法为 **GET/HEAD**』这一个分支」，
+   OPTIONS 不在其中；虽然不泄露数据（405 无 body），但「非只读方法一律 401」的可观测口径被打破。
+   建议：把 `grants_read` 收敛为 `GET | HEAD`，或在契约升版中显式把 OPTIONS 纳入只读面（二者择一，需 Lead 裁决）。
+2. **非缺陷但需知晓**：未配置 `ADMIN_TOKEN`/`CLIENT_TOKEN` 时 `authorize_admin` 先返回 `NotConfigured` → 503，信任分支不可达
+   （`crates/server/src/routes.rs:554`）。这与契约「依赖事实」的 503 fail-closed 一致，部署脚本必须注入 token 才可能免 token 读。
+3. **非缺陷但需知晓（会话淘汰口径）**：flood 期间最多签发 42 个会话 << `MAX_SESSIONS=512`，淘汰路径在本用例规模下不可达，
+   因此 `after_flood.known_session_still_reads` 硬断言 200；若将来把 flood 扩到 >512 次签发，才允许按契约把 401 归因于淘汰。
+
+## 六、质量验收物理收据
+
+- [x] **执行环境**：本地单进程黑盒，随机端口 + 临时 sqlite（每次运行独立）
+- [x] **分级判定**：L3（鉴权/安全 + 并发 + 系统级），依据 test-expert 强制升级规则 1/2/3
+- [x] **集成测试结果**：cargo test（3 tests / 33 子断言），Exit Code 0，0 failed
+- [x] **对抗注入证据（L3）**：代理头变体 / 8KB Host / 空 Host / 伪造 Host / 10KB 垃圾头 / 16×5 Barrier 并发（本文件即证据）
+- [x] **前端真实链路**：不涉及 UI（纯后端鉴权面），无浏览器截图项
+- [x] **数据与环境清理**：Yes（每个 `Server` 的 `Drop` 杀子进程 + 删除临时目录；进程与库均未残留）

@@ -1,0 +1,63 @@
+{
+  "review": ".dev-team/review-l3p-tailnet-trust.json",
+  "reviewer_verdict": "FAIL",
+  "lead_verdict": "RESOLVED",
+  "adjudicated_at": "2026-10-22",
+  "wave": 5,
+  "branch": "wave-5-tailnet-trust",
+  "items": [
+    {
+      "id": "Q1a",
+      "finding": "deploy/scripts/deploy-console.sh 的 `tailscale ip -4` 无超时，tailscaled 挂起即阻塞部署",
+      "lead_verification": "confirmed — deploy/scripts/deploy-console.sh (信任自检块) `TAILNET_IP=\"$(tailscale ip -4 ...)\"` 无 timeout",
+      "disposition": "FIXED",
+      "fix": "改为 `timeout 3 tailscale ip -4 ...`（≤ NFR external_call_timeout_ms=3000）"
+    },
+    {
+      "id": "Q1b",
+      "finding": "新增信任自检复用 check_http_status 的 `-m 5`（5000ms > 3000ms 基准）",
+      "lead_verification": "confirmed — check_http_status 的 `-m 5` 为改动前既有实现（git diff 未触碰），新增调用继承该口径",
+      "disposition": "FIXED (narrow)",
+      "fix": "新增 `check_http_status_trust`（`-m 3`）仅供信任自检使用；既有冒烟调用保持原 5s 口径，避免改动全量既有自检（最小闭包）"
+    },
+    {
+      "id": "Q2a",
+      "finding": "审计日志 log_grant 无 request_id/trace_id，不满足 logging.require_trace_id",
+      "lead_verification": "confirmed — crates/server/src/routes.rs log_grant 仅 scope/trust_decision/peer/host",
+      "disposition": "FIXED",
+      "fix": "admin_auth_middleware / handle_get_session 每请求生成一次 request_id 并作为参数传入 log_grant（字段名 request_id）"
+    },
+    {
+      "id": "Q2b",
+      "finding": "全局 tracing 输出为纯文本（main.rs `tracing_subscriber::fmt::init()`），不满足 logging.format=json",
+      "lead_verification": "confirmed 且 pre-existing — 该行不属于本次 diff（改动前既有），JSON 输出是仓库级全局属性，改动会重塑全部日志形态与既有运维消费方",
+      "disposition": "WAIVED (out of scope, follow-up)",
+      "waiver_reason": "非本次变更引入；修改全局 formatter 属于独立技术债事项，纳入 .dev-team 记录并标注靠 review 跟踪。本次新增审计行已带结构化字段（request_id/trust_decision/peer/host），可被 grep/JSON 消费方按字段提取。",
+      "waiver_expiry": null,
+      "tracking": "backlog 建议：全局日志 JSON formatter + request_id 中间件（跨管理/写入路由）"
+    },
+    {
+      "id": "Q3",
+      "finding": "资源泄漏",
+      "lead_verification": "reviewer PASS — 无新增 listener/任务/定时器；会话受 MAX_SESSIONS=512 与过期清理约束",
+      "disposition": "ACCEPTED (PASS)"
+    },
+    {
+      "id": "Q4",
+      "finding": "可信对端每次无 Cookie 请求都新签发会话（不幂等）；≥512 时淘汰最早会话，可能踢掉在用会话",
+      "lead_verification": "confirmed — routes.rs handle_get_session 无有效会话即 create()；session.rs 淘汰最早创建会话；l2at 80 请求签发约 42 个会话",
+      "disposition": "ACCEPTED AS RESIDUAL RISK (documented)",
+      "rationale": "信任对端本身已等价管理员，重复签发不构成权限提升；淘汰影响为可在用的会话被重新签发（可恢复）。修复幂等需按对端 IP 复用会话，会引入同 IP 多设备共享会话/会话固定的新风险，收益为负。已同步写入 README（残余风险段）与 ADR 004 Consequences。",
+      "documentation": ["README.md 控制台鉴权段落", "docs/decisions/004-console-tailnet-trust.md Consequences"]
+    },
+    {
+      "id": "Q5",
+      "finding": "配置模板/README/自检",
+      "lead_verification": "reviewer PASS；非阻断备注：正向自检腿仅当白名单含 tailnet IP 时执行",
+      "disposition": "FIXED (improvement)",
+      "fix": "正向自检改为 `curl -H \"Host: <白名单首项>\" http://<tailnet-ip>:3000/...`，MagicDNS-only 白名单配置同样可验证"
+    }
+  ],
+  "blocking": false,
+  "gate_note": "全部 FAIL 均已在本次提交内 FIXED 或带证据 WAIVED；Lead 已逐条 read file:line 复核 finding 真实性。"
+}

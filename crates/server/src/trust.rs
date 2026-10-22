@@ -1,10 +1,10 @@
-//! Tailnet（Tailscale）可信对端判定——**公共契约空桩**。
+//! Tailnet（Tailscale）可信对端判定——公共契约实现。
 //!
 //! 契约表：`.dev-team/contract-tailnet-trust.md`（R-T1..R-T13，ver 2）；NFR：`.dev-team/nfr-baseline.json`
-//! 的 `tailnet_trust` 段。本文件当前只冻结公共类型/签名，函数体一律 `unimplemented!()`，
-//! 实现与接线由 Executor 在其写域内补齐（main.rs 取 peer 地址、routes.rs 调用 `decide`）。
+//! 的 `tailnet_trust` 段。本模块只做**判定**：取 peer 地址、Host 头与代理头事实，产出
+//! [`TrustDecision`]；HTTP 层（`routes.rs`）只把 [`TrustDecision::Trusted`] 兑换成「只读免 token」。
 //!
-//! 不变量（实现时必须保持）：
+//! 不变量（实现必须保持）：
 //! - 安全默认：`CONSOLE_TAILNET_TRUST` 仅 `1`/`true`/`on`（大小写不敏感）开启，**未设置或其它值一律关闭**（R-T4）。
 //! - 不得 panic：非法 CIDR / Host 配置只降级为「信任不生效」（fail-closed，R-T8）。
 //! - Host 白名单是 DNS rebinding 的唯一防线，缺失/不匹配即不得放行（R-T5b/R-T13）。
@@ -15,65 +15,155 @@ use std::fmt;
 use std::net::IpAddr;
 
 use axum::http::HeaderMap;
+use tracing::{info, warn};
 
 /// 默认可信 CIDR：Tailscale IPv4 CGNAT 段 + IPv6 ULA 段（NFR `tailnet_trust.default_cidrs`）。
 pub const DEFAULT_TRUSTED_CIDRS: &str = "100.64.0.0/10,fd7a:115c:a1e0::/48";
 
-/// 一个已解析的 CIDR 段。私有字段为实现细节（Executor 可调整），公共方法签名冻结。
+/// 一个已解析的 CIDR 段。
 pub struct Cidr {
-    #[allow(dead_code)] // 空桩阶段无读取方，实现后移除
     net: IpAddr,
-    #[allow(dead_code)]
     prefix_len: u8,
+}
+
+/// 默认端口剥离：`host` / `host:port` / `[v6]:port` / 裸 IPv6 字面量。
+///
+/// 返回 `None` 表示格式非法（空端口、缺 `]` 等），由调用方降级为 fail-closed。
+fn split_host_port(raw: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        let port = match tail {
+            "" => None,
+            _ => Some(tail.strip_prefix(':')?),
+        };
+        return Some((host, port));
+    }
+    // 裸 IPv6 字面量（多个冒号且无括号）没有端口语义，整体视作 host。
+    if raw.matches(':').count() > 1 {
+        return Some((raw, None));
+    }
+    match raw.rsplit_once(':') {
+        // 空端口（`host:`）是配置缺陷，交给调用方 fail-closed。
+        Some((_, "")) => None,
+        Some((host, port)) => Some((host, Some(port))),
+        None => Some((raw, None)),
+    }
 }
 
 impl Cidr {
     /// 解析 `addr/prefix_len`（IPv4 或 IPv6）；非法输入返回 `Err`，**不得 panic**（R-T8）。
-    #[allow(unused_variables)] // 空桩阶段签名参数暂无读取方
     pub fn parse(s: &str) -> Result<Cidr, CidrParseError> {
-        unimplemented!("契约空桩：Cidr::parse 由 Executor 实现（见 R-T8）")
+        let raw = s.trim();
+        let Some((addr, prefix)) = raw.split_once('/') else {
+            return Err(CidrParseError::new(s));
+        };
+        let (addr, prefix) = (addr.trim(), prefix.trim());
+        if addr.is_empty() || prefix.is_empty() || prefix.contains('/') {
+            return Err(CidrParseError::new(s));
+        }
+        let net: IpAddr = addr.parse().map_err(|_| CidrParseError::new(s))?;
+        let prefix_len: u8 = prefix.parse().map_err(|_| CidrParseError::new(s))?;
+        let max_prefix_len = match net {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix_len > max_prefix_len {
+            return Err(CidrParseError::new(s));
+        }
+        Ok(Cidr { net, prefix_len })
     }
 
     /// `ip` 是否落在本段内。入参须已由 [`normalize_peer`] 归一化（R-T1..R-T13 前置）。
-    #[allow(unused_variables)]
     pub fn contains(&self, ip: IpAddr) -> bool {
-        unimplemented!("契约空桩：Cidr::contains 由 Executor 实现（见 R-T3）")
+        match (self.net, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = ipv4_mask(self.prefix_len);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = ipv6_mask(self.prefix_len);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            // 家族不匹配即不命中（IPv4 对端不得被 IPv6 段命中，反之亦然）。
+            _ => false,
+        }
+    }
+}
+
+fn ipv4_mask(prefix_len: u8) -> u32 {
+    if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    }
+}
+
+fn ipv6_mask(prefix_len: u8) -> u128 {
+    if prefix_len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix_len)
     }
 }
 
 /// Host 白名单条目：`host` 或 `host:port`。比较时忽略大小写与端口，Host 缺失即不匹配（R-T5b）。
 pub struct TrustedHost {
-    #[allow(dead_code)] // 空桩阶段无读取方，实现后移除
+    /// 已小写归一化的 host（端口按契约不参与匹配，故不入存储）。
     host: String,
-    #[allow(dead_code)]
-    port: Option<u16>,
 }
 
 impl TrustedHost {
     /// 解析单个条目；空串/非法输入返回 `Err`（由调用方降级为 fail-closed），**不得 panic**。
-    #[allow(unused_variables)]
     pub fn parse(s: &str) -> Result<TrustedHost, CidrParseError> {
-        unimplemented!("契约空桩：TrustedHost::parse 由 Executor 实现（见 R-T5b）")
+        let raw = s.trim();
+        let Some((host, port)) = split_host_port(raw) else {
+            return Err(CidrParseError::new(s));
+        };
+        if host.is_empty() {
+            return Err(CidrParseError::new(s));
+        }
+        // 端口不参与匹配，但语法必须合法（拼错端口属配置缺陷，fail-closed 而非静默忽略）。
+        if let Some(port) = port {
+            port.parse::<u16>().map_err(|_| CidrParseError::new(s))?;
+        }
+        Ok(TrustedHost {
+            host: host.to_ascii_lowercase(),
+        })
     }
 
     /// `host_header` 是否命中本条目：忽略大小写与端口；`None` 或空串 → `false`。
-    #[allow(unused_variables)]
     pub fn matches(&self, host_header: Option<&str>) -> bool {
-        unimplemented!("契约空桩：TrustedHost::matches 由 Executor 实现（见 R-T5b/R-T13）")
+        let Some(raw) = host_header else {
+            return false;
+        };
+        let Some((host, port)) = split_host_port(raw.trim()) else {
+            return false;
+        };
+        if port.is_some_and(|port| port.parse::<u16>().is_err()) {
+            return false;
+        }
+        !host.is_empty() && host.eq_ignore_ascii_case(&self.host)
     }
 }
 
 /// 配置解析错误（CIDR 与 Host 共用）：`Display` + `std::error::Error`。
 #[derive(Debug)]
 pub struct CidrParseError {
-    #[allow(dead_code)] // 空桩阶段无读取方，实现后移除
     input: String,
 }
 
+impl CidrParseError {
+    fn new(input: &str) -> Self {
+        Self {
+            input: input.to_string(),
+        }
+    }
+}
+
 impl fmt::Display for CidrParseError {
-    #[allow(unused_variables)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("契约空桩：CidrParseError::fmt 由 Executor 实现")
+        let input = &self.input;
+        write!(f, "非法的 CIDR/Host 配置项：{input:?}")
     }
 }
 
@@ -99,55 +189,140 @@ pub enum TrustDecision {
 /// 运行时信任配置。`enabled == false` 即关闭；`cidrs` 或 `trusted_hosts` 为空同样等于信任不生效。
 pub struct TrustConfig {
     pub enabled: bool,
-    #[allow(dead_code)] // 空桩阶段无读取方，实现后移除
     cidrs: Vec<Cidr>,
-    #[allow(dead_code)]
     trusted_hosts: Vec<TrustedHost>,
 }
 
 impl TrustConfig {
     /// 从环境变量构造：
     /// - `CONSOLE_TAILNET_TRUST`：仅 `1`/`true`/`on`（大小写不敏感）开启；未设置或其它值一律关闭。
-    /// - `CONSOLE_TAILNET_CIDRS`：逗号分隔；未设置 → [`DEFAULT_TRUSTED_CIDRS`]。
+    /// - `CONSOLE_TAILNET_CIDRS`：逗号分隔；未设置（或空白）→ [`DEFAULT_TRUSTED_CIDRS`]。
     /// - `CONSOLE_TRUSTED_HOSTS`：逗号分隔 `host`/`host:port`；未设置或为空 → **无白名单（信任恒不生效）**，
     ///   开启状态下启动打印 WARN。
     ///
     /// 任一解析失败 → 信任关闭（fail-closed）并回退默认 CIDR，**不得 panic**（R-T8b）。
     pub fn from_env() -> TrustConfig {
-        unimplemented!("契约空桩：TrustConfig::from_env 由 Executor 实现（见 R-T4/R-T8）")
+        let enabled = std::env::var("CONSOLE_TAILNET_TRUST")
+            .map(|value| is_enabled_value(&value))
+            .unwrap_or(false);
+        let cidrs_src = std::env::var("CONSOLE_TAILNET_CIDRS")
+            .map(|value| value.trim().to_string())
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_TRUSTED_CIDRS.to_string());
+        let hosts_src = std::env::var("CONSOLE_TRUSTED_HOSTS").unwrap_or_default();
+
+        let config = match TrustConfig::parse(enabled, &cidrs_src, &hosts_src) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(
+                    trust_enabled = false,
+                    config_error = %err,
+                    fallback_cidrs = DEFAULT_TRUSTED_CIDRS,
+                    "tailnet trust 配置非法：已关闭信任并回退默认 CIDR（fail-closed）"
+                );
+                // DEFAULT_TRUSTED_CIDRS 恒可解析；`unwrap_or` 只是防御，绝不 panic（R-T8b）。
+                TrustConfig::parse(false, DEFAULT_TRUSTED_CIDRS, "").unwrap_or(TrustConfig {
+                    enabled: false,
+                    cidrs: Vec::new(),
+                    trusted_hosts: Vec::new(),
+                })
+            }
+        };
+
+        if config.enabled && config.trusted_hosts.is_empty() {
+            warn!(
+                trust_enabled = true,
+                "CONSOLE_TRUSTED_HOSTS 未设置或为空：Host 白名单为空 ⇒ tailnet 信任恒不生效（fail-closed，防 DNS rebinding）"
+            );
+        }
+        info!(
+            trust_enabled = config.enabled,
+            trust_cidrs = config.cidrs.len(),
+            trusted_hosts = config.trusted_hosts.len(),
+            "tailnet trust 配置已加载（默认关闭；开启后只读 GET/HEAD 免 admin token）"
+        );
+        config
     }
 
     /// 纯函数构造：`cidrs` / `hosts` 均为逗号分隔列表（空串 = 空列表），任一段非法即返回 `Err`。
-    #[allow(unused_variables)]
-    pub fn parse(
-        enabled: bool,
-        cidrs: &str,
-        hosts: &str,
-    ) -> Result<TrustConfig, CidrParseError> {
-        unimplemented!("契约空桩：TrustConfig::parse 由 Executor 实现（见 R-T5b/R-T8）")
+    pub fn parse(enabled: bool, cidrs: &str, hosts: &str) -> Result<TrustConfig, CidrParseError> {
+        let mut parsed_cidrs = Vec::new();
+        for segment in cidrs.split(',') {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            parsed_cidrs.push(Cidr::parse(segment)?);
+        }
+
+        let mut parsed_hosts = Vec::new();
+        for segment in hosts.split(',') {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            parsed_hosts.push(TrustedHost::parse(segment)?);
+        }
+
+        Ok(TrustConfig {
+            enabled,
+            cidrs: parsed_cidrs,
+            trusted_hosts: parsed_hosts,
+        })
     }
 
     /// 判定优先级（冻结）：`Disabled` > `Proxied` > `PeerUnknown` > `HostNotAllowed` > `Trusted`/`OutsideCidrs`。
     /// [`normalize_peer`] 必须在 CIDR 匹配前应用；Host 门必须在 CIDR 门之前（R-T5b/R-T13）。
-    #[allow(unused_variables)]
-    pub fn decide(
-        &self,
-        peer: Option<IpAddr>,
-        proxied: bool,
-        host: Option<&str>,
-    ) -> TrustDecision {
-        unimplemented!("契约空桩：TrustConfig::decide 由 Executor 实现（见 R-T1..R-T13）")
+    pub fn decide(&self, peer: Option<IpAddr>, proxied: bool, host: Option<&str>) -> TrustDecision {
+        if !self.enabled {
+            return TrustDecision::Disabled;
+        }
+        // 代理头只拒不放：不得据 XFF 推断真实对端（R-T5/R-T11）。
+        if proxied {
+            return TrustDecision::Proxied;
+        }
+        let Some(peer) = peer else {
+            return TrustDecision::PeerUnknown;
+        };
+        let peer = normalize_peer(peer);
+        // Host 门先于 CIDR 门：Host 白名单是 DNS rebinding 的唯一防线（R-T5c/R-T13）。
+        if !self
+            .trusted_hosts
+            .iter()
+            .any(|trusted| trusted.matches(host))
+        {
+            return TrustDecision::HostNotAllowed;
+        }
+        if self.cidrs.iter().any(|cidr| cidr.contains(peer)) {
+            TrustDecision::Trusted
+        } else {
+            TrustDecision::OutsideCidrs
+        }
     }
 }
 
+/// `CONSOLE_TAILNET_TRUST` 的唯一开启口径：`1` / `true` / `on`（大小写不敏感，容忍首尾空白）。
+fn is_enabled_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on"
+    )
+}
+
 /// IPv4-mapped IPv6（`::ffff:a.b.c.d`）归一化为 IPv4，其余原样返回（R-T8）。
-#[allow(unused_variables)]
 pub fn normalize_peer(ip: IpAddr) -> IpAddr {
-    unimplemented!("契约空桩：normalize_peer 由 Executor 实现（见 R-T8）")
+    match ip {
+        // 必须用 `to_ipv4_mapped`：`to_ipv4` 会把 `::1`/`::` 也折叠成 0.0.0.1/0.0.0.0。
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
 }
 
 /// 请求是否携带代理头：存在 `x-forwarded-for` 或 `x-real-ip` 即 `true`（R-T5）。
-#[allow(unused_variables)]
 pub fn is_proxied(headers: &HeaderMap) -> bool {
-    unimplemented!("契约空桩：is_proxied 由 Executor 实现（见 R-T5）")
+    headers.contains_key("x-forwarded-for") || headers.contains_key("x-real-ip")
 }

@@ -18,10 +18,22 @@ const MAX_SESSIONS: usize = 512;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_MAX_FAILURES: u32 = 5;
 
+/// 会话签发来源：决定会话表满时的驱逐优先级。
+///
+/// `Manual`（静态 ADMIN_TOKEN/CLIENT_TOKEN 登录）持有写权限，优先保护；
+/// `TrustedPeer`（tailnet 可信对端自动签发）可被无凭证流量触发签发，
+/// 驱逐时先淘汰它，避免未认证流量挤掉管理员的手动写会话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOrigin {
+    Manual,
+    TrustedPeer,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub expires_at: DateTime<Utc>,
     pub csrf_token: String,
+    pub origin: SessionOrigin,
 }
 
 #[derive(Debug)]
@@ -34,6 +46,7 @@ pub struct CreatedSession {
 struct SessionRecord {
     expires_at: DateTime<Utc>,
     csrf_token: String,
+    origin: SessionOrigin,
 }
 
 #[derive(Debug)]
@@ -76,7 +89,21 @@ impl SessionStore {
         self.ttl.as_secs()
     }
 
+    /// 手动签发的会话（静态 token 登录）：`create_with_origin(SessionOrigin::Manual)` 的薄封装。
     pub fn create(&self) -> CreatedSession {
+        self.create_session(SessionOrigin::Manual)
+    }
+
+    /// 按来源签发会话，返回 `(session_token, csrf_token)`；驱逐策略见 [`Self::create_session`]。
+    pub fn create_with_origin(&self, origin: SessionOrigin) -> (String, String) {
+        let created = self.create_session(origin);
+        (created.token, created.info.csrf_token)
+    }
+
+    /// 插入会话并在满表时驱逐。宽严有序（fail-safe 而非 fail-open）：
+    /// ① 先清理已过期 → ② 仍满则只驱逐 `TrustedPeer` 中最早过期者
+    /// → ③ 没有可驱逐的 `TrustedPeer`（全为手动会话）才回退驱逐最早过期者（既有兜底）。
+    fn create_session(&self, origin: SessionOrigin) -> CreatedSession {
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(self.ttl.as_secs() as i64);
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -84,13 +111,22 @@ impl SessionStore {
         let mut inner = self.inner.lock().expect("session store poisoned");
         inner.sessions.retain(|_, record| record.expires_at > now);
         if inner.sessions.len() >= MAX_SESSIONS {
-            if let Some(oldest) = inner
+            let evicted = inner
                 .sessions
                 .iter()
+                .filter(|(_, record)| record.origin == SessionOrigin::TrustedPeer)
                 .min_by_key(|(_, record)| record.expires_at)
                 .map(|(token, _)| token.clone())
-            {
-                inner.sessions.remove(&oldest);
+                .or_else(|| {
+                    // 全为手动会话：沿用既有兜底，避免无界增长。
+                    inner
+                        .sessions
+                        .iter()
+                        .min_by_key(|(_, record)| record.expires_at)
+                        .map(|(token, _)| token.clone())
+                });
+            if let Some(evicted) = evicted {
+                inner.sessions.remove(&evicted);
             }
         }
         inner.sessions.insert(
@@ -98,6 +134,7 @@ impl SessionStore {
             SessionRecord {
                 expires_at,
                 csrf_token: csrf_token.clone(),
+                origin,
             },
         );
         CreatedSession {
@@ -105,6 +142,7 @@ impl SessionStore {
             info: SessionInfo {
                 expires_at,
                 csrf_token,
+                origin,
             },
         }
     }
@@ -123,6 +161,7 @@ impl SessionStore {
         Some(SessionInfo {
             expires_at: record.expires_at,
             csrf_token: record.csrf_token.clone(),
+            origin: record.origin,
         })
     }
 
@@ -296,5 +335,129 @@ mod tests {
         assert!(cookie.contains("SameSite=Strict"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("Max-Age=60"));
+    }
+
+    // ── 会话表满时的驱逐策略（L3B：未认证流量不得挤掉手动写会话）──────────────
+
+    /// 直接写入一条会话记录（用于确定性地铺满会话表、控制过期时间与来源）。
+    fn seed_session(
+        store: &SessionStore,
+        token: &str,
+        origin: SessionOrigin,
+        expires_at: DateTime<Utc>,
+    ) {
+        let mut inner = store.inner.lock().expect("session store poisoned");
+        inner.sessions.insert(
+            token.to_string(),
+            SessionRecord {
+                expires_at,
+                csrf_token: format!("csrf-{token}"),
+                origin,
+            },
+        );
+    }
+
+    fn random_token() -> String {
+        format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+    }
+
+    fn session_count(store: &SessionStore) -> usize {
+        store
+            .inner
+            .lock()
+            .expect("session store poisoned")
+            .sessions
+            .len()
+    }
+
+    /// 满表时插入 TrustedPeer 会话：只驱逐「最早过期的 TrustedPeer」，手动会话全部保留。
+    #[test]
+    fn eviction_drops_oldest_trusted_peer_and_keeps_manual_sessions() {
+        let store = SessionStore::new(Duration::from_secs(600), false);
+        let now = Utc::now();
+        let manual = random_token();
+        let trusted_old = random_token();
+        let trusted_new = random_token();
+
+        seed_session(
+            &store,
+            &manual,
+            SessionOrigin::Manual,
+            now + chrono::Duration::seconds(300),
+        );
+        seed_session(
+            &store,
+            &trusted_old,
+            SessionOrigin::TrustedPeer,
+            now + chrono::Duration::seconds(100),
+        );
+        seed_session(
+            &store,
+            &trusted_new,
+            SessionOrigin::TrustedPeer,
+            now + chrono::Duration::seconds(500),
+        );
+        for i in 0..(MAX_SESSIONS - 3) {
+            seed_session(
+                &store,
+                &format!("{:064x}", 0x1000 + i),
+                SessionOrigin::Manual,
+                now + chrono::Duration::seconds(600),
+            );
+        }
+        assert_eq!(session_count(&store), MAX_SESSIONS);
+
+        let (new_token, _) = store.create_with_origin(SessionOrigin::TrustedPeer);
+
+        assert_eq!(session_count(&store), MAX_SESSIONS, "驱逐后仍受上限约束");
+        assert!(
+            store.validate(&manual).is_some(),
+            "手动会话必须被保护，不得被未认证流量驱逐"
+        );
+        assert!(
+            store.validate(&trusted_old).is_none(),
+            "最旧过期的 TrustedPeer 会话必须被驱逐"
+        );
+        assert!(
+            store.validate(&trusted_new).is_some(),
+            "较新的 TrustedPeer 会话应保留"
+        );
+        assert!(store.validate(&new_token).is_some(), "新签发会话必须可用");
+    }
+
+    /// 表内全为手动会话时回退「驱逐最早过期者」，不让会话表无界增长。
+    #[test]
+    fn eviction_falls_back_to_oldest_session_when_no_trusted_peer_exists() {
+        let store = SessionStore::new(Duration::from_secs(600), false);
+        let now = Utc::now();
+        let oldest = random_token();
+        seed_session(
+            &store,
+            &oldest,
+            SessionOrigin::Manual,
+            now + chrono::Duration::seconds(10),
+        );
+        for i in 1..MAX_SESSIONS {
+            seed_session(
+                &store,
+                &format!("{:064x}", 0x2000 + i),
+                SessionOrigin::Manual,
+                now + chrono::Duration::seconds(100 + i as i64),
+            );
+        }
+        assert_eq!(session_count(&store), MAX_SESSIONS);
+
+        let (new_token, _) = store.create_with_origin(SessionOrigin::TrustedPeer);
+
+        assert_eq!(
+            session_count(&store),
+            MAX_SESSIONS,
+            "回退驱逐后仍受上限约束"
+        );
+        assert!(
+            store.validate(&oldest).is_none(),
+            "无 TrustedPeer 可驱逐时必须回退驱逐最早过期会话"
+        );
+        assert!(store.validate(&new_token).is_some(), "新签发会话必须可用");
     }
 }

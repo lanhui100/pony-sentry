@@ -1,0 +1,29 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "deploy/scripts/deploy-console.sh",
+      "line": 170,
+      "rule": "Q1 / external_call_timeout_ms(<=3000)",
+      "counterexample": "新增外部调用 `TAILNET_IP=\"$(tailscale ip -4 2>/dev/null | head -1 || true)\"` 位于 case 之前、每次部署无条件执行：既无 `timeout` 包装（无任何 <=3000ms 硬超时），又用 `2>/dev/null || true` 吞掉失败；tailscaled 不响应时部署会无限阻塞，且与信任是否开启无关。"
+    },
+    {
+      "file": "deploy/scripts/deploy-console.sh",
+      "line": 183,
+      "rule": "Q1 / external_call_timeout_ms(<=3000)",
+      "counterexample": "新增的两条信任自检 HTTP 调用（第 179 行负向、第 183 行正向）均走 check_http_status，其硬超时是 `-m 5`（deploy-console.sh:117）= 5000ms，超过基准 external_call_timeout_ms=3000；新增外部 IO 未按基准收紧超时。"
+    },
+    {
+      "file": "crates/server/src/routes.rs",
+      "line": 518,
+      "rule": "Q2 / logging.format=json + logging.require_trace_id",
+      "counterexample": "信任放行审计日志 `info!(scope, trust_decision=?, peer=%, host=%)`（routes.rs:518-524）不含任何请求关联字段；管理路由没有 trace/request-id 层，全仓 request_id 仅存在于 ingest 路径（routes.rs:791/805/921），因此该审计行无法与具体请求关联（require_trace_id=true 未满足）。同时日志订阅器为 `tracing_subscriber::fmt::init()`（main.rs:143），输出纯文本而非 JSON：以 RUST_LOG=info 启动二进制实测输出 `INFO pony_sentry_server::routes: tailnet 可信对端放行只读请求 scope=\"admin_auth\" trust_decision=Trusted peer=127.0.0.1 host=127.0.0.1:39126`，无 trace_id、非 JSON（logging.format=json 未满足）。"
+    },
+    {
+      "file": "crates/server/src/routes.rs",
+      "line": 646,
+      "rule": "Q4 / concurrency_lock（幂等性）",
+      "counterexample": "无可验证会话时对每个请求无条件 `state.sessions.create()`（routes.rs:646）：同一可信客户端重复/并发的不带 Cookie 请求会各自签发不同会话（非幂等），且会话表达到 MAX_SESSIONS=512 后 session.rs:86-95 淘汰 expires_at 最小（即最早创建）的有效会话——重复请求可淘汰管理员在用会话（l2at 的 80 次并发请求已签发约 42 个会话，规模放大即触发淘汰）。"
+    }
+  ]
+}

@@ -121,6 +121,19 @@ check_http_status() {
   fi
 }
 
+# 信任自检专用：外部调用硬超时 3s（NFR `external_call_timeout_ms=3000`），不复用上面的 5s 口径。
+check_http_status_trust() {
+  local expected="$1"
+  local url="$2"
+  shift 2
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -m 3 "$@" "$url")" || return 1
+  if [ "$code" != "$expected" ]; then
+    echo "ERROR: $url -> HTTP $code（期待 $expected）" >&2
+    return 1
+  fi
+}
+
 # ---- 0. 读取 ADMIN_TOKEN（权限 600 root，经 sudo） ----
 if ! $SUDO test -r "$ENV_FILE"; then
   echo "ERROR: 读取不到 $ENV_FILE" >&2
@@ -160,6 +173,40 @@ grep -q '"db":"up"' <<<"$HEALTH" || { echo "ERROR: DB 不健康" >&2; exit 1; }
 # 管理读接口匿名必须 401（若服务端配置了 ADMIN_TOKEN / CLIENT_TOKEN）。
 check_http_status 401 "$BASE_URL/api/v1/issues?" \
   || { echo "ERROR: 匿名读接口未按预期拒绝" >&2; exit 1; }
+
+# ── Tailnet 信任双门自检（ADR 004 / 契约 R-T1..R-T13）─────────────────────
+# 信任 = 开关 ∧ 对端网段 ∧ 非代理 ∧ Host 白名单，四者取与：
+#   ① 负向：loopback 伪造可信 Host 仍必须 401（Host 门不能单独放行）；
+#   ② 正向：从本机 tailnet 地址访问（对端落在可信网段且 Host 命中）匿名读必须 200。
+TRUST_ENABLED="$($SUDO sed -n 's/^CONSOLE_TAILNET_TRUST=//p' "$ENV_FILE" | tr -d '\r' | head -1)"
+TRUST_ENABLED_LC="$(printf '%s' "$TRUST_ENABLED" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+TRUSTED_HOSTS="$($SUDO sed -n 's/^CONSOLE_TRUSTED_HOSTS=//p' "$ENV_FILE" | tr -d '\r' | head -1)"
+TAILNET_IP="$(timeout 3 tailscale ip -4 2>/dev/null | head -1 || true)"
+
+case "$TRUST_ENABLED_LC" in
+  1|true|on)
+    if [ -z "$TRUSTED_HOSTS" ]; then
+      echo "WARN: CONSOLE_TAILNET_TRUST 已开启但 CONSOLE_TRUSTED_HOSTS 为空 → 信任不生效（启动应有 WARN）" >&2
+    else
+      FIRST_HOST="$(printf '%s' "${TRUSTED_HOSTS%%,*}" | tr -d '[:space:]')"
+      # ① 负向：loopback 不在可信网段，伪造 Host 也必须 401。
+      check_http_status_trust 401 "$BASE_URL/api/v1/issues?" -H "Host: $FIRST_HOST" \
+        || { echo "ERROR: loopback + 伪造可信 Host 未被拒绝（信任双门失效）" >&2; exit 1; }
+      # ② 正向：从本机 tailnet 地址访问（对端落在可信网段），Host 取白名单首项，
+      #    因此 MagicDNS-only 的白名单配置同样可验证。
+      if [ -n "$TAILNET_IP" ]; then
+        check_http_status_trust 200 "http://$TAILNET_IP:3000/api/v1/issues?" -H "Host: $FIRST_HOST" \
+          || { echo "ERROR: tailnet 对端匿名读未放行（信任未生效）" >&2; exit 1; }
+        echo "tailnet trust: 双门自检通过（loopback+伪造 Host → 401 / $TAILNET_IP+白名单 Host 匿名读 → 200）"
+      else
+        echo "tailnet trust: 负向自检通过；正向跳过（未取到本机 tailnet IPv4）"
+      fi
+    fi
+    ;;
+  *)
+    echo "tailnet trust: 未开启（CONSOLE_TAILNET_TRUST=${TRUST_ENABLED:-<unset>}），控制台仍走 token/会话登录"
+    ;;
+esac
 
 # 静态 ADMIN_TOKEN 仅用于交换短期会话；token 经 stdin 传递，不进入 curl 命令行。
 LOGIN_CODE="$(printf '%s' "$ADMIN_TOKEN"   | python3 -c 'import json,sys; print(json.dumps({"token": sys.stdin.read()}))'   | curl -sS -o "$LOGIN_JSON" -c "$COOKIE_JAR" -w '%{http_code}' -m 5 \

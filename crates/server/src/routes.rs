@@ -1,9 +1,11 @@
 use crate::session::{
-    csrf_token_from_header, session_token_from_bearer, session_token_from_cookie, SessionStore,
+    csrf_token_from_header, session_token_from_bearer, session_token_from_cookie, SessionOrigin,
+    SessionStore,
 };
+use crate::trust::{is_proxied, normalize_peer, TrustConfig, TrustDecision};
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -22,6 +24,7 @@ use pony_sentry_ingest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -388,6 +391,18 @@ struct CreateSessionRequest {
 }
 
 pub fn create_app_with_state(state: AppState) -> Router {
+    // 进程级 env 接缝（契约 §1）：真实进程由 main.rs 显式调用 `create_app_with_trust`；
+    // 本入口保留给既有进程内测试 —— 三个 tailnet env 键未配置时信任恒为 Disabled。
+    create_app_with_trust(state, TrustConfig::from_env())
+}
+
+/// 构建应用并显式注入 tailnet 信任配置（`main.rs` 使用，故 `from_env` 的启动日志只打一次）。
+///
+/// `trust` 经 `Extension` 层下发：`admin_auth_middleware` 与 `handle_get_session` 各取一份
+/// `Arc<TrustConfig>`。不往 `AppState` 增字段，是因为进程内既有测试以结构体字面量构造它。
+pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
+    let trust = Arc::new(trust);
+
     // 1. Ingest 专用 CORS：仅开放 POST，收敛跨域能力
     let ingest_cors = CorsLayer::new()
         .allow_origin(Any)
@@ -452,20 +467,93 @@ pub fn create_app_with_state(state: AppState) -> Router {
         .merge(ingest_routes)
         .merge(auth_routes)
         .merge(admin_routes)
+        // 信任配置：Extension 层置于所有路由之外，鉴权中间件与处理器均可读取。
+        .layer(Extension(trust))
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .with_state(state)
 }
 
-/// 管理侧鉴权中间件：读接口与 PATCH 一律先过 token 校验（契约 R10 / R10.1）。
+/// 单次请求的信任判定结果与审计字段（`trust_decision` / `peer` / `host`，禁打凭证）。
+struct TrustContext {
+    decision: TrustDecision,
+    /// 已归一化的对端地址（未接线 connect_info 时为 `None`）。
+    peer: Option<IpAddr>,
+    /// 原始 `Host` 头（缺失时为 `None`）。
+    host: Option<String>,
+}
+
+impl TrustContext {
+    fn evaluate(
+        trust: &TrustConfig,
+        headers: &HeaderMap,
+        connect_info: Option<&ConnectInfo<SocketAddr>>,
+    ) -> Self {
+        let peer = connect_info.map(|info| normalize_peer(info.0.ip()));
+        let host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let decision = trust.decide(peer, is_proxied(headers), host.as_deref());
+        Self {
+            decision,
+            peer,
+            host,
+        }
+    }
+
+    /// 信任只兑换**只读**：`Trusted` + `GET`/`HEAD` 才放行（契约 §2/R-T7 红线③）。
+    /// 注意：`OPTIONS` 不在放行面内 —— 契约只冻结了 GET/HEAD（Lead 裁决收窄）。
+    fn grants_read(&self, method: &Method) -> bool {
+        matches!(self.decision, TrustDecision::Trusted)
+            && matches!(method, &Method::GET | &Method::HEAD)
+    }
+
+    /// 结构化审计日志：只含 `request_id` / `trust_decision` / `peer` / `host`（R-T10 + NFR `logging.require_trace_id`）。
+    ///
+    /// `request_id` 由调用方生成并传入，保证同一次请求内的审计日志可关联（不在本函数内新生成）。
+    fn log_grant(&self, scope: &'static str, request_id: &str) {
+        let peer = self
+            .peer
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let host = self.host.as_deref().unwrap_or("-");
+        info!(
+            scope,
+            request_id = %request_id,
+            trust_decision = ?self.decision,
+            peer = %peer,
+            host = %host,
+            "tailnet 可信对端放行只读请求"
+        );
+    }
+}
+
+/// 管理侧鉴权中间件：读接口与 PATCH 一律先过 token 校验（契约 R10 / R10.1）；
+/// 仅在「无任何可验证凭证」时追加 tailnet 信任分支，且只对只读方法放行（契约 R-T1/R-T7）。
 async fn admin_auth_middleware(
     State(state): State<AppState>,
+    trust: Option<Extension<Arc<TrustConfig>>>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
     let method = request.method().clone();
     match state.authorize_admin(request.headers(), &method) {
         Ok(_) => next.run(request).await,
-        Err(AdminAuthError::Unauthorized) => unauthorized().into_response(),
+        Err(AdminAuthError::Unauthorized) => {
+            // R-T12：静态 token / 有效会话已在上面命中；此处只处理「无可识别凭证」。
+            if let Some(Extension(trust)) = trust.as_ref() {
+                let context =
+                    TrustContext::evaluate(trust, request.headers(), connect_info.as_ref());
+                if context.grants_read(&method) {
+                    // 一次请求一个关联 id（NFR `logging.require_trace_id`），随审计行落盘。
+                    let request_id = Uuid::new_v4().to_string();
+                    context.log_grant("admin_auth", &request_id);
+                    return next.run(request).await;
+                }
+            }
+            unauthorized().into_response()
+        }
         Err(AdminAuthError::NotConfigured) => admin_token_not_configured().into_response(),
         Err(AdminAuthError::CsrfInvalid) => csrf_invalid().into_response(),
     }
@@ -505,19 +593,47 @@ async fn handle_create_session(
     }
     state.sessions.record_login_success(&login_key);
     let created = state.sessions.create();
+    session_created_response(
+        &state,
+        &created.token,
+        &created.info.csrf_token,
+        created.info.expires_at,
+    )
+}
+
+/// 会话签发成功响应（登录交换与可信对端自动签发**同形**）：HttpOnly Cookie + CSRF token。
+///
+/// `Set-Cookie` 构造失败时**不得谎报成功**：记 WARN（不打印 token）并返回 500，
+/// 否则客户端会拿到 `authenticated:true` 却无可用会话。
+fn session_created_response(
+    state: &AppState,
+    token: &str,
+    csrf_token: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Response {
+    let cookie = state.sessions.cookie_header(token);
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else {
+        warn!(
+            scope = "auth_session",
+            "会话 Set-Cookie 头构造失败：拒绝返回 authenticated:true 的假成功"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "session_cookie_invalid"})),
+        )
+            .into_response();
+    };
     let mut response = (
         StatusCode::OK,
         Json(json!({
             "authenticated": true,
-            "expires_at": created.info.expires_at.to_rfc3339(),
+            "expires_at": expires_at.to_rfc3339(),
             "expires_in": state.sessions.ttl_secs(),
-            "csrf_token": created.info.csrf_token,
+            "csrf_token": csrf_token,
         })),
     )
         .into_response();
-    if let Ok(value) = HeaderValue::from_str(&state.sessions.cookie_header(&created.token)) {
-        response.headers_mut().insert(header::SET_COOKIE, value);
-    }
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -525,21 +641,44 @@ async fn handle_create_session(
 }
 
 /// `GET /api/v1/auth/session`：返回当前短期会话状态与 CSRF token。
-async fn handle_get_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
+///
+/// 无可验证会话时，**仅** `TrustDecision::Trusted` 的对端现场签发会话（契约 R-T6）：
+/// 返回与登录成功同形的 JSON + `Set-Cookie`；其余来源维持 401（R-T6b）。
+async fn handle_get_session(
+    State(state): State<AppState>,
+    trust: Option<Extension<Arc<TrustConfig>>>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> Response {
     let token = session_token_from_cookie(&headers).or_else(|| session_token_from_bearer(&headers));
-    let Some(info) = token.and_then(|token| state.sessions.validate(&token)) else {
+    if let Some(info) = token.and_then(|token| state.sessions.validate(&token)) {
+        let mut response = Json(json!({
+            "authenticated": true,
+            "expires_at": info.expires_at.to_rfc3339(),
+            "csrf_token": info.csrf_token,
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return response;
+    }
+
+    let context = trust
+        .as_ref()
+        .map(|Extension(trust)| TrustContext::evaluate(trust, &headers, connect_info.as_ref()));
+    let Some(context) = context.filter(|context| context.grants_read(&Method::GET)) else {
         return unauthorized().into_response();
     };
-    let mut response = Json(json!({
-        "authenticated": true,
-        "expires_at": info.expires_at.to_rfc3339(),
-        "csrf_token": info.csrf_token,
-    }))
-    .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+    let request_id = Uuid::new_v4().to_string();
+    context.log_grant("auth_session", &request_id);
+    // 自动签发标记为 TrustedPeer：会话表满时优先驱逐这类会话，保护手动登录的写会话。
+    let (token, csrf_token) = state
+        .sessions
+        .create_with_origin(SessionOrigin::TrustedPeer);
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::seconds(state.sessions.ttl_secs() as i64);
+    session_created_response(&state, &token, &csrf_token, expires_at)
 }
 
 /// `DELETE /api/v1/auth/session`：注销当前会话并清除 Cookie。

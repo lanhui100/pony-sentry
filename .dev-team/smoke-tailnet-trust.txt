@@ -1,0 +1,46 @@
+### 0. 构建产物与信任默认关闭（不设 CONSOLE_TAILNET_TRUST）
+PASS 匿名读 /issues（默认关闭）                   -> HTTP 401
+PASS 匿名 GET /auth/session（默认关闭）            -> HTTP 401
+
+### 1. 信任开启（CIDRS=127.0.0.1/32, HOSTS=127.0.0.1）
+PASS 可信匿名读 /issues                               -> HTTP 200
+PASS 可信匿名读 /projects                             -> HTTP 200
+PASS 可信匿名读 /traces                               -> HTTP 200
+PASS 可信 + X-Forwarded-For（应拒）                  -> HTTP 401
+PASS 可信 + X-Real-IP（应拒）                        -> HTTP 401
+PASS 可信 + Host: evil（应拒）                       -> HTTP 401
+smoke issue_id=b4984161-826c-4530-a482-b68ceea7d82f
+PASS 可信匿名 PATCH（无会话，应拒）            -> HTTP 401
+PASS 可信匿名 OPTIONS（不放行）                   -> HTTP 401
+PASS 可信 GET /auth/session（自动签发）            -> HTTP 200
+PASS Set-Cookie 存在                                     -> HTTP yes
+csrf_token 长度=32（不打印值）
+PASS 会话 PATCH 缺 CSRF（应 403）                    -> HTTP 403
+PASS 会话 PATCH 带 CSRF（应 200 且真实生效）    -> HTTP 200
+--- 审计日志样本（脱敏检查：不得含 token/csrf/cookie 值）
+4
+[2m2026-10-22T12:31:18.924838Z[0m [32m INFO[0m [2mpony_sentry_server::routes[0m[2m:[0m tailnet 可信对端放行只读请求 [3mscope[0m[2m=[0m"admin_auth" [3mrequest_id[0m[2m=[0mcc325939-c8ae-4777-890f-31a6820a122a [3mtrust_decision[0m[2m=[0mTrusted [3mpeer[0m[2m=[0m127.0.0.1 [3mhost[0m[2m=[0m127.0.0.1:40967
+[2m2026-10-22T12:31:18.964816Z[0m [32m INFO[0m [2mpony_sentry_server::routes[0m[2m:[0m tailnet 可信对端放行只读请求 [3mscope[0m[2m=[0m"admin_auth" [3mrequest_id[0m[2m=[0m6d98d661-ea61-49dc-a823-c18a710120ab [3mtrust_decision[0m[2m=[0mTrusted [3mpeer[0m[2m=[0m127.0.0.1 [3mhost[0m[2m=[0m127.0.0.1:40967
+PASS 日志无 token 泄露                                -> HTTP clean
+
+### 2. kill switch（CONSOLE_TAILNET_TRUST=0 + 命中 CIDR/Host）
+PASS kill switch 下匿名读                              -> HTTP 401
+
+### 3. 降级配置：空白名单 / 非法 CIDR（不崩溃 + 启动 WARN）
+1
+[2m2026-10-22T12:31:20.182522Z[0m [33m WARN[0m [2mpony_sentry_server::trust[0m[2m:[0m CONSOLE_TRUSTED_HOSTS 未设置或为空：Host 白名单为空 ⇒ tailnet 信任恒不生效（fail-closed，防 DNS rebinding） [3mtrust_enabled[0m[2m=[0mtrue
+PASS 空白名单下匿名读（应拒）                  -> HTTP 401
+1
+PASS 非法 CIDR 下 /healthz（进程存活）            -> HTTP 200
+PASS 非法 CIDR 下匿名读（fail-closed）             -> HTTP 401
+
+### 4. L3B 复验：手动 token 会话不被可信无 Cookie flood 驱逐
+PASS POST /auth/session（手动会话）                  -> HTTP 200
+smoke issue_id=d548db7e-67a6-4d6d-9d56-47180aedb184
+PASS 手动会话 PATCH（flood 前，应 200）           -> HTTP 200
+--- 串行 520 次无 Cookie GET /auth/session（可信自动签发 flood）
+flood 200 响应数=520 / 520
+PASS 手动会话 PATCH（flood 后，应仍 200=未被驱逐） -> HTTP 200
+PASS flood 后 /healthz                                    -> HTTP 200
+
+### 汇总：fail=0

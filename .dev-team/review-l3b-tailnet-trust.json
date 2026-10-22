@@ -1,0 +1,16 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "crates/server/src/routes.rs",
+      "line": 646,
+      "rule": "unauthenticated-session-mint-evicts-foreign-sessions",
+      "counterexample": "任一落在可信 CIDR+Host 白名单、且不带任何凭证的请求方，可经 `GET /api/v1/auth/session` 无认证地调用 `SessionStore::create()`（routes.rs:646，鉴权门在 642 只判 Trusted+GET），而 create() 在满 512 后按 `expires_at` 最小者删（session.rs:85-96：retain + len>=MAX_SESSIONS + min_by_key + remove），即「删最早签发、不问主体」。实测（真实进程，CONSOLE_TAILNET_TRUST=1/CIDRS=127.0.0.1/32/HOSTS=127.0.0.1，逐字节 HTTP/1.1）：① `POST /api/v1/auth/session {\"token\":admin}` 取合法 Cookie+CSRF → `PATCH /api/v1/issues/<id>` = **200**；② 单线程串行发 512 次**无 Cookie** `GET /api/v1/auth/session`（每次都 200 + 新 Set-Cookie，512 个 token 互不相同）；③ 同一 Cookie+同一 CSRF 再 `PATCH /api/v1/issues/<id>` = **401 unauthorized** —— 合法写会话被未认证流量静默驱逐，前端 loadSession/applySession 只在 401 时 markAuthRequired()，用户侧表现为会话中静默掉回登录框。并发版收据：32 线程 × 100 轮 Barrier 同时放行的无 Cookie 签发，3200/3200 全 200、零 5xx/零连接重置、进程存活（即淘汰路径在并发下无重复插入/死循环/饥饿，内存上界 512 成立），故本条不是内存无界增长，而是**跨主体（写会话）驱逐的可用性缺陷**，且旧实现对签发要求 admin token，本特性把该资源变成免凭证可驱动。契约 §1/§2 与 NFR `tailnet_trust` 均未规定签发配额/淘汰归属，ADR 004 的残余风险清单也未记录该路径。最小修法（三选一）：签发前先按对端复用已有会话；仅淘汰已过期记录、满则不签发；给自动签发单列上限/按对端令牌桶。"
+    }
+  ],
+  "notes": [
+    "锁与 panic 面（非阻断）：session.rs:84/117/130/136/148/164 全站点 `Mutex::lock().expect(\"session store poisoned\")`，且 create() 在锁内做 O(512) 的 retain+min_by_key+token clone（session.rs:85-96）；本次改动使**无凭证**请求也能进入 create()（routes.rs:646），把「任何持锁 panic → 单例锁永久毒化 → 之后 authorize_admin 每次 validate 都 panic（管理面整体不可用）」的放大面从「持 token 者」扩到「可信网段内任何人」。当前锁内无 IO、无 unwrap/可 panic 调用（UUID 生成在锁外），故仅记录不阻断；建议换可恢复毒化的锁策略或 tokio::sync::Mutex（后者同时消掉 async handler 里 std Mutex 同步阻塞 worker 的隐患：3200 并发 flood 实测 1.30s 全 200，未见饥饿，但锁内是纯 CPU 阻塞）。",
+    "错误路径静默（非阻断）：routes.rs:606 `if let Ok(value) = HeaderValue::from_str(...)` 在失败时**无日志**丢弃 Set-Cookie，却仍返回 200 + `authenticated:true` + csrf_token（同型见 routes.rs:658 清除 Cookie）；客户端据此认为已登录、重试会不断重签发 → 反向推高上一条的驱逐速率。旁证：有效会话分支（routes.rs:627-631）缺 `expires_in`，与签发分支（routes.rs:601）响应不同形（前端未消费，仅口径不一致）。",
+    "文档/实现口径不一致（非阻断，same-commit 义务）：docs/decisions/004-console-tailnet-trust.md:38 写「`GET/HEAD/OPTIONS` 管理路由免 admin token」，而代码 grants_read 已收敛为 `GET|HEAD`（routes.rs:506-509，与 FROZEN 契约 §2 一致）——ADR 未同步。另：decide 的 Host 门是对白名单线性扫描 + 每项 `matches(':').count()` 全量扫描 Host（trust.rs 的 split_host_port），复杂度 O(#hosts × |Host|)；实测 200 条白名单 + 8KB 全冒号 Host = 58.08 ms/req（debug），同配置小 Host 3.11 ms/req、单条白名单同 Host 1.8 ms/req —— 线性无索引，但 #hosts 由部署配置控制（实际 1-2 条）、Host 由 hyper 头上限约束，故非 DoS 面，仅建议按 `|Host|` 上限提前短路。"
+  ]
+}

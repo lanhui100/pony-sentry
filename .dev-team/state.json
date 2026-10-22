@@ -1,13 +1,34 @@
 {
-  "wave": 4,
-  "branch": "wave-4-systemone-sentry-filter",
-  "status": "completed",
-  "red_commit": "test-agent E0432 (red-phase-systemone-filter.txt)",
-  "green_commit": "ponyllm 5b67caf + bf259fa; pony-sentry 4d33df8 + 6fc0f46 + 055be29",
+  "wave": 5,
+  "branch": "wave-5-tailnet-trust",
+  "status": "in_progress",
+  "red_commit": "38f7ea6 test(wave-5-tailnet-trust): freeze red-phase acceptance tests",
+  "protocol_commit": "53c2b94 chore(protocol): freeze wave-5 tailnet-trust interface stubs & NFR baseline",
+  "green_commit": null,
+  "grading": {
+    "level": "B",
+    "upgraded_to_c_gates": true,
+    "reason": "命中机械分级触发规则②外部网络/IO 调用与④鉴权契约变更；按 C 级门禁执行（NFR/L2-AT/L3-P）"
+  },
   "tasks": {
-    "T1": "completed",
-    "T2": "completed",
-    "T3": "completed",
-    "T4": "completed (chat/responses route extension, user decision)"
-  }
+    "T1": "completed (protocol-agent)",
+    "T2": "completed (test-agent, red-phase anchored)",
+    "T3": "in_progress (executor)",
+    "T4": "in_progress (lead)",
+    "T5": "pending (join barrier)"
+  },
+  "contract": ".dev-team/contract-tailnet-trust.md (FROZEN ver 2)",
+  "nfr_baseline": ".dev-team/nfr-baseline.json#tailnet_trust",
+  "circuit_breaker": {
+    "functional_attempts": 0,
+    "nfr_attempts": 0
+  },
+  "history": [
+    {
+      "wave": 4,
+      "branch": "wave-4-systemone-sentry-filter",
+      "status": "completed",
+      "green_commit": "pony-sentry 4d33df8 + 6fc0f46 + 055be29"
+    }
+  ]
 }
