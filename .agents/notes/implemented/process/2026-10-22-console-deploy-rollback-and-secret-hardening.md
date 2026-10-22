@@ -20,9 +20,10 @@ Status: implemented
 2. 安装前把现有 `BIN_DEST` 备份到临时目录；新二进制先写 `$BIN_DEST.new` 再原子替换。
 3. 服务未存活、`/healthz` 非 healthy、`/api/v1/issues` / `/api/v1/projects` / `/api/v1/traces` 任一鉴权请求非 200、产物未内嵌 token、二进制权限异常，任一条失败都自动装回备份并重启服务。
 4. 安装权限改为 `0750 root:<service-group>`，并机械拒绝 other-readable 的部署产物。
-5. 新增 `tests/deploy/test_deploy_console_hardening.py` 与 CI 门禁，锁住 trap、回滚、三接口自检和 0750 约束。
-6. `README.md` 的部署段同步记录上述运行语义。
-7. 同批修复 Web 构建门禁的 `pnpm --filter` no-match 假绿，见
+5. 脚本以普通部署用户运行（拒绝 root 直接运行，内部按需 sudo），`umask 077`，构建出的二进制先 `chmod 0600`，避免 root-owned / world-readable 构建物。
+6. 新增 `tests/deploy/test_deploy_console_hardening.py` 与 CI 门禁，锁住 trap、回滚、三接口自检、0750 与构建用户约束。
+7. `README.md` 的部署段同步记录上述运行语义。
+8. 同批修复 Web 构建门禁的 `pnpm --filter` no-match 假绿，见
    `implemented/testing/2026-10-22-web-build-gate-false-positive.md`。
 
 ## Alternatives considered

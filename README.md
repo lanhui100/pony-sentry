@@ -45,10 +45,12 @@ VITE_PONY_SENTRY_TOKEN=<admin 或 client token> pnpm build
 localStorage.setItem('pony_sentry_token', '<admin 或 client token>')
 ```
 
-生产部署请直接使用 `deploy/scripts/deploy-console.sh`（从 `/etc/pony-sentry/pony-sentry.env`
-读取 `ADMIN_TOKEN` 烘焙进产物并重装二进制，幂等可重跑）。脚本在 `EXIT` trap 中无条件还原
-无 token 的 `web/dist`；安装前备份上一版本，服务/健康/三个鉴权读接口/token 内嵌/文件权限任一
-自检失败即自动回滚。内嵌 token 的二进制安装为 `0750 root:<service-group>`，避免同机其他用户读取。
+生产部署请以普通用户直接执行 `bash deploy/scripts/deploy-console.sh`（不要 `sudo bash`；脚本内部
+按需 sudo）——从 `/etc/pony-sentry/pony-sentry.env` 读取 `ADMIN_TOKEN` 烘焙进产物并重装二进制，
+幂等可重跑。脚本在 `EXIT` trap 中无条件还原无 token 的 `web/dist`；安装前备份上一版本，
+服务/健康/三个鉴权读接口/token 内嵌/文件权限任一自检失败即自动回滚。构建期 `umask 077`
+且 build artifact 置 `0600`，内嵌 token 的二进制安装为 `0750 root:<service-group>`，
+避免同机其他用户读取。
 
 控制台数据加载失败时会按原因显示可诊断文案：401/403 提示令牌缺失或失效，超时提示网络/服务
 响应过慢，网络错误与 5xx 分别提示；不再统一显示无法归因的“数据加载失败”。

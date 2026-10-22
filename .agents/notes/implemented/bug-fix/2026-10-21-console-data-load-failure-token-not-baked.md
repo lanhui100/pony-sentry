@@ -62,7 +62,7 @@ localStorage 干预。配套落地（本次提交内完成）：
 
 ## Consequences
 
-- 部署动作收敛为 `sudo bash deploy/scripts/deploy-console.sh`（幂等，可重复执行；
+- 部署动作收敛为 `bash deploy/scripts/deploy-console.sh`（幂等，可重复执行；
   token 轮换时重跑一次即整体更新）。
 - 浏览器端无需任何手工设置；旧 localStorage 值若有残留，仍优先被构建期
   `VITE_PONY_SENTRY_TOKEN` 覆盖（`App.vue:904` 优先取构建期值）。

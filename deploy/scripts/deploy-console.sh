@@ -13,6 +13,12 @@
 #   - 内嵌 token 的二进制只允许 root 和 service group 读取（默认 0750）；
 #   - 任一步失败即非零退出（set -Eeuo pipefail）。
 set -Eeuo pipefail
+umask 077
+
+if [ "$(id -u)" -eq 0 ]; then
+  echo "ERROR: 请以普通部署用户运行本脚本（脚本内部会按需 sudo），避免 root 拥有构建产物。" >&2
+  exit 1
+fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${PONY_SENTRY_ENV_FILE:-/etc/pony-sentry/pony-sentry.env}"
@@ -132,6 +138,7 @@ echo "==> 1/6 构建 web（烘焙 VITE_PONY_SENTRY_TOKEN）"
 echo "==> 2/6 编译 release 二进制（include_str! 内嵌产物）"
 ( cd "$REPO_DIR" && cargo build --release -p pony-sentry-server )
 test -f "$BIN_SRC" || { echo "ERROR: 二进制未产出 $BIN_SRC" >&2; exit 1; }
+chmod 0600 "$BIN_SRC"
 
 echo "==> 3/6 备份上一版本并安装（权限 $BIN_MODE root:$SERVICE_GROUP）"
 if $SUDO test -f "$BIN_DEST"; then

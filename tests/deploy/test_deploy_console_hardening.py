@@ -38,6 +38,12 @@ class TestDeployConsoleHardening(unittest.TestCase):
         self.assertIn('BIN_MODE="${PONY_SENTRY_BIN_MODE:-0750}"', self.text)
         self.assertIn('-m "$BIN_MODE" -o root -g "$SERVICE_GROUP"', self.text)
         self.assertIn("-perm /004", self.text)
+        self.assertIn("umask 077", self.text)
+        self.assertIn('chmod 0600 "$BIN_SRC"', self.text)
+
+    def test_script_must_run_as_non_root_build_user(self):
+        self.assertIn('if [ "$(id -u)" -eq 0 ]; then', self.text)
+        self.assertIn("请以普通部署用户运行本脚本", self.text)
 
     def test_all_authenticated_read_endpoints_are_smoke_checked(self):
         for path in ("/api/v1/issues?", "/api/v1/projects", "/api/v1/traces?limit=100"):
