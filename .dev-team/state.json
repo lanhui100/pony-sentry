@@ -199,6 +199,14 @@
       "doc": "docs/trace-contract.md",
       "adr": ".agents/notes/implemented/architecture/2026-10-23-trace-merge-v2-and-turn-store.md",
       "meta": ".dev-team/meta-retrospective-trace-fix.md"
+    },
+    "commit": "c420bfe feat(wave-7-trace-v2)",
+    "final_gates": {
+      "workspace": "183 passed / 0 failed (PG, SKIP=0)",
+      "clippy": "0",
+      "acceptance": "11 passed",
+      "web": "40/40 + build 0",
+      "adjudication": "PASS (0 OPEN / 0 PARTIAL)"
     }
   }
 }
