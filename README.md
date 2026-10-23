@@ -63,6 +63,12 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
 控制台数据加载失败时会按原因显示可诊断文案：会话失效提示重新登录，超时提示网络/服务
 响应过慢，网络错误与 5xx 分别提示；不再统一显示无法归因的“数据加载失败”。
 
+前端读超时由 `web/src/lib/apiTimeout.js` 的 `API_TIMEOUT_MS`（8000ms）唯一决定，**必须严格大于**
+服务端连接池 `acquire_timeout`（3000ms）再加 2000ms 余量：否则 DB 不可达时浏览器会先 abort，
+把服务端 3s 后返回的 500 误报成「请求超时」（2026-10-23 生产误判 12 小时的事故根因）。
+不变量的冻结契约与机器判据见 `.dev-team/contract-console-timeout.md`（R1–R8，`pnpm test` 中的
+`api-timeout-*.test.js` 守卫）；任一侧调值都必须重走契约冻结。
+
 备份（`deploy/systemd/pony-sentry-backup.{service,timer}` + `deploy/scripts/backup.sh`）：
 
 | 环境变量 | 默认 | 说明 |

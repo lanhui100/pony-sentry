@@ -1,75 +1,81 @@
 {
-  "wave": 5,
-  "branch": "wave-5-tailnet-trust",
+  "wave": 6,
+  "branch": "wave-6-console-timeout",
   "status": "completed",
-  "red_commit": "38f7ea6 test(wave-5-tailnet-trust): freeze red-phase acceptance tests (R-T1..R-T13)",
-  "protocol_commit": "53c2b94 chore(protocol): freeze wave-5 tailnet-trust interface stubs & NFR baseline",
-  "green_commit": "8004115 feat(wave-5-tailnet-trust) + 7b19fb2 fix(wave-5-tailnet-trust) 加固",
   "grading": {
     "level": "B",
-    "upgraded_to_c_gates": true,
-    "reason": "命中机械分级触发规则②外部网络/IO 调用与④鉴权契约变更；按 C 级门禁执行（NFR/L2-AT/L3-P）"
+    "upgraded_to_c_gates": false,
+    "reason": "跨层超时契约变更（浏览器侧超时 ↔ Rust 连接池 acquire_timeout）+ 故障归因语义；未触碰鉴权/数据迁移，未升级 C。仍执行 B 级门禁：契约冻结、独立 Test Agent、L2-AT 对抗用例、L3-P 五问、≥2 路 L3 审查"
   },
+  "protocol_commit": "270450c chore(protocol): freeze wave-6 console-timeout contract & NFR baseline (ver 2)",
+  "contract_amend": [
+    "3d00169 chore(protocol): amend wave-6 contract to ver 3（R8 漂移哨兵）",
+    "458a55b chore(protocol): amend wave-6 contract to ver 4（R1/R5/R8 判据对齐 L3-A 加固）"
+  ],
+  "red_commit": "de54e8b test(wave-6-console-timeout): freeze red-phase acceptance tests (R1-R7)",
+  "green_commit": "c1c942a feat + 93de327 fix(L3-P) + 981b669 test 加固(L3-A)",
+  "contract": ".dev-team/contract-console-timeout.md (FROZEN ver 4, R1-R8)",
+  "nfr_baseline": ".dev-team/nfr-baseline.json#console_api_timeout_ms",
   "tasks": {
-    "T1": "completed (protocol-agent; contract ver1→ver3, nfr-baseline)",
-    "T2": "completed (test-agent; 17 黑盒 + 11 判定层单测, 红相锚定)",
-    "T3": "completed (executor; trust/routes/main/lib + env/k3s/README)",
-    "T4": "completed (lead; ADR 004 + INDEX + .agents note + 部署脚本双门自检 + state)",
-    "T5": "completed (lead; 机器门禁 + L3A/L3B/L3P 三路审查与裁决)"
+    "T1": "completed (protocol-agent; 契约 ver1→ver4 + nfr console_api_timeout_ms)",
+    "T2": "completed (test-agent; 红相 23 用例锚定 de54e8b)",
+    "T3": "completed (executor; apiTimeout.js + App.vue import + main.rs 注释)",
+    "T4": "completed (lead; job_copilot 迁移记录爆炸半径 + ADR + README)",
+    "T5": "completed (test-agent; 37 用例加固 R1/R8/R5)",
+    "T6": "completed (lead; 门禁/审查裁决/部署/收口)"
   },
-  "contract": ".dev-team/contract-tailnet-trust.md (FROZEN ver 2)",
-  "nfr_baseline": ".dev-team/nfr-baseline.json#tailnet_trust",
   "circuit_breaker": {
     "functional_attempts": 1,
     "nfr_attempts": 1,
     "nfr_degraded": 0,
-    "notes": "L3-P FAIL(Q1a/Q1b/Q2a/Q4) 与 L3B FAIL(跨主体会话驱逐) 均在同一波次修复闭环，无 NFR-DEGRADED 欠账"
+    "notes": "L3-P FAIL(2) 与 L3-A FAIL(3) 均在同一波次内闭环；无 NFR-DEGRADED 欠账"
+  },
+  "artifacts": {
+    "contract": ".dev-team/contract-console-timeout.md (ver 4, 66 lines, R1-R8)",
+    "red_phase": ".dev-team/red-phase-console-timeout.txt",
+    "e2e": ".dev-team/e2e-console-timeout.txt (红相/绿相/混沌 A-B/变异矩阵)",
+    "reviews": [
+      ".dev-team/review-l3a-console-timeout.json",
+      ".dev-team/review-l3b-console-timeout.json",
+      ".dev-team/review-l3p-console-timeout.json"
+    ],
+    "adjudications": [
+      ".dev-team/review-l3a-adjudication-wave6.json",
+      ".dev-team/review-l3p-adjudication-wave6.json"
+    ],
+    "screenshots": [
+      "docs/release/wave-6-console-timeout/old-frontend-timeout.png",
+      "docs/release/wave-6-console-timeout/new-frontend-server-error.png"
+    ],
+    "nfr_report": "docs/release/wave-6-console-timeout/NFR-report.md",
+    "meta_retrospective": ".dev-team/meta-retrospective.md（wave-5 已归档 meta-retrospective-wave5.md）"
+  },
+  "gates": {
+    "web_tests": "cd web && node --test tests/*.test.js → 37/37 pass, exit 0",
+    "cargo_tests": "cargo test --workspace → exit 0",
+    "mutation_matrix": "apiTimeout 3000/20000、db.rs 2500/6000、from_millis(abc)、删两处来源、healthz 硬编码+死引用、auth/timeout 对调 → 全部非零退出",
+    "nfr_lint": "dev-nfr-lint exit 0",
+    "meta_lint": "dev-meta-lint exit 0"
+  },
+  "deploy": {
+    "target": "devserver (systemd pony-sentry, :3000)",
+    "script": "deploy/scripts/deploy-console.sh",
+    "result": "exit 0；healthz db:up / 匿名 401 / tailnet 双门 / 登录换 Cookie / CSRF 403 / 产物无 token 全通过",
+    "artifact_marker": "线上 index.html 含 8e3（8000ms），三读接口 200（2.5/20.7/3.3ms）"
   },
   "history": [
+    {
+      "wave": 5,
+      "branch": "wave-5-tailnet-trust",
+      "status": "completed",
+      "green_commit": "8004115 + 7b19fb2",
+      "tag": "wave-5"
+    },
     {
       "wave": 4,
       "branch": "wave-4-systemone-sentry-filter",
       "status": "completed",
       "green_commit": "pony-sentry 4d33df8 + 6fc0f46 + 055be29"
     }
-  ],
-  "tag": "wave-5",
-  "artifacts": {
-    "contract": ".dev-team/contract-tailnet-trust.md (ver 3, 20 rules)",
-    "red_phase": ".dev-team/red-phase-tailnet-trust.txt",
-    "l2at": ".dev-team/l2at-adversarial.txt",
-    "reviews": [
-      ".dev-team/review-l3a-tailnet-trust.json",
-      ".dev-team/review-l3b-tailnet-trust.json",
-      ".dev-team/review-l3p-tailnet-trust.json"
-    ],
-    "adjudications": [
-      ".dev-team/review-l3p-adjudication.json",
-      ".dev-team/review-l3b-adjudication.json"
-    ],
-    "gates": [
-      ".dev-team/gates-wave5.log",
-      ".dev-team/gates-wave5-final.log",
-      ".dev-team/gates-wave5-final2.log"
-    ],
-    "smoke": [
-      ".dev-team/smoke-tailnet-trust.txt",
-      ".dev-team/smoke-prod-tailnet-trust.txt"
-    ],
-    "screenshots": [
-      "docs/screenshots/2026-10-22-console-tailnet-trust-load.png",
-      "docs/screenshots/2026-10-22-console-tailnet-trust-patch.png"
-    ]
-  },
-  "deploy": {
-    "target": "devserver (systemd pony-sentry, 100.95.193.103:3000)",
-    "env_added": [
-      "CONSOLE_TAILNET_TRUST=1",
-      "CONSOLE_TRUSTED_HOSTS=devserver.taildb165c.ts.net,100.95.193.103",
-      "CONSOLE_TAILNET_CIDRS=100.64.0.0/10,fd7a:115c:a1e0::/48"
-    ],
-    "env_backup": "/etc/pony-sentry/pony-sentry.env.bak-20261022-204226",
-    "script": "deploy/scripts/deploy-console.sh (含信任双门自检)",
-    "verified": "loopback 401 / Host evil 401 / XFF 401 / tailnet-IP+白名单 Host 200 / auth session 自动签发 200 / 浏览器 E2E console error 0"
-  }
+  ]
 }

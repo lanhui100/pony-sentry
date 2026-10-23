@@ -1,0 +1,30 @@
+{
+  "adjudicator": "lead",
+  "wave": 6,
+  "review": ".dev-team/review-l3a-console-timeout.json",
+  "decisions": [
+    {
+      "finding": 1,
+      "status": "ACCEPTED_FIXED",
+      "resolution": "R1 判据改为结构判据：healthz 定时器实参必须是 API_TIMEOUT_MS、apiFetchJson 默认参数必须是 API_TIMEOUT_MS、禁止 `abort(), <数字>`、import 唯一、并检测死引用凑数。测试侧新增 inspectAppTimeoutWiring() 纯函数 + 合成反例单测。"
+    },
+    {
+      "finding": 2,
+      "status": "ACCEPTED_FIXED",
+      "resolution": "R8 改为逐站点校验：readAcquireSitesFromRepo() 输出含路径的站点清单，每站点必须 ===3000；失败文案含契约指定串。单点下调 2500 的变异实测 exit=1（2 fail）。"
+    },
+    {
+      "finding": 3,
+      "status": "ACCEPTED_FIXED",
+      "resolution": "R5 删除 git diff 判据，改为行为优先级矩阵 4 条（auth>timeout、auth>server、timeout>server、server>network）+ loadError.js 源码分支顺序判据 + 既有 load-error.test.js 真实回归。auth/timeout 分支对调变异实测 exit=1（4 fail）。"
+    }
+  ],
+  "contract": ".dev-team/contract-console-timeout.md (ver 4)",
+  "verdict_after_fix": "PASS",
+  "evidence": [
+    "cd web && node --test tests/*.test.js → 37/37 pass",
+    "变异：healthz 硬编码+死引用 ⇒ exit=1（1 fail）",
+    "变异：crates/core/src/db.rs→2500 ⇒ exit=1（2 fail）",
+    "变异：loadError.js auth/timeout 对调 ⇒ exit=1（4 fail）"
+  ]
+}

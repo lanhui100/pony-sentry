@@ -1,0 +1,25 @@
+{
+  "adjudicator": "lead",
+  "wave": 6,
+  "review": ".dev-team/review-l3p-console-timeout.json",
+  "decisions": [
+    {
+      "finding": 1,
+      "status": "ACCEPTED_FIXED",
+      "commit": "93de327",
+      "resolution": "web/dist/index.html 更新为 8000ms 产物并与源码同提交；deploy 脚本 EXIT trap 的还原目标随之变为新产物。复核收据：git show HEAD:web/dist/index.html 中 8e3 一处、3e3 零处；node --test 23/23 绿。"
+    },
+    {
+      "finding": 2,
+      "status": "ACCEPTED_FIXED",
+      "commit": "93de327",
+      "resolution": "契约注释下移到 acquire_timeout 之后，main.rs:152 锚点恢复；复核收据：grep -n acquire_timeout → main.rs:152、core/src/db.rs:9，与契约 Binds、apiTimeout.js 注释、nfr rationale 一致。"
+    }
+  ],
+  "verdict_after_fix": "PASS",
+  "evidence": [
+    "grep -n \"acquire_timeout\" crates/server/src/main.rs crates/core/src/db.rs",
+    "git show HEAD:web/dist/index.html | grep -c 8e3",
+    "cd web && node --test tests/*.test.js"
+  ]
+}

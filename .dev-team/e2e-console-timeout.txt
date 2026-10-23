@@ -1,0 +1,71 @@
+# wave-6 物理收据：控制台超时契约（R1–R8）
+
+时间：2026-10-23 10:30–10:37 CST · 契约 `.dev-team/contract-console-timeout.md` ver 3（FROZEN）
+
+## 1. 红相（实现前，commit de54e8b 锚定）
+
+```
+$ cd web && node --test tests/*.test.js
+exit=1
+1..23
+# tests 23
+# pass 19
+# fail 4        ← R2/R3、R7 闭包（apiTimeout.js 缺失 ERR_MODULE_NOT_FOUND）、R1 apiTimeout.js（ENOENT）、R1 App.vue（裸 3000 命中）
+# skipped 0
+```
+
+## 2. 绿相（commit c1c942a 后）
+
+```
+$ cd web && node --test tests/*.test.js
+# tests 23 / # pass 23 / # fail 0 / # skipped 0
+$ cargo test --workspace      → exit=0（全 workspace）
+$ npx vite build（隔离 outDir）→ exit=0，产物含 8e3 单处、无 3e3
+$ grep -nE '\b3000\b' web/src/App.vue → 零命中（rc=1）
+$ grep -c 'API_TIMEOUT_MS' web/src/App.vue → 3（import + apiFetchJson 默认值 + healthz 探活）
+```
+
+## 3. 浏览器 E2E：同一混沌源下的 A/B 归因对照（Browser E2E Gate）
+
+混沌源：`/tmp/wave6-chaos/chaos_server.py` —— 静态托管 web/dist，`/api/v1/*` 一律 **延迟 3.05s
+后返回 500**（`Database error: pool timed out while waiting for an open connection`），`/healthz`
+返回 `{"db":"up"}`，`/auth/session` 返回 200（免登录）。两端口仅切换前端产物，其余完全一致。
+
+| 端口 | 前端产物 | 实测横幅第二行 |
+| --- | --- | --- |
+| 5198 | 修复前（HEAD 提交的 dist，`API_TIMEOUT_MS=3000`） | **请求超时：服务响应过慢或网络不稳定，请稍后重试** |
+| 5199 | 修复后（`API_TIMEOUT_MS=8000`） | **服务端错误：PonySentry 返回 5xx，请查看服务日志** |
+
+- 两例 `agent-browser errors` 均为空（0 未捕获异常），截图存
+  `.dev-team/screenshots/wave-6/{old-frontend-timeout,new-frontend-server-error}.png`。
+- 结论：在服务端 3.003s 才回 500 的同一现场，旧前端把 500 误报成超时，新前端正确归因——
+  修复的正是事故中的误判路径，而非仅仅调大一个数字。
+
+## 4. 生产实例（deploy-console.sh，自检含 healthz/匿名拒绝/tailnet 双门/登录/CSRF）
+
+见 `/tmp/wave6-deploy.log`；部署后 `curl http://127.0.0.1:3000/healthz` 与三读接口 200 一并入档。
+
+## 5. 测试真实性：变异矩阵（HEAD 的独立 worktree /tmp/wave6-mut，逐项 sed 后跑 node --test）
+
+| 变异 | 退出码 | pass/fail | 判据 |
+| --- | --- | --- | --- |
+| 基线（未变异） | 0 | 23/0 | 全绿 |
+| apiTimeout 8000 → 3000 | 1 | 21/2 | R2 下界（余量 0） |
+| apiTimeout 8000 → 20000 | 1 | 21/2 | R3 上界 |
+| core/db.rs 3000 → 6000 | 1 | 19/4 | A=6000 → 8000 > 8000 为假，R2 严格下界 |
+| core/db.rs → from_millis(abc) | 1 | 7/4 | R4 fail-closed |
+| 删除两处 acquire_timeout | 1 | 7/4 | R4 fail-closed（零匹配非零退出） |
+
+结论：契约的每条数值判据都能被变异真实触发失败，不存在「改坏了仍全绿」的假放行。
+
+## 6. 加固后复跑（L3-A 三处穿透封堵，37 用例）
+
+| 变异 | 退出码 | pass/fail | 拦截点 |
+| --- | --- | --- | --- |
+| 基线（加固后 37 用例） | 0 | 37/0 | — |
+| F1：healthz 改裸 8000 + 插 `void API_TIMEOUT_MS` 凑数 | 1 | 36/1 | R1 结构判据 + 死引用检测 |
+| F2：`crates/core/src/db.rs` 3000 → 2500（A 仍 3000） | 1 | 35/2 | R8 逐站点哨兵 |
+| F3：`loadError.js` auth/timeout 分支对调 | 1 | 33/4 | R5 行为优先级 + 源码顺序 |
+| apiTimeout 8000 → 3000 | 1 | 35/2 | R2 下界 |
+
+变异在 `/tmp/wave6-mut`（HEAD worktree）内执行，每次 `git checkout --` 还原。

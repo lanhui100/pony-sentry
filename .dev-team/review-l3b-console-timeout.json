@@ -1,0 +1,19 @@
+{
+  "reviewer": "L3-B (contract coverage completeness / test authenticity / implementation equivalence)",
+  "wave": 6,
+  "branch": "wave-6-console-timeout",
+  "scope": ["c1c942a", "93de327", "de54e8b", "tests@23-case baseline"],
+  "verdict": "PASS",
+  "findings": [],
+  "verified": [
+    "三处锚点自洽：HEAD:web/dist 含 8e3（唯一改动 3e3→8e3）、main.rs:152、db.rs:9",
+    "变异 M1 3000 / M2 20000 / M3 db 6000 / M4 from_millis(abc) / M5 删源 / M6 main 4000 均非零退出（M6 仅 R8 捕获）",
+    "23 用例逐条有实质断言，helpers 6 导出全被消费，无 skip，import 失败走 assert.fail",
+    "App.vue 实现 -2/+1 仅常量 → import；API_TIMEOUT_MS 三处用途覆盖全部 API 读路径，无第二超时源",
+    "R8 与 R2 不互斥（分别约束服务端 A 与前端常量）"
+  ],
+  "non_blocking_observations": [
+    "R6 的机器子判据（apiTimeout.js 无 retry/backoff/sleep、crates diff +1 行）无测试落点——契约已标「语义最小性靠 review」",
+    "R1 行号锚点 :1041/:1234 实现后为 :1040/:1233（非机器判据，计数判据不受影响）→ 已并入契约 ver 4 修订"
+  ]
+}

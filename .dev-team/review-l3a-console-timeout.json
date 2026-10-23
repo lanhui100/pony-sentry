@@ -1,0 +1,37 @@
+{
+  "reviewer": "L3-A (contract coverage / test authenticity / equivalence)",
+  "wave": 6,
+  "branch": "wave-6-console-timeout",
+  "scope": ["c1c942a", "93de327", "de54e8b"],
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "web/tests/api-timeout-contract.test.js",
+      "line": 158,
+      "rule": "R1 单一来源：healthz 必须复用 API_TIMEOUT_MS；判据只数 /API_TIMEOUT_MS/ 出现 3 次，第三处可由任意死引用补位",
+      "counterexample": "sed 把 healthz 改成 abort(), 8000，并插入 void API_TIMEOUT_MS → node --test 23/23 全绿"
+    },
+    {
+      "file": "web/tests/api-timeout-adversarial.test.js",
+      "line": 44,
+      "rule": "R8 漂移哨兵：只断言 max(A)===3000，未校验每个 acquire_timeout 站点；单点下调不被拦截，且失败文案缺契约指定串",
+      "counterexample": "db.rs 3000→2500 后 A=max(3000,2500)=3000 → 23/23 全绿；db.rs→6000 时 stderr 无「acquire_timeout 漂移」串"
+    },
+    {
+      "file": "web/tests/api-timeout-contract.test.js",
+      "line": 189,
+      "rule": "R5 既有测试语义冻结：git diff --quiet HEAD 在已提交工作区恒空，不能证明 load-error.test.js 未被削弱；新用例未覆盖 auth > timeout",
+      "counterexample": "对调 loadError.js 的 auth/timeout 分支并删除 legacy 测试中的 auth 优先断言后提交 → 23/23 全绿，而 loadFailureDetail({traces:'timeout',projects:'auth'}) 实际已返回「请求超时」"
+    }
+  ],
+  "supplementary": [
+    "必查变异已实测：apiTimeout→16000 / →3000 / db.rs→6000 三者均 EXIT=1，测试对这三个指定变异有效",
+    "c1c942a 未同步 dist 的问题已在 93de327 修复；deploy-console.sh 先 build web 再 build 二进制，部署路径不受影响",
+    "web/tests 自 de54e8b 未变；修测试需新冻结"
+  ],
+  "objective_evidence_used": [
+    "git worktree /tmp/wave6-mut (HEAD 93de327)",
+    "web/tests/api-timeout-*.test.js 运行结果",
+    ".dev-team/e2e-console-timeout.txt"
+  ]
+}

@@ -68,9 +68,9 @@ Issues 6/3/3/18 计数正常、Traces 列表正常，页面无 `load-error` 横�
 - 备份不受影响：`PG_DUMP_MODE=cluster` 走 `kubectl exec` 在 Pod 内 `pg_dump`，不经过该 DSN
   （10-23 03:33 备份仍成功，530786 bytes）。
 - 故障窗口内 11 次 ingest 落库失败，客户端已收到 500，数据不可回补；控制台只展示已落库数据。
-- 遗留改进（靠 review + 后续 ADR）：前端 3000ms 超时应大于服务端 3s acquire_timeout，
-  否则任何 DB 侧 500 都会被伪装成「网络不稳定」；`job_copilot` 的迁移记录也应把本宿主机
-  消费方写入爆炸半径清单。
+- 遗留改进（已闭环）：前端超时与服务端池等待的跨层不变量见
+  `implemented/bug-fix/2026-10-23-console-api-timeout-contract.md`（API_TIMEOUT_MS=8000，
+  契约 R1–R8 + 混沌 A/B 收据）；`job_copilot` 的迁移记录已补「消费方清单（爆炸半径）」。
 - 相关记录：`implemented/architecture/2026-10-08-refactor-to-host-systemd-service.md`
   （宿主机 systemd 部署口径，其 DB 访问路径已链入本条）、
   `implemented/bug-fix/2026-10-22-console-load-error-diagnostics.md`（本次把 500 误报成超时

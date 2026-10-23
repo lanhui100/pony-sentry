@@ -1,0 +1,27 @@
+{
+  "reviewer": "L3-P (production readiness, five-question veto)",
+  "wave": 6,
+  "branch": "wave-6-console-timeout",
+  "scope": ["c1c942a", "3d00169", "de54e8b"],
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "file": "web/dist/index.html",
+      "line": 19,
+      "rule": "R1 单一来源 / Q5 配置与自检：仓库跟踪的内嵌产物必须与 apiTimeout.js 同源（同提交更新产物是历史惯例，34e976a 同时改 App.vue 与 web/dist；ADR 亦声称本提交同步更新 dist）",
+      "counterexample": "git show --stat c1c942a 仅 3 文件，无 web/dist；git show HEAD:web/dist/index.html 中 8e3 零命中、3e3 一处；crates/server/src/routes.rs:458 以 include_str! 内嵌该产物，deploy-console.sh:68-73 部署后把 dist 还原为 committed 版本。干净 checkout 不先 pnpm build 直接 cargo build 会内嵌 3000ms 旧前端；curl :3000 实测 8e3 仅来自部署时临时构建"
+    },
+    {
+      "file": "crates/server/src/main.rs",
+      "line": 152,
+      "rule": "契约 Binds crates/server/src/main.rs:152（Q1 基准字段的行证据锚点）",
+      "counterexample": "插入注释后 grep -n acquire_timeout 实为 153；契约 Binds、apiTimeout.js:3、nfr-baseline rationale 均指 main.rs:152，按契约行号读不到 from_millis(3000)"
+    }
+  ],
+  "objective_evidence_used": [
+    ".dev-team/red-phase-console-timeout.txt",
+    ".dev-team/e2e-console-timeout.txt",
+    "web/tests/api-timeout-*.test.js 运行结果",
+    "/tmp/wave6-deploy.log"
+  ]
+}
