@@ -208,5 +208,45 @@
       "web": "40/40 + build 0",
       "adjudication": "PASS (0 OPEN / 0 PARTIAL)"
     }
+  },
+  "wave8_trace_ext": {
+    "date": "2026-10-23",
+    "status": "completed",
+    "commit": "05c465b feat(wave-8-trace-v2-ext)",
+    "producer_commit": "job_copilot 874dc9e95 feat(pony-sentry-trace): llm_calls/input_summary/采样元数据",
+    "closed": [
+      "M-04",
+      "W-05",
+      "I-01",
+      "I-02",
+      "I-07",
+      "W-04",
+      "I-04",
+      "I-06",
+      "I-09",
+      "M-03",
+      "M-02",
+      "M-05",
+      "M-06"
+    ],
+    "gates": {
+      "workspace": "206 passed / 0 failed (PG, SKIP=0)",
+      "clippy": "0",
+      "acceptance": "11 + 10 passed",
+      "web": "40/40 + build 0",
+      "producer": "96 passed pytest"
+    },
+    "production_migration": {
+      "applied": true,
+      "traces": 38,
+      "trace_turns": 59,
+      "mismatch": 0,
+      "backup": "/home/dm/backups/ponysentry-trace-migration-20261023/traces-before-0005.csv"
+    },
+    "artifacts": {
+      "runbook": "docs/release/trace-audit-cards-2026-10-23/migration-runbook.md",
+      "meta": ".dev-team/meta-retrospective-trace-ext.md",
+      "script": "scripts/test-all.sh"
+    }
   }
 }
