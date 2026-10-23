@@ -681,7 +681,7 @@
                 </div>
                 <div class="flex items-center gap-4 text-[11px] text-stone-400 font-mono">
                   <span>Turns: <strong class="text-stone-300 font-medium">{{ getTraceTurns(trace).length || trace.turns_count || 0 }}</strong></span>
-                  <span>Tokens: <strong class="text-stone-300 font-medium">{{ (trace.total_input_tokens || 0) + (trace.total_output_tokens || 0) }}</strong></span>
+                  <span>Tokens: <strong class="text-stone-300 font-medium">{{ formatTokens((trace.total_input_tokens || 0) + (trace.total_output_tokens || 0)) }}</strong></span>
                   <span>耗时: <strong class="text-stone-300 font-medium">{{ formatDuration(trace.total_duration_ms) }}</strong></span>
                 </div>
               </div>
@@ -791,9 +791,9 @@
                     <span class="text-stone-500">seq {{ turnSeqLabel(turn) }} · {{ turnNodeLabel(turn) }} · {{ formatDuration(turn.duration_ms) }}</span>
                   </div>
                   <div v-if="turn.input_tokens || turn.output_tokens || turn.cache_hit_tokens" class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
-                    <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
-                    <span v-if="turn.output_tokens">输出: {{ turn.output_tokens }}</span>
-                    <span v-if="turn.cache_hit_tokens">缓存: {{ turn.cache_hit_tokens }}</span>
+                    <span v-if="turn.input_tokens">输入: {{ formatTokens(turn.input_tokens) }}</span>
+                    <span v-if="turn.output_tokens">输出: {{ formatTokens(turn.output_tokens) }}</span>
+                    <span v-if="turn.cache_hit_tokens">缓存: {{ formatTokens(turn.cache_hit_tokens) }}</span>
                   </div>
 
                   <!-- 失败原因（C8）：仅当服务端标注了 diagnostics 时渲染；字段缺失一律降级不抛错 -->
@@ -950,6 +950,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { motion, AnimatePresence } from 'motion-v'
 import { RefreshCw, Search, X, Copy, AlertTriangle, ChevronRight } from '@lucide/vue'
 
+import { formatTokens, formatDuration } from '@/lib/format.js'
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Card from '@/components/ui/Card.vue'
@@ -1388,13 +1389,6 @@ const getTurnTextBlocks = (turn) => {
   return blocks
 }
 
-// 耗时展示：>=1s 用秒并保留 1 位小数；<1s 回退毫秒（整数）；非法/缺失回落 '0ms'
-const formatDuration = (ms) => {
-  const num = Number(ms)
-  if (!Number.isFinite(num) || num < 0) return '0ms'
-  if (num < 1000) return `${Math.round(num)}ms`
-  return `${(num / 1000).toFixed(1)}s`
-}
 
 // ---- span 展示辅助：interrupt / tool_calls 兼容历史存量结构，任何字段缺失都不抛错 ----
 
