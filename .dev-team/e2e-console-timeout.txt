@@ -43,7 +43,7 @@ $ grep -c 'API_TIMEOUT_MS' web/src/App.vue → 3（import + apiFetchJson 默认�
 
 ## 4. 生产实例（deploy-console.sh，自检含 healthz/匿名拒绝/tailnet 双门/登录/CSRF）
 
-见 `/tmp/wave6-deploy.log`；部署后 `curl http://127.0.0.1:3000/healthz` 与三读接口 200 一并入档。
+见 `.dev-team/deploy-wave6.log`；部署后 `curl http://127.0.0.1:3000/healthz` 与三读接口 200 一并入档。
 
 ## 5. 测试真实性：变异矩阵（HEAD 的独立 worktree /tmp/wave6-mut，逐项 sed 后跑 node --test）
 

@@ -1,0 +1,29 @@
+==> 1/6 构建 web（不注入任何令牌）
+
+> pony-sentry-web@0.1.0 build /home/dm/pony-sentry/web
+> vite build
+
+vite v8.3.3 building client environment for production...
+transforming...
+✓ 2286 modules transformed.
+rendering chunks...
+[plugin vite:singlefile] 
+
+[plugin vite:singlefile] Inlining: index-DHriSnj0.js
+[plugin vite:singlefile] Inlining: style-BeL3qkRQ.css
+computing gzip size...
+dist/index.html  348.86 kB │ gzip: 104.65 kB
+
+✓ built in 1.38s
+==> 2/6 编译 release 二进制（include_str! 内嵌产物）
+   Compiling pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `release` profile [optimized] target(s) in 26.03s
+==> 3/6 备份上一版本并安装（权限 0750 root:dm）
+==> 4/6 自检：健康、匿名拒绝、短期会话登录、Cookie 读接口与 CSRF、产物无 token
+curl: (7) Failed to connect to 127.0.0.1 port 3000 after 0 ms: Couldn't connect to server
+healthz: {"db":"up","status":"ok"}
+tailnet trust: 双门自检通过（loopback+伪造 Host → 401 / 100.95.193.103+白名单 Host 匿名读 → 200）
+==> 5/6 部署自检通过
+==> 6/6 还原工作区 web/dist 为 committed 版本
+部署完成：控制台使用服务端短期会话（HttpOnly Cookie + CSRF），静态 ADMIN_TOKEN 不进入产物，失败可自动回滚。
+deploy_exit=0
