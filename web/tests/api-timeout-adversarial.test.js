@@ -10,12 +10,20 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 import {
+  ACQUIRE_BASELINE_MS,
+  ACQUIRE_DRIFT_MESSAGE,
   CONTRACT_MAX_MS,
   CONTRACT_MIN_MARGIN_MS,
+  TIMER_FN,
+  acquireDriftViolations,
+  collectAcquireSites,
   inspectAcquireTimeouts,
+  inspectAppTimeoutWiring,
+  inspectLoadFailurePriority,
   isConsoleTimeoutWithinContract,
   listRustSourceFiles,
   parseAcquireTimeoutMax,
+  readAcquireSitesFromRepo,
   readAcquireTimeoutMaxFromRepo,
 } from './_api-timeout-helpers.mjs'
 
@@ -204,4 +212,222 @@ test('R7 边界闭包：真实 API_TIMEOUT_MS 落在 (A+2000, 15000] 内', async
   // Assert（三）：真实常量必须是实际可读的源文件，不是运行时拼接的假值
   const source = readFileSync(join(WEB_ROOT, 'src', 'lib', 'apiTimeout.js'), 'utf8')
   assert.match(source, /export const API_TIMEOUT_MS\b/)
+})
+
+// ---------------------------------------------------------------------------
+// F1 对抗：R1 接线形态（合成字符串正反例，不 mutate 真实源码）
+// ---------------------------------------------------------------------------
+
+/** 合成一段 App.vue 形态的文本。 */
+function syntheticAppVue({
+  healthzArg = 'API_TIMEOUT_MS',
+  defaultParam = 'API_TIMEOUT_MS',
+  extraRefs = [],
+  importLine = "import { API_TIMEOUT_MS } from '@/lib/apiTimeout'",
+} = {}) {
+  return [
+    "import { ref } from 'vue'",
+    importLine,
+    '',
+    'async function apiFetchJson(url, options = {}) {',
+    `  const { timeoutMs = ${defaultParam}, refreshScope = false } = options`,
+    '  return url',
+    '}',
+    '',
+    'function startHealthCheck() {',
+    `  const timeoutId = ${TIMER_FN}(() => healthController.abort(), ${healthzArg})`,
+    '  return timeoutId',
+    '}',
+    ...extraRefs.map((ref) => `void ${ref}`),
+  ].join('\n')
+}
+
+test('F1 正例：合规 App.vue 形态 → 零违规（判据不误伤正确实现）', () => {
+  // Arrange
+  const source = syntheticAppVue()
+
+  // Act
+  const wiring = inspectAppTimeoutWiring(source)
+
+  // Assert
+  assert.deepEqual(wiring.violations, [], `合规写法被判负：\n- ${wiring.violations.join('\n- ')}`)
+  assert.equal(wiring.healthzTimerCount, 1)
+  assert.equal(wiring.defaultParamCount, 1)
+  assert.equal(wiring.importCount, 1)
+  assert.deepEqual(wiring.unexpected, [])
+})
+
+test('F1 反例（死引用凑数）：healthz 写死 8000 + 插入 void API_TIMEOUT_MS → 必须判负', () => {
+  // Arrange：出现次数仍为 3（import + 默认参数 + void），旧判据会全绿
+  const source = syntheticAppVue({ healthzArg: '8000', extraRefs: ['API_TIMEOUT_MS'] })
+  const referenceCount = (source.match(/API_TIMEOUT_MS/g) || []).length
+
+  // Act
+  const wiring = inspectAppTimeoutWiring(source)
+
+  // Assert
+  assert.equal(referenceCount, 3, '反例必须先满足「出现 3 次」以证明旧判据失效')
+  assert.notDeepEqual(wiring.violations, [], '死引用凑数必须被检出')
+  assert.equal(wiring.healthzTimerCount, 0, 'healthz 未复用常量必须计数为 0')
+  assert.equal(wiring.numericAbortCount, 1, 'abort(), <数字> 必须被计数')
+  assert.equal(wiring.healthzNumericAbortCount, 1, 'healthController.abort(), <数字> 必须被计数')
+  assert.equal(wiring.unexpected.length, 1, '合法三处用途之外的引用必须被列出')
+  assert.match(wiring.violations.join('\n'), /healthz 探活必须恰 1 处/)
+  assert.match(wiring.violations.join('\n'), /疑似死引用凑数/)
+})
+
+test('F1 反例（第二来源 / 默认参数写死）：import 重复或 timeoutMs 写死数字 → 必须判负', () => {
+  // Arrange
+  const duplicatedImport = syntheticAppVue({
+    importLine: [
+      "import { API_TIMEOUT_MS } from '@/lib/apiTimeout'",
+      "import { API_TIMEOUT_MS as ALT } from '@/lib/apiTimeout'",
+    ].join('\n'),
+  })
+  const hardcodedDefault = syntheticAppVue({ defaultParam: '8000' })
+  const relativeImport = syntheticAppVue({ importLine: "import { API_TIMEOUT_MS } from './lib/apiTimeout.js'" })
+
+  // Act
+  const dup = inspectAppTimeoutWiring(duplicatedImport)
+  const hardcoded = inspectAppTimeoutWiring(hardcodedDefault)
+  const relative = inspectAppTimeoutWiring(relativeImport)
+
+  // Assert
+  assert.notDeepEqual(dup.violations, [], '重复 import 必须判负')
+  assert.match(dup.violations.join('\n'), /import 来源必须唯一/)
+  assert.notDeepEqual(hardcoded.violations, [], '默认参数写死数字必须判负')
+  assert.match(hardcoded.violations.join('\n'), /默认参数必须恰 1 处/)
+  assert.notDeepEqual(relative.violations, [], "非 '@/lib/apiTimeout' 的 import 必须判负")
+  assert.match(relative.violations.join('\n'), /@\/lib\/apiTimeout/)
+})
+
+// ---------------------------------------------------------------------------
+// F2 对抗：R8 站点级漂移（合成站点正反例）
+// ---------------------------------------------------------------------------
+
+test('F2 正例：两站点均 3000 → 零漂移', () => {
+  // Arrange
+  const sources = [
+    { file: 'crates/server/src/main.rs', text: callBody('3000') },
+    { file: 'crates/core/src/db.rs', text: callBody('3000') },
+  ]
+
+  // Act
+  const collected = collectAcquireSites(sources)
+  const drift = acquireDriftViolations(collected.sites, ACQUIRE_BASELINE_MS)
+
+  // Assert
+  assert.equal(collected.sites.length, 2)
+  assert.equal(collected.max, 3000)
+  assert.deepEqual(drift, [])
+})
+
+test('F2 反例（单点下调 2500）：max 仍为 3000，但站点级漂移必须判负并带文件路径', () => {
+  // Arrange
+  const sources = [
+    { file: 'crates/server/src/main.rs', text: callBody('3000') },
+    { file: 'crates/core/src/db.rs', text: callBody('2500') },
+  ]
+
+  // Act
+  const collected = collectAcquireSites(sources)
+  const drift = acquireDriftViolations(collected.sites, ACQUIRE_BASELINE_MS)
+
+  // Assert：先证明旧的 max 判据会全绿
+  assert.equal(collected.max, 3000, '单点下调后 max 仍为 3000 —— 旧判据在此处失效')
+  assert.match(ACQUIRE_DRIFT_MESSAGE, /acquire_timeout 漂移：须重走契约冻结并复核 API_TIMEOUT_MS/)
+  assert.deepEqual(drift, [{ file: 'crates/core/src/db.rs', value: 2500 }], '必须精确指出漂移站点')
+})
+
+test('F2 反例（单点上调 4000）：max 变为 4000，站点级漂移同样判负', () => {
+  // Arrange
+  const sources = [
+    { file: 'crates/server/src/main.rs', text: callBody('4000') },
+    { file: 'crates/core/src/db.rs', text: callBody('3000') },
+  ]
+
+  // Act
+  const collected = collectAcquireSites(sources)
+  const drift = acquireDriftViolations(collected.sites, ACQUIRE_BASELINE_MS)
+
+  // Assert
+  assert.equal(collected.max, 4000)
+  assert.deepEqual(drift, [{ file: 'crates/server/src/main.rs', value: 4000 }])
+})
+
+test('F2 真实仓库站点清单：逐站点核对并输出清单（当前 2 站点均 3000）', () => {
+  // Arrange
+  const repo = readAcquireSitesFromRepo(CRATES_DIR)
+
+  // Act
+  const siteList = repo.sites.map((site) => `${site.file.replace(`${REPO_ROOT}/`, '')}=${site.value}`)
+
+  // Assert
+  assert.equal(repo.sites.length, 2, `站点数应为 2，实测 ${repo.sites.length}：${siteList.join(', ')}`)
+  for (const site of repo.sites) {
+    assert.equal(
+      site.value,
+      ACQUIRE_BASELINE_MS,
+      `${ACQUIRE_DRIFT_MESSAGE}（站点 ${site.file} 实测 ${site.value}；清单：${siteList.join(', ')}）`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------
+// F3 对抗：R5 分支优先级（合成字符串对调正反例）
+// ---------------------------------------------------------------------------
+
+/** 合成一段 loadError.js 形态的文本，branches 决定分支顺序。 */
+function syntheticLoadError(branches) {
+  const body = branches.map((kind) => `  if (kinds.has('${kind}')) {\n    return '${kind}'\n  }`)
+  return ['export function loadFailureDetail(failures) {', '  const kinds = new Set(Object.values(failures || {}))', ...body, "  return ''", '}', ''].join('\n')
+}
+
+test('F3 正例：auth > timeout > server > network → 零违规', () => {
+  // Arrange
+  const source = syntheticLoadError(['auth', 'timeout', 'server', 'network'])
+
+  // Act
+  const priority = inspectLoadFailurePriority(source)
+
+  // Assert
+  assert.deepEqual(priority.violations, [])
+  assert.deepEqual(priority.order, ['auth', 'timeout', 'server', 'network'])
+})
+
+test('F3 反例（auth/timeout 对调）：行为矩阵不变但源码顺序违规，必须判负', () => {
+  // Arrange
+  const source = syntheticLoadError(['timeout', 'auth', 'server', 'network'])
+
+  // Act
+  const priority = inspectLoadFailurePriority(source)
+
+  // Assert
+  assert.deepEqual(priority.order, ['timeout', 'auth', 'server', 'network'])
+  assert.notDeepEqual(priority.violations, [], '分支对调必须被顺序判据抓到')
+  assert.match(priority.violations.join('\n'), /第 1 位应为 auth/)
+})
+
+test('F3 反例（server 提到 timeout 之前）：必须判负', () => {
+  // Arrange
+  const source = syntheticLoadError(['auth', 'server', 'timeout', 'network'])
+
+  // Act
+  const priority = inspectLoadFailurePriority(source)
+
+  // Assert
+  assert.notDeepEqual(priority.violations, [])
+  assert.match(priority.violations.join('\n'), /第 2 位应为 timeout/)
+})
+
+test('F3 真实源码：loadError.js 分支顺序符合契约', () => {
+  // Arrange
+  const source = readFileSync(join(WEB_ROOT, 'src', 'lib', 'loadError.js'), 'utf8')
+
+  // Act
+  const priority = inspectLoadFailurePriority(source)
+
+  // Assert
+  assert.deepEqual(priority.violations, [], priority.violations.join('\n'))
+  assert.deepEqual(priority.order, ['auth', 'timeout', 'server', 'network'])
 })
