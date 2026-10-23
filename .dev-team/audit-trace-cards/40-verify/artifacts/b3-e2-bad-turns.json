@@ -1,0 +1,4 @@
+{"session_id":"audit-probe-verify-9691a9-e2","project":"audit_probe","run_id":"run_9691a9_e2",
+ "turns":[{"turn_id":"turn_9691a9_e2_1","status":12345,"tool_calls":"NOT_AN_ARRAY","input_tokens":"NOT_A_NUMBER","duration_ms":-1},"BARE_STRING_TURN",{},
+          {"turn_id":"turn_9691a9_e2_1","status":"failed","dup":true}],
+ "total_input_tokens":-5}

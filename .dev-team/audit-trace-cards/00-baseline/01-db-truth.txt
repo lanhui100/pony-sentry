@@ -1,0 +1,32 @@
+# baseline receipts — 采集于 2026-10-23T19:45:14+08:00 (Lead)
+## 1. 目标 trace 行（DB 真值，去除 payload 正文）
+                  id                  |               session_id               |                run_id                |                turn_id                | environment | release | eval_status |   project   | total_input_tokens | total_output_tokens | total_duration_ms |        reported_at         |          created_at           |          updated_at           | payload_bytes 
+--------------------------------------+----------------------------------------+--------------------------------------+---------------------------------------+-------------+---------+-------------+-------------+--------------------+---------------------+-------------------+----------------------------+-------------------------------+-------------------------------+---------------
+ ca0b5494-ae1b-47db-8e00-c9e7abbb6779 | thread_ref_v1_e9b4ec395c96d8913c106ef8 | run_83c1879e338d442f953a5dd4b8d1646a | turn_5dd7639f928549dfb86d96cbe6cbf33a | development | dev     | unreviewed  | job_copilot |              36612 |                1368 |            120272 | 2026-10-23 11:29:20.002+00 | 2026-10-23 11:29:20.029042+00 | 2026-10-23 11:29:20.029042+00 |          3405
+(1 row)
+
+
+## 2. 该线程/run 的唯一性
+ same_thread | same_run 
+-------------+----------
+           1 |        1
+(1 row)
+
+
+## 3. 全库 trace 形态（最近 12 条）
+               session_id               | turns |       statuses        | tools | tool_err |         thread_id         
+----------------------------------------+-------+-----------------------+-------+----------+---------------------------
+ thread_ref_v1_e9b4ec395c96d8913c106ef8 |     1 | failed                |     3 |        1 | 
+ thread_ref_v1_3099666e0ae5af09bc77805c |     1 | succeeded             |    23 |        0 | 
+ thread_ref_v1_1b3278709e69bc54e28fa857 |     1 | succeeded             |    18 |        0 | 
+ thread_ref_v1_708607d3a018db3f863a3a38 |     1 | interrupted           |     1 |        0 | 
+ thread_ref_v1_6e6b196787514ebefbb4866f |     1 | succeeded             |     9 |        0 | 
+ thread_ref_v1_0b1fffb2e667c841c39fc628 |     2 | interrupted,succeeded |    25 |        0 | 
+ thread_ref_v1_de18c13263bc4572784f349d |     1 | succeeded             |     0 |        0 | 
+ thread_ref_v1_18353b2286008f9b132cb0c0 |     1 | succeeded             |     0 |        0 | 
+ thread_ref_v1_f7b2796f292328f0ab115ce3 |     1 | succeeded             |     0 |        0 | 
+ thread_ref_v1_b63211713fbc8f3651cabf64 |     1 | succeeded             |     0 |        0 | 
+ thread_ref_v1_a14ab07e2ae8f28e8042b2f7 |     1 | interrupted           |     0 |        0 | 
+ thread_trace_probe_rate_9              |     1 | completed             |     0 |        0 | thread_trace_probe_rate_9
+(12 rows)
+

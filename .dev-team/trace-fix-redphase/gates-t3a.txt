@@ -1,0 +1,81 @@
+T3a 核心纯函数层门禁收据（executor-core / task-10）
+================================================================================
+写域：crates/core/src/trace_v2.rs、crates/core/src/models.rs
+Lead 裁决 (a) 编译衍生占位：crates/core/src/{sqlite,pg}_repository.rs 行映射补 3 字段、
+crates/core/tests/{trace,pg}_repository_test.rs 结构体字面量补字段（未改 SQL/迁移/合并语义/断言）
+时间：2026-10-23 (Asia/Shanghai)
+
+## Gate 1 · cargo test -p pony-sentry-core --offline
+$ cargo test -p pony-sentry-core --offline
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_core-be4868cb81895446)
+running 34 tests
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests/pg_repository_test.rs (target/debug/deps/pg_repository_test-850a82a48573b81b)
+running 4 tests
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/storage_test.rs (target/debug/deps/storage_test-386329874639dc2c)
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests/trace_repository_test.rs (target/debug/deps/trace_repository_test-46a09519f4dfc83e)
+running 8 tests
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+   Doc-tests pony_sentry_core
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core --all-targets -- -D warnings
+$ cargo clippy -p pony-sentry-core --all-targets -- -D warnings
+    Checking pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.46s
+CLIPPY_EXIT=0
+
+## 新增单测清单（trace_v2 19 条 + models 3 条 = 22）
+test models::tests::trace_filter_new_dimensions_default_to_none
+test models::tests::trace_record_serde_defaults_keep_legacy_rows_decodable
+test models::tests::trace_record_serializes_new_columns
+test trace_v2::tests::c2_1_late_terminal_status_advances_between_terminal_states
+test trace_v2::tests::c2_1_non_terminal_report_never_regresses_terminal_status
+test trace_v2::tests::c2_2_field_level_merge_skips_null_and_empty_values
+test trace_v2::tests::c2_1_terminal_status_overrides_and_keeps_late_error
+test trace_v2::tests::c2_3_empty_or_missing_tool_calls_keep_existing
+test trace_v2::tests::c2_3_tool_calls_merge_by_id_and_append_new_ids
+test trace_v2::tests::c2_4_diagnostics_union_survives_merge
+test trace_v2::tests::c2_aggregate_sorts_turns_by_seq_and_passes_session_id_source
+test trace_v2::tests::c2_2_step_deeper_json_object_is_deep_merged
+test trace_v2::tests::c2_aggregate_totals_are_null_without_any_turn_field
+test trace_v2::tests::c4_error_contract_missing_for_terminal_status_without_error_details
+test trace_v2::tests::c2_top_level_extra_and_tags_deep_merge_and_eval_status_removed
+test trace_v2::tests::c4_error_contract_not_raised_when_error_or_tool_error_reported
+test trace_v2::tests::c4_error_missing_when_tool_call_error_has_no_details
+test trace_v2::tests::terminal_set_matches_contract_and_ignores_case
+test trace_v2::tests::c4_status_conflict_when_success_output_hits_failure_marker
+test trace_v2::tests::c2_5_missing_status_never_erases_known_status
+test trace_v2::tests::merge_top_level_keeps_old_only_scalars_and_strips_eval_status
+test trace_v2::tests::c2_aggregate_sums_turns_and_ignores_client_totals
+
+## 变更面
+$ git status --porcelain -- crates/core/src/trace_v2.rs crates/core/src/models.rs crates/core/src/pg_repository.rs crates/core/src/sqlite_repository.rs crates/core/tests
+ M crates/core/src/models.rs
+ M crates/core/src/pg_repository.rs
+ M crates/core/src/sqlite_repository.rs
+ M crates/core/tests/pg_repository_test.rs
+ M crates/core/tests/trace_repository_test.rs
+?? crates/core/src/trace_v2.rs
+$ git diff --stat -- crates/core
+ crates/core/src/lib.rs                     |  1 +
+ crates/core/src/models.rs                  | 73 ++++++++++++++++++++++++++++++
+ crates/core/src/pg_repository.rs           |  4 ++
+ crates/core/src/sqlite_repository.rs       |  4 ++
+ crates/core/tests/pg_repository_test.rs    |  6 +++
+ crates/core/tests/trace_repository_test.rs | 46 +++++++++++++++++++
+ 6 files changed, 134 insertions(+)
+
+## 契约歧义 / 跨任务前置
+1. terminal 集合：契约 C2.1 列 9 个值（completed/succeeded/failed/error/cancelled/interrupted/
+   timed_out/max_tokens/aborted），任务卡写「8 值」；本实现按契约 9 值（唯一口径）。
+2. aggregate_session(turns, incoming_top) 签名不含「旧顶层」，C2 的 extra/tags 深合并无法在函数内
+   完成；新增 `pub fn merge_top_level(old,incoming)`，调用序
+   `aggregate_session(&turns, &merge_top_level(&old_payload, &incoming))`（Lead 已 amend v1.3 并转达 task-7）。
+3. crates/server/src/routes.rs 尚有 2 处结构体字面量缺新字段（TraceRecord:1220 / TraceFilter:1265），
+   属 task-9 写域、本任务未触碰；task-9 完成前 `cargo check --workspace` 不绿，验收测试亦需其接线。

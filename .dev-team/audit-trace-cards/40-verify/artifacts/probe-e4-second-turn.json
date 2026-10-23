@@ -1,0 +1,7 @@
+{
+  "session_id": "audit-probe-e4-total-mismatch",
+  "run_id": "run_probe_e4",
+  "turn_id": "turn_probe_e4_2",
+  "turns": [{"turn_id": "turn_probe_e4_2", "status": "succeeded", "duration_ms": 11, "input_tokens": 5, "output_tokens": 6}],
+  "total_input_tokens": 777777, "total_output_tokens": 2, "total_duration_ms": 13
+}

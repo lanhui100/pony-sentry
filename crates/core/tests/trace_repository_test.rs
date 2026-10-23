@@ -55,6 +55,9 @@ fn test_trace_record_serialization_contract() {
         total_input_tokens: Some(1500),
         total_output_tokens: Some(200),
         total_duration_ms: Some(1250),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: now,
         created_at: now,
         updated_at: now,
@@ -98,6 +101,9 @@ async fn test_trace_repository_contract_and_lifecycle() {
         total_input_tokens: Some(500),
         total_output_tokens: Some(100),
         total_duration_ms: Some(400),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: now,
         created_at: now,
         updated_at: now,
@@ -160,6 +166,9 @@ async fn test_trace_not_found_and_adversarial_payload() {
         total_input_tokens: None,
         total_output_tokens: None,
         total_duration_ms: None,
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -223,6 +232,9 @@ async fn test_migrate_upgrades_existing_traces_table_with_project_column() {
         total_input_tokens: None,
         total_output_tokens: None,
         total_duration_ms: None,
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: now,
         created_at: now,
         updated_at: now,
@@ -267,6 +279,9 @@ async fn test_trace_upsert_on_same_session_id() {
         total_input_tokens: Some(100),
         total_output_tokens: Some(50),
         total_duration_ms: Some(500),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -290,6 +305,9 @@ async fn test_trace_upsert_on_same_session_id() {
         total_input_tokens: Some(300),
         total_output_tokens: Some(150),
         total_duration_ms: Some(1200),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -306,17 +324,45 @@ async fn test_trace_upsert_on_same_session_id() {
             environment: None,
             release: None,
             project: None,
+            run_id: None,
+            turn_status: None,
+            from: None,
+            to: None,
             limit: None,
             offset: None,
         })
         .await
         .expect("list_traces");
 
-    // 幂等：必须只有 1 条记录，且是最新的 tokens 累计
+    // 幂等：必须只有 1 条记录
     assert_eq!(list.len(), 1, "同一 session_id 必须幂等更新为 1 条记录");
-    assert_eq!(list[0].total_input_tokens, Some(300));
-    assert_eq!(list[0].total_duration_ms, Some(1200));
+    // C2（v2 语义变更）：`total_*` 是 turns 求和的单一真相，客户端直传值不再落库。
+    // 本例两个 turn 都不带 input_tokens/output_tokens/duration_ms ⇒ 必须为 null
+    // （旧断言 Some(300)/Some(150)/Some(1200) 依赖"客户端值覆盖"，已被 C9.3 拒绝）。
+    assert_eq!(
+        list[0].total_input_tokens, None,
+        "[C2] turns 无 token 字段 ⇒ total_input_tokens 必须为 null"
+    );
+    assert_eq!(list[0].total_output_tokens, None);
+    assert_eq!(list[0].total_duration_ms, None);
+    // C1.2：聚合列随写入推进——两个 turn（turn-1 / turn-2），末轮无 status ⇒ unknown
+    assert_eq!(list[0].turns_count, 2, "[C1.2] turns_count 必须为 2");
+    assert_eq!(
+        list[0].turn_status, "unknown",
+        "[C1.2] turn_status 必须取最后一个 turn 的 status（缺省 unknown）"
+    );
     assert_eq!(list[0].turn_id.as_deref(), Some("turn-2"));
+    // C2：payload.turns 按 seq 升序，且客户端直传 total 不再保留
+    let turns = list[0].payload["turns"]
+        .as_array()
+        .expect("payload.turns 必须是数组");
+    assert_eq!(turns.len(), 2, "两个 turn 必须都入库");
+    assert_eq!(turns[0]["turn_id"], "turn-1", "[C2.5] 按 seq 升序");
+    assert_eq!(turns[1]["turn_id"], "turn-2", "[C2.5] 按 seq 升序");
+    assert!(
+        list[0].payload.get("total_input_tokens").is_some_and(|v| v.is_null()),
+        "[C2] payload.total_input_tokens 也必须是 null（turns 求和）"
+    );
 }
 
 #[tokio::test]
@@ -349,6 +395,9 @@ async fn test_trace_incremental_merge_upsert_dedup() {
         total_input_tokens: Some(200),
         total_output_tokens: Some(100),
         total_duration_ms: Some(500),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -377,6 +426,9 @@ async fn test_trace_incremental_merge_upsert_dedup() {
         total_input_tokens: Some(300),
         total_output_tokens: Some(150),
         total_duration_ms: Some(800),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -393,6 +445,10 @@ async fn test_trace_incremental_merge_upsert_dedup() {
             environment: None,
             release: None,
             project: None,
+            run_id: None,
+            turn_status: None,
+            from: None,
+            to: None,
             limit: None,
             offset: None,
         })
@@ -446,6 +502,9 @@ async fn test_trace_filter_by_project() {
         total_input_tokens: Some(100),
         total_output_tokens: Some(50),
         total_duration_ms: Some(200),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -464,6 +523,9 @@ async fn test_trace_filter_by_project() {
         total_input_tokens: Some(150),
         total_output_tokens: Some(70),
         total_duration_ms: Some(300),
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at: Utc::now(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -483,6 +545,10 @@ async fn test_trace_filter_by_project() {
         environment: None,
         release: None,
         project: Some("job_copilot".to_string()),
+        run_id: None,
+        turn_status: None,
+        from: None,
+        to: None,
         limit: None,
         offset: None,
     };
@@ -505,6 +571,10 @@ async fn test_trace_filter_by_project() {
         environment: None,
         release: None,
         project: Some("pony-agent".to_string()),
+        run_id: None,
+        turn_status: None,
+        from: None,
+        to: None,
         limit: None,
         offset: None,
     };

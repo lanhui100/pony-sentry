@@ -1,0 +1,185 @@
+# T2 机器收据 — pony-sentry 侧 trace 管线（auditor-core, 2026-10-23）
+# 环境：本机 :3000 = /usr/local/bin/pony-sentry-server（Release），连 Postgres 10.43.206.170/ponysentry
+# 说明：所有命令可直接重放；实验行 session_id 前缀 audit-probe-core-*，已全部删除（见 R14）。
+
+## R0 环境与基线（业务行 37 条，含事故行 ca0b5494）
+$ export PGPASSWORD=8siud3siDW9s02k33edsFAGDDFSDFllidsk9987sddj
+$ ADMIN=a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c
+$ CLIENT=6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24
+$ PSQL="psql -h 10.43.206.170 -U job_copilot -d ponysentry"        # 下文 ${PSQL}/${ADMIN}/${CLIENT} 直接可用
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -tAc "select count(*), count(distinct session_id) from traces;"
+37|37
+$ curl -s -o /dev/null -w "healthz:%{http_code}\n" http://127.0.0.1:3000/healthz
+healthz:200
+
+## R0.1 实验卫生（含一次误删自报，Lead 已知情）
+# 事故：首次清理时使用 `delete from traces where session_id like 'audit-probe-%'`，返回 DELETE 3：
+#   1 行为本人（audit-probe-fieldloss），另 2 行为**先前已存在**的 audit-probe-* 行（非本人创建）。
+#   业务行未受影响（R14 已验证 ca0b5494 完好、业务行仍 37 条）。
+# 纠正后纪律：① 只用精确 session_id 删除；② 新实验统一前缀 audit-probe-core-；③ 入库前预检 0、删除前后各查一次 count。
+$ psql ... -c "delete from traces where session_id like 'audit-probe-%';"
+DELETE 3
+$ psql ... -tAc "select count(*) from traces where session_id like 'audit-probe-%';"
+0
+
+## R1 静态证据：trace 上报路径只经 sanitizer，不经任何 events 侧校验/归一
+$ grep -rn "validate::" crates/server/src/routes.rs            # 空
+$ grep -rn "deny_unknown_fields" crates                        # 空
+$ grep -n "turns:" crates/server/src/routes.rs
+362:    pub turns: Option<Vec<serde_json::Value>>,
+$ grep -n "note" crates/server/src/routes.rs crates/core/src/*.rs
+crates/server/src/routes.rs:385:    pub note: Option<String>,     # 仅此一处：反序列化后无人读取
+$ grep -n "stats_incomplete" -r crates web/src
+web/src/App.vue:702 (仅前端渲染，Rust 侧 0 命中 → 无生产者)
+$ grep -c "turn\.status" web/src/App.vue
+0
+$ for k in degraded attempt_index cache_hit_tokens interrupt input_text output_text phase sequence; do grep -c "$k" web/src/App.vue; done
+degraded 5   # 全部是 gateway health 的 'degraded'，非 turn.degraded
+attempt_index 0
+cache_hit_tokens 2
+interrupt 15
+input_text 2
+output_text 2
+phase 1
+sequence 1
+
+## R2 实验 A：未知顶层字段静默丢弃 + turns 无任何 schema 校验
+# POST 体包含 6 个不在 AgentTraceIngestRequest 里的顶层字段 + turns 内含非法条目
+$ SID=audit-probe-fieldloss; psql ... -tAc "select count(*) from traces where session_id='$SID';"
+0
+$ curl -s -o /tmp/probe-a-resp.json -w "HTTP %{http_code}\n" -H "x-client-token: $CLIENT" \
+    -H 'content-type: application/json' --data-binary @/tmp/probe-a.json http://127.0.0.1:3000/api/v1/traces
+HTTP 201
+# 请求体（节选）：{"session_id":"audit-probe-fieldloss", "error":{...}, "spans":[...], "llm_calls":[...],
+#                  "sdk_version":"1.2.3", "user_id":"u-1", "tenant":"job_copilot",
+#                  "turns":[{"turn_id":..., "status":"totally_bogus_status", "llm_calls":[...]}, "not-an-object", 123]}
+$ curl -s -H "x-admin-token: $ADMIN" http://127.0.0.1:3000/api/v1/traces/$ID | jq -r '.payload|keys|join(", ")'
+environment, eval_status, extra, project, release, reported_at_ms, run_id, session_id, tags,
+thread_id, total_duration_ms, total_input_tokens, total_output_tokens, turn_id, turns
+$ ... | jq -c '{has_error:(.payload|has("error")),has_spans:(.payload|has("spans")),has_llm_calls:(.payload|has("llm_calls")),has_sdk_version:(.payload|has("sdk_version")),has_user_id:(.payload|has("user_id")),has_tenant:(.payload|has("tenant"))}'
+{"has_error":false,"has_spans":false,"has_llm_calls":false,"has_sdk_version":false,"has_user_id":false,"has_tenant":false}
+$ ... | jq -c '.payload.turns'
+[{"attempt_index":-1,"llm_calls":[{"error":{"type":"ValueError"},"model":"m"}],"status":"totally_bogus_status",
+  "tool_calls":[{"status":"success","tool_call_id":"c1","tool_name":"t"}],"turn_id":"turn_probe_a"},"not-an-object",123]
+
+## R3 实验 B：同一 turn 二次上报，终态被旧值覆盖（P0）
+# 首报 running，二报 failed（带 error 与 tool error 详情）
+$ psql ... -tAc "select count(*) from traces where session_id='audit-probe-merge1';"   # 预检 0
+$ POST#1 {"session_id":"audit-probe-merge1",...,"total_input_tokens":100,"turns":[{"turn_id":"turn_probe_merge","status":"running","tool_calls":[]}]}
+HTTP 201  id=befc4b84-89d9-4b63-b1e7-e9bba7e62f98
+$ POST#2 {"session_id":"audit-probe-merge1",...,"total_input_tokens":200,"turns":[{"turn_id":"turn_probe_merge","status":"failed",
+           "error":{"type":"ValueError","message":"expected value at line 1 column 1"},
+           "tool_calls":[{"status":"error","error":{"type":"TimeoutError","message":"embedded_runtime timeout after 120000ms"}}]}]}
+HTTP 201
+$ curl -s -H "x-admin-token: $ADMIN" .../api/v1/traces/$ID | jq -c '.payload.turns'
+[{"attempt_index":1,"status":"running","tool_calls":[],"turn_id":"turn_probe_merge"}]        # ← 终态 failed 与错误详情全部丢失
+$ ... | jq -c '{total_input_tokens,total_output_tokens,total_duration_ms}'
+{"total_input_tokens":200,"total_output_tokens":20,"total_duration_ms":2000}                  # ← 行级 total 却是二报的值
+# 反向验证：先 failed 后 succeeded → 仍为 failed（说明不是"终态优先"，而是"先到先得"）
+$ .../traces?session_id=audit-probe-merge2 →  落库后 turn.status = failed
+
+## R4 实验 C：total_* 口径漂移，且可与 turns 求和永久矛盾
+# C1：首报客户端 total=1000/100/5000，turns 只有 10/5/100；二报客户端 7777 被丢弃
+$ GET after #1: {"row_totals":{"in":1000,"out":100,"dur":5000},"payload_totals":{"in":1000,...},"turns_sum":{"in":10,"out":5,"dur":100},"n_turns":1}
+$ GET after #2: {"row_totals":{"in":30,"out":10,"dur":300},"payload_totals":{"in":30,...},"turns_sum":{"in":30,"out":10,"dur":300},"n_turns":2}
+# C2：二次上报不带 turns → 保留旧轮，但 total 取客户端值，与 turns 永久不一致
+$ GET after #2: {"row_totals":{"in":99999,"out":null,"dur":null},"payload_totals":{"in":99999,...},"turns_sum":{"in":10,"out":0,"dur":0},"n_turns":1}
+
+## R5 实验 D：session_id UNIQUE → 一个 session 只有一行，run_id 列漂移到"最后一次上报"
+$ psql ... -tAc "select count(*) from traces where session_id='audit-probe-core-run1';"  # 预检 0
+$ POST#1 run_id=run_probe_A turns=[{turn_id:A1,status:failed}]   → 201
+$ POST#2 run_id=run_probe_B turns=[{turn_id:B1,status:succeeded}]→ 201
+$ GET → {"run_id":"run_probe_B","turn_id":null,"turns":["A1","B1"],"turn_statuses":["failed","succeeded"]}
+$ psql ... -c "select count(*) from traces where session_id='audit-probe-core-run1';"
+ 1 行
+
+## R6 实验 E：List 不支持 run_id / turn_id / 失败状态 / 时间窗，未知参数被静默忽略（HTTP 200，结果集不变）
+$ baseline: GET /api/v1/traces?limit=200&project=job_copilot → 37 行
+  ?project=job_copilot&run_id=run_83c1879e338d442f953a5dd4b8d1646a   → HTTP 200, 37 行 = 未过滤
+  ?project=job_copilot&turn_id=turn_5dd7639f928549dfb86d96cbe6cbf33a  → HTTP 200, 37 行 = 未过滤
+  ?project=job_copilot&status=failed                                  → HTTP 200, 37 行 = 未过滤
+  ?project=job_copilot&turns.status=failed                            → HTTP 200, 37 行 = 未过滤
+  ?project=job_copilot&since=2026-10-23T00:00:00Z                     → HTTP 200, 37 行 = 未过滤
+  （另测 since/from/created_after/has_error/nonsense，全部 HTTP 200 且行数不变）
+
+## R7 实验 F：payload 无字段级上限，只有 2MB 请求体硬限；List 不 clamp limit
+$ POST 2,000,276 B payload → HTTP 201；psql payload_bytes = 2,000,486
+$ POST 2,100,191 B payload → HTTP 413
+$ GET /api/v1/traces?limit=100000 -w 'HTTP %{http_code} bytes=%{size_download}'
+HTTP 200 bytes=2012669      # issues 列表有 clamp(1,100)（pg_repository.rs:395 在 list_issues 内），traces 列表没有（:753）
+$ psql ... -c "select count(*), round(avg(length(payload::text))), max(length(payload::text)), min(...) from traces where project='job_copilot';"
+ n=37 | avg=29436 | max=168736 | min=504
+$ GET /api/v1/traces?limit=100 → HTTP 200 bytes=4018540 time=0.043s（44 行，含 2MB 探针行）
+
+## R8 实验 G：PATCH 接受 note 但丢弃（库内无 note 列）
+$ PATCH /api/v1/traces/$ID body={"eval_status":"triage_bad","note":"模型空 JSON 导致工具重试耗尽→120s 超时"}
+$ 响应 {"id":"8b760ec7-...","eval_status":"triage_bad","payload_keys":[...]}   # 无 note
+$ GET 全文检索 note 文本命中次数：0
+$ \d traces → 列：id, session_id, run_id, turn_id, environment, release, eval_status, payload,
+                total_input_tokens, total_output_tokens, total_duration_ms, reported_at, ...（无 note）
+
+## R9 实验 H：错误路径与边界
+$ 无 token 写入 → HTTP 401
+$ 缺 session_id/thread_id → HTTP 400 body=Missing session_id or thread_id
+$ turns 缺省（null）→ HTTP 201
+$ reported_at_ms=9999999999999 → HTTP 201，落库 reported_at=2286-11-20 17:46:39.999+00
+
+## R10 实验 I：服务端二次脱敏改写 trace 证物（路径/密钥就地替换，且不回传被改写计数）
+$ POST turns[0].tool_calls[0].output = 'Traceback ... File "/home/dm/job_copilot/api_v2/src/modules/agent/embedded_runtime.py", line 42, in run
+                                        ValueError: expected value at line 1 column 1'
+$ GET → output: '... File "[USER_HOME]/job_copilot/api_v2/src/modules/agent/embedded_runtime.py", line 42, in run ...'
+$ GET → error.context: {"access_token":"[REDACTED_SECRET]","model":"workbuddy/deepseek-v4.1-flash","token_count":12}
+        （token_count 白名单生效；access_token 被脱敏——设计行为；路径被改写）
+
+## R11 实验 J：并发上报丢轮次（read-modify-write 无事务/无锁）19/20 复现
+$ psql ... -tAc "select count(*) from traces where session_id like 'audit-probe-core-race-%';"   # 预检 0
+$ for i in 1..20: 同时 POST 同一 session 的两个不同 turn（tA_i / tB_i，curl & + wait）
+$ psql ... -c "select count(*) sessions, sum(n_turns) total_turns,
+               sum(case when n_turns=2 then 1 else 0 end) sessions_with_both_turns,
+               sum(case when n_turns<2 then 1 else 0 end) sessions_with_lost_turn
+               from (select session_id, jsonb_array_length(payload::jsonb->'turns') n_turns
+                     from traces where session_id like 'audit-probe-core-race-%') s;"
+ sessions | total_turns | sessions_with_both_turns | sessions_with_lost_turn
+       20 |          21 |                        1 |                      19
+
+## R12 单测：merge 语义「旧轮为准」是既有实现且有测试背书（不是回归）
+$ cargo test -p pony-sentry-core trace_merge
+test trace_merge::tests::merge_appends_new_turns_after_old_and_keeps_old_duplicates ... ok
+test trace_merge::tests::merge_falls_back_to_json_key_without_turn_id ... ok
+test trace_merge::tests::new_payload_without_turns_keeps_old_turns ... ok
+test trace_merge::tests::old_payload_without_turns_takes_new ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out
+exit=0
+# 另：crates/core/tests/trace_repository_test.rs:248 test_trace_upsert_on_same_session_id 断言"同 session 幂等 1 行 + total 取二报客户端值"
+
+## R13 事故实物字段回放（判断本次是否真的丢了字段）
+$ curl -s -H "x-admin-token: $ADMIN" http://127.0.0.1:3000/api/v1/traces/ca0b5494-ae1b-47db-8e00-c9e7abbb6779 | jq -c '.payload|keys'
+environment, eval_status, extra, project, release, reported_at_ms, run_id, session_id, tags,
+thread_id, total_duration_ms, total_input_tokens, total_output_tokens, turn_id, turns
+# 生产方 build_trace_payload 顶层键（/home/dm/job_copilot/api_v2/src/modules/agent/pony_sentry_trace/payload.py:318-402）
+#   session_id, project, turns, tags, extra, total_duration_ms, reported_at_ms, run_id, turn_id,
+#   total_input_tokens, total_output_tokens, environment, release —— 全部在 typed struct 内 ⇒ 本次未发生顶层丢字段
+# 但 tool_calls[2]：{"status":"error","error":null,"output":null} ⇒ 失败原因字段为空（见 findings M-01）
+
+## R14 清理收据（删除前后 count 两次；业务行与事故行完好）
+$ MY="('audit-probe-fieldloss','audit-probe-merge1','audit-probe-merge2','audit-probe-total1','audit-probe-total2','audit-probe-core-run1','audit-probe-core-big1')"
+$ psql ... -tAc "select count(*) from traces where session_id in $MY;"   → 6
+$ psql ... -c  "delete from traces where session_id in $MY;"             → DELETE 6
+$ psql ... -tAc "select count(*) from traces where session_id in $MY;"   → 0
+$ psql ... -tAc "select count(*) from traces where session_id like 'audit-probe%';"   → 0
+$ psql ... -tAc "select count(*) from traces where project='job_copilot';"            → 37
+$ psql ... -c  "select id,session_id,run_id from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';"
+ ca0b5494-ae1b-47db-8e00-c9e7abbb6779 | thread_ref_v1_e9b4ec395c96d8913c106ef8 | run_83c1879e338d442f953a5dd4b8d1646a
+# 同批另有 race 实验 20 行、patch/noturns/future 3 行、sanitize1 1 行，均按精确 session_id 删除，
+# 每次删除前后 count 均为 20→0 / 3→0 / 1→0。
+
+## R15 语义矛盾证据（W-06，只读，无需实验行）
+$ curl -s -H "x-admin-token: $ADMIN" http://127.0.0.1:3000/api/v1/traces/ca0b5494-ae1b-47db-8e00-c9e7abbb6779 \
+    | jq -r '.payload.turns[0].tool_calls[] | "\(.status)\t failure_text_in_output=\(if (.output // "") | contains("职位解析失败") then "YES" else "no" end)\terror=\(.error|tostring)"'
+success	 failure_text_in_output=YES	error=null
+success	 failure_text_in_output=YES	error=null
+error	 failure_text_in_output=no	error=null
+$ ... | jq -c '.payload.turns[0] | {turn_status:.status, degraded, attempt_index, calls:[.tool_calls[]|{tool_name,status,error}]}'
+{"turn_status":"failed","degraded":false,"attempt_index":1,"calls":[{"tool_name":"format_jd_to_json","status":"success","error":null},{"tool_name":"format_jd_to_json","status":"success","error":null},{"tool_name":"format_jd_to_json","status":"error","error":null}]}
+# 读法：2 个调用标 success 但 output 正文含"职位解析失败"⇒ 语义矛盾；3 个调用 error 全为 null ⇒ 失败原因字段全空（M-01）。
+# 控制台渲染：App.vue:1400-1406 success → text-emerald-400（绿色"成功"），App.vue:875-878 error 为空则整块不渲染。

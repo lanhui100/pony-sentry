@@ -1,0 +1,5 @@
+{"session_id":"audit-probe-verify-9691a9-e1","project":"audit_probe","run_id":"run_9691a9_e1","turn_id":"turn_9691a9_e1_1","environment":"development","release":"dev",
+ "future_field_cost_usd":12.5,"unknown_nested_object":{"a":1},"error":{"type":"ValueError","message":"expected value at line 1 column 1"},
+ "turns":[{"turn_id":"turn_9691a9_e1_1","status":"failed","unknown_turn_field":"KEEP_ME_TURN_LEVEL","duration_ms":120272,
+   "tool_calls":[{"tool_name":"format_jd_to_json","status":"error","error":null,"retry_count":3,"unknown_call_field":"KEEP_ME_CALL_LEVEL"}]}],
+ "total_duration_ms":120272,"reported_at_ms":1792754960002}

@@ -1,0 +1,83 @@
+T9 补修门禁收据（executor-db / task-14）
+================================================================================
+依据：`.dev-team/trace-fix-redphase/adjudication.json`（L3A-F4 MAJOR / L3B-F4 MAJOR / L3A-F6 / L3A-F8 / L3A-F9）
+写域：`crates/core/src/**`（+ `crates/core/tests/**`）；未改 `crates/server/**`、`web/**`、仓库根 `tests/**`、`docs/**`
+时间：2026-10-23 22:1x (Asia/Shanghai)；原始日志：`.dev-team/trace-fix-redphase/gates-fix-core2.raw.log`
+
+## Gate 1 · cargo test -p pony-sentry-core --offline（PG 真实执行）
+$ PONY_TEST_PG_URL='postgresql://job_copilot:***@10.43.206.170:5432/ponysentry_test' \
+    cargo test -p pony-sentry-core --offline
+     unittests src/lib.rs                 running 42 tests → ok. 42 passed
+     tests/pg_repository_test.rs          running 4 tests  → ok. 4 passed
+     tests/storage_test.rs                running 2 tests  → ok. 2 passed
+     tests/trace_repository_test.rs       running 8 tests  → ok. 8 passed
+     tests/trace_v2_repository_test.rs    running 25 tests → ok. 25 passed   # 含 6 条 PG 真跑
+  合计 81 passed / 0 failed；`grep -c SKIP` = 0
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CLIPPY_EXIT=0
+（附加：`cargo check -p pony-sentry-server --offline` 仍 Exit 0 —— 接口未变，server 未改）
+
+## 1) L3A-F4（MAJOR）retention 与 ingest 共用锁 —— CLOSED
+实现（`crates/core/src/pg_repository.rs` `delete_traces_older_than`）：
+  ① 快照 `SELECT id, session_id … WHERE COALESCE(updated_at,created_at) < $1 ORDER BY id ASC LIMIT $2`
+     固定候选 id 集；
+  ② 按 **id 升序**逐个 session 取 `pg_advisory_xact_lock(hashtextextended($session_id, 0))`
+     —— 与 ingest 写入路径**同一把锁**；
+  ③ 持锁后对每个 id 用 `SELECT 1 … WHERE id=$1 AND COALESCE(updated_at,created_at) < $2
+     FOR UPDATE SKIP LOCKED` 复检过期性（等待期间若被 ingest 刷新为活跃行则跳过，不误删）；
+  ④ 先按固定 session 集删 `trace_turns`，再按固定 id 集删 `traces`，同事务提交。
+  ⚠️ 加锁序说明：行锁（`FOR UPDATE`）**放在 advisory 锁之后**。若按「先 FOR UPDATE 再 advisory」，
+     retention(行锁→advisory) 与 ingest(advisory→行锁) 锁序相反，PG 会判定死锁并回滚其中一方
+    （可能牺牲 ingest 请求）。现实现两侧统一「advisory → 行锁」，无环。
+SQLite：`BEGIN IMMEDIATE` 全局写互斥，选择/删除同在单事务，无需额外锁（保持现状）。
+用例（真实执行）：`pg::v2_pg_retention_and_ingest_interleaving_stays_consistent`（2 ingest × 6 round × 6 session
+并发 vs 2 retention × 12 批）与 `v2_sqlite_retention_and_ingest_interleaving_stays_consistent`；断言
+`turns_count == trace_turns 行数 == json(b)_array_length(payload.turns)` 且 0 孤儿。
+实测输出：
+  [L3A-F4] PG 交错后: 聚合行=6 轮次行=73 不一致行=0
+
+## 2) L3A-F8（MINOR/OPEN）64 位 advisory 锁键 —— CLOSED
+`pg_advisory_xact_lock(hashtextextended($1, 0))` 用于两处：ingest（`record_trace`）与 retention
+（`delete_traces_older_than`），键空间由 2^-32 提升到 2^-64；注释说明两处必须同键否则不互斥。
+`grep -n "pg_advisory_xact_lock" crates/core/src/pg_repository.rs` = 2 处，均为 `hashtextextended`。
+
+## 3) L3A-F9（MINOR/OPEN）totals 溢出 —— CLOSED
+`trace_v2::sum_turn_field` 改 `checked_add`（返回 `(Option<i64>, overflow: bool)`）；`aggregate_session`
+溢出时 total 置 `null` 并写 `stats_incomplete: true`（每次聚合重算，旧标记不继承），绝不 panic/回绕。
+用例：`trace_v2::tests::c2_totals_use_checked_add_and_flag_stats_incomplete`（单元，含 i64::MAX + 1 与旧标记清除）、
+`v2_totals_overflow_marks_stats_incomplete_instead_of_panicking`（仓储级：total_in=null、total_out=7、
+payload.stats_incomplete=true）。
+
+## 4) L3A-F6（MINOR/PARTIAL）迁移幂等用例 —— CLOSED
+`v2_migration_twice_keeps_turn_store_stable`：同一 SQLite 库连续两次 `migrate()`，断言
+「trace_turns 行数 / turns_count / turn_status / (turn_id,seq) 序列」完全不变；并**强制重放回填 INSERT 路径**
+（删 1 行轮次 + 把 turns_count 归零 → 再 migrate），断言恢复到与首次逐字段一致（键、seq、聚合列）。
+
+## 5) L3B-F4（MAJOR PARTIAL）PG 迁移 DDL 拆分与锁控制 —— CLOSED
+`crates/core/src/pg_repository.rs::migrate()` 不再 `raw_sql(整段 0005)`，改为
+`ensure_trace_v2_schema()`（返回 `TraceSchemaReport`，pub 供测试断言）：
+  - 迁移文件按 `;` 拆成**独立语句逐条 autocommit 执行**（先剔除 `--` 注释行）；
+  - `ALTER TABLE … ADD COLUMN`：先查 `information_schema.columns`（当前 schema），**存在即跳过**
+    → 二次启动不再对 `traces` 取 ACCESS EXCLUSIVE；
+  - 5 个索引：先查 `pg_indexes`，缺失才用 `CREATE INDEX CONCURRENTLY`（**事务外**）；
+    失败时 `DROP INDEX CONCURRENTLY IF EXISTS` 清理后**重试一次**并 `tracing::warn!` 记录；
+  - `CREATE TABLE IF NOT EXISTS` 等幂等语句仍逐条执行（catalog no-op）；
+  - down 迁移（`migrations/postgres/0005_trace_turns.down.sql`）保持不变且仍可用；SQLite 路径未改
+    （`include_str!` + 列探测守卫，见 0005 头注释）。
+实测（`pg::v2_pg_schema_ensure_is_idempotent_and_restart_light`，ponysentry_test 隔离 schema）：
+  [L3B-F4] 首次 ensure 报告: TraceSchemaReport { columns_added: 3, columns_skipped: 0, indexes_created: 5, indexes_skipped: 0 }
+  [L3B-F4] 二次 ensure 报告（重启等价）: TraceSchemaReport { columns_added: 0, columns_skipped: 3, indexes_created: 0, indexes_skipped: 5 }
+  [L3B-F4] schema 内索引数=5，invalid 索引数=0
+  ⇒ 首次可建、二次启动 0 次 ALTER / 0 次 CREATE INDEX、5 个索引均存在且 `indisvalid=true`。
+
+## 6) 接口影响
+`crates/server/src/routes.rs` 未改；新增 `PgIssueRepository::ensure_trace_v2_schema`（additive，被
+`migrate()` 内部调用）与 `TraceSchemaReport`（pub 结构体），不影响既有调用；`cargo check -p pony-sentry-server` Exit 0。
+
+## 残留（需其他 owner）
+- `L3B-F4` 的「启动期 ACCESS EXCLUSIVE」已消除；但 `CREATE TABLE IF NOT EXISTS` 与索引首次创建仍会在
+  首次部署时短暂持有锁（新表/新索引，无法避免）。如需零锁上线应改为独立运维步骤（不在本任务范围）。
+- 文档侧（`docs/trace-contract.md` §5 / ADR）仍待文档 owner 更新（docs 在禁写域）。

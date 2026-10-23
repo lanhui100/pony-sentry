@@ -1,0 +1,86 @@
+T6b 补修门禁收据（L3B-F11：`/metrics` 可选鉴权）
+================================================================================
+任务：Lead 终审裁决后补修（消息指派为 task-15；**任务板上不存在 task-15**，board 最新为 task-13，
+      故本收据以消息口径为准，任务账本请 Lead 补建/对账）。
+写域：`crates/server/src/routes.rs`、`crates/server/src/main.rs`、`crates/server/tests/api_test.rs`，
+      另 **1 行编译必要改动** 于 `crates/server/tests/pg_api_duplicate_test.rs`（AppState 新字段字面量，见 §3）。
+未触碰：`crates/core/`、`migrations/`、`web/`、根 `tests/`、`docs/`、`README.md`（README config 表由 Lead 改）。
+时间：2026-10-23 22:05–22:13 (Asia/Shanghai)
+
+## Gate 1 · cargo test --workspace --offline
+$ cargo test --workspace --offline
+      pony-sentry-core     lib 42 | pg_repository 4 | storage 2 | trace_repository 8 | trace_v2_repository 20
+      pony-sentry-fingerprint lib 12 | hasher 1
+      pony-sentry-ingest   lib 31 | sanitizer 2
+      pony-sentry-server   lib 16 | adversarial_tailnet 3 | **api_test 24**（上轮 22 + 本任务 2）
+                           | pg_api_duplicate 1 | reindex 1 | trust_unit 11
+   合计：178 passed / 0 failed / 0 ignored        EXIT=0
+
+## Gate 2 · cargo clippy --workspace --all-targets -- -D warnings
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+    CLIPPY_EXIT=0
+
+## 回归（非本任务门禁，额外实跑）
+$ cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 74.23s
+    ACCEPT_EXIT=0        # 冻结测试零改动；C9.9 的 `get_anon("/metrics")` 在未配置令牌时仍 200
+
+================================================================================
+## 1 · 实现（契约外补修，语义：默认关闭、可选开启）
+
+`crates/server/src/routes.rs`
+- `AppState` 增可选字段：`pub metrics_token: Option<String>`（doc 注明「为空时 `/metrics` 免鉴权」）；
+  `AppState::new()` 默认 `None`；新增 builder `with_metrics_token(Option<String>)`（空串归一为 `None`）。
+- 新增判定：`fn metrics_authorized(configured: Option<&str>, headers: &HeaderMap) -> bool`
+  - `None` / 空白串 → **放行**（探针免鉴权、README 语义不变）；
+  - 已配置 → 接受 `x-metrics-token: <token>`，或 `Authorization: Bearer <token>`（scheme 大小写不敏感）；
+    比较走既有常量时间 `token_matches`；两者都不匹配 → 拒绝。
+- `handle_metrics` 增 `headers: HeaderMap` 形参；鉴权失败 **先于任何 DB 访问** 返回
+  `401` + 纯文本 `Unauthorized`（不回显期望/实际 token，不复用 F1 的 `Internal error` 文案）。
+  其余 `/metrics` 输出与 C7 指标渲染完全不变。
+
+`crates/server/src/main.rs`
+- 启动时读取 `METRICS_TOKEN`（`std::env::var(...).ok().filter(|t| !t.is_empty())`），写入 `AppState.metrics_token`；
+  未配置时行为与旧版逐字节一致。
+
+## 2 · 集成用例（`crates/server/tests/api_test.rs`，+2 → 24）
+
+- `test_metrics_stays_anonymous_when_token_not_configured`：未配置 → `/metrics` 200 且输出含既有指标；
+  空串 `Some("")` 等价未配置 → 200。
+- `test_metrics_requires_bearer_or_metrics_token_when_configured`：配置 `metrics-secret` 后
+  ①无凭证 → 401 且响应体**逐字符等于** `Unauthorized`；②`x-metrics-token: wrong`、
+  `Authorization: Bearer wrong`、`Authorization: metrics-secret`（缺 Bearer 前缀）→ 全部 401；
+  ③`x-metrics-token: metrics-secret` 与 `Authorization: Bearer metrics-secret` → 均 200 且有指标输出；
+  ④作用面隔离：`/healthz` 与 `GET /api/v1/traces`（带 admin token）不受影响。
+
+## 3 · 物理收据（真实二进制 + curl，两种启动模式）
+
+模式 A：`ADMIN_TOKEN=adm`（无 `METRICS_TOKEN`），端口 18301
+  GET /metrics（无凭证）-> http_code=200，含 `pony_sentry_events_total` 3 行（既有输出不变）
+
+模式 B：`ADMIN_TOKEN=adm METRICS_TOKEN=metrics-secret`，端口 18302
+  无凭证                                  -> Unauthorized [http_code=401]
+  x-metrics-token: wrong                   -> Unauthorized [http_code=401]
+  Authorization: Bearer wrong              -> Unauthorized [http_code=401]
+  Authorization: metrics-secret（缺 Bearer）-> Unauthorized [http_code=401]
+  x-metrics-token: metrics-secret          -> http_code=200，含 events_total 3 行
+  Authorization: Bearer metrics-secret     -> http_code=200，含 events_total 3 行
+  GET /healthz（无凭证）                   -> {"db":"up","status":"ok"} [http_code=200]（鉴权不外溢）
+
+## 4 · 偏离与说明（须知会 Lead）
+
+1. **`crates/server/tests/pg_api_duplicate_test.rs` 改 1 行**：`AppState` 新增 pub 字段后该文件的结构体字面量
+   必须补 `metrics_token: None` 才能编译（纯编译补齐，无断言/语义变化）。同理 `api_test.rs` 13 处字面量各补 1 行。
+2. **空串归一为「未配置」**：`METRICS_TOKEN=""` 与未设置等价（避免部署模板留空导致意外 401）。
+3. **`Authorization` 必须带 `Bearer ` 前缀**（大小写不敏感）；仅 `Authorization: <token>` 一律 401（避免与其它 scheme 混淆）。
+   若希望兼容裸 token，可再加一行，但会削弱与标准 Bearer 的区分度，默认不做。
+4. **401 文案固定 `Unauthorized`**（契约未指定；与既有 `Invalid or missing client token` 并存，二者语义不同：
+   前者是运维探针面，后者是上报面）。
+5. **README**：`crates/server` 侧无 README，根 README config 表的 `METRICS_TOKEN` 行由 Lead 同 commit（本任务只改代码）。
+6. **任务账本**：board 无 task-15，我未擅自建任务（避免与 Lead 建单撞号），完成状态以本收据 + 消息回报为准。
+
+## 5 · 残余风险
+- `/metrics` 命中鉴权失败时**不计入**任何指标（避免未授权方可刷计数器），如需审计请走访问日志。
+- token 比较走 `token_matches`（常量时间逐字节）；未做速率限制/防爆破（与既有 admin token 同策略，非本任务范围）。
+- 若部署侧把 `METRICS_TOKEN` 配进 Prometheus scrape 而未同步 job 配置，抓取将变 401（默认关闭故不影响现状）。

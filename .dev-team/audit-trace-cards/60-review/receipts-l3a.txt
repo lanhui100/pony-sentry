@@ -1,0 +1,83 @@
+# L3-A 独立重放收据（契约/数据完整性视角，2026-10-23）
+# 重放前（值见 00-baseline/00-brief.md §9，不在此重复明文）：
+#   export PGPASSWORD=...; ADMIN=...; CLIENT=...; BASE=http://127.0.0.1:3000
+#   PSQL='psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At'
+# 纪律：仅新增 session_id 前缀 audit-probe-l3a-*，结束按精确前缀删除并留 count；未触碰任何业务行。
+
+$ $PSQL -c "select count(*) from traces where session_id like 'audit-probe-l3a%';"
+0
+
+## R1. 样本 payload 体积口径（报告 50-report/report-draft.md:41 写 payload=3405B）
+$ $PSQL -F'|' -c "select pg_column_size(payload), octet_length(payload::text), length(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';"
+2641|5821|3405
+# 判读：3405 是 length() 字符数（含中文多字节），octet_length=5821 才是字节数；基线列名 payload_bytes 误导。
+
+## R2. W-01 同 session/turn 二次上报：终态、行级 total、POST 响应 id
+$ curl -s -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+  -d '{"session_id":"audit-probe-l3a-merge","project":"audit_probe","run_id":"run_l3a_A","turn_id":"turn_l3a_1","total_input_tokens":100,"turns":[{"turn_id":"turn_l3a_1","status":"running","tool_calls":[]}]}'
+HTTP 201
+$ curl -s -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+  -d '{"session_id":"audit-probe-l3a-merge","project":"audit_probe","run_id":"run_l3a_A","turn_id":"turn_l3a_1","total_input_tokens":200,"turns":[{"turn_id":"turn_l3a_1","status":"failed","error":{"type":"ValueError","message":"expected value at line 1 column 1"},"tool_calls":[{"tool_name":"format_jd_to_json","status":"error","error":{"type":"TimeoutError","message":"embedded_runtime timeout"}}]}]}'
+HTTP 201
+POST2 response id : 0193e6fc-d1a3-4e52-949c-fb50c8ef72ee
+DB row id         : 39530988-3836-4777-abaf-2874f9cb9d3b
+GET payload turns : [{"status":"running","tool_calls":[],"turn_id":"turn_l3a_1"}]
+DB row totals     : 200||
+GET POST2 id      : http=404 body=Trace not found
+# 判读：W-01 成立（旧轮胜出、error 丢失）；同时暴露报告未列的“幻影 id + POST 响应与库内 total 分叉”。
+
+## R3. W-03 total_* 三套口径（二报不带 turns）
+$ curl -s -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+  -d '{"session_id":"audit-probe-l3a-total","project":"audit_probe","total_input_tokens":1000,"turns":[{"turn_id":"turn_l3a_t1","status":"running","input_tokens":10,"output_tokens":5,"duration_ms":100}]}'
+HTTP 201
+$ $PSQL -F'|' -c "select total_input_tokens,(select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t) from traces where session_id='audit-probe-l3a-total';"
+1000|10
+$ curl -s -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+  -d '{"session_id":"audit-probe-l3a-total","project":"audit_probe","total_input_tokens":99999}'
+HTTP 201
+$ $PSQL -F'|' -c "select total_input_tokens,payload->>'total_input_tokens',(select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t),jsonb_array_length(payload->'turns') from traces where session_id='audit-probe-l3a-total';"
+99999|99999|10|1
+
+## R4. W-02 并发丢轮次（20 session × 2 并发同 session、不同 turn_id）
+$ for i in $(seq 1 20); do S="audit-probe-l3a-race-$i"; \
+  curl -s -o /dev/null -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+    -d "{\"session_id\":\"$S\",\"project\":\"audit_probe\",\"turns\":[{\"turn_id\":\"tA_$i\",\"status\":\"succeeded\",\"input_tokens\":1}]}" & \
+  curl -s -o /dev/null -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+    -d "{\"session_id\":\"$S\",\"project\":\"audit_probe\",\"turns\":[{\"turn_id\":\"tB_$i\",\"status\":\"failed\",\"input_tokens\":1}]}" & \
+  wait; done
+40/40 HTTP 201
+$ $PSQL -c "select count(*) sessions, sum(n) total_turns, sum(case when n=1 then 1 else 0 end) lost from (select session_id, jsonb_array_length(payload->'turns') n from traces where session_id like 'audit-probe-l3a-race-%') s;"
+ sessions | total_turns | lost
+       20 |          20 |   20
+# 判读：20/20 丢轮（报告 19/20、verifier 18/20；现象成立，比例随时序波动）。
+
+## R5. 建议“SELECT … FOR UPDATE 止血”对上述竞态的适用性
+$ $PSQL -c "begin; select id from traces where session_id='audit-probe-l3a-no-such-row' for update; rollback;"
+(0 rows)
+# 判读：session 首次上报时行不存在，SELECT ... FOR UPDATE 返回 0 行、不产生行锁；
+# 两个并发事务都能通过 SELECT 并各自 INSERT，ON CONFLICT 再以“自己看到的旧 payload”覆盖，仍会丢轮。
+
+## R6. 脱敏绕过面（单引号 Python repr / 裸 token=）
+$ curl -s -X POST "$BASE/api/v1/traces" -H "x-client-token: $CLIENT" -H 'content-type: application/json' \
+  -d '{"session_id":"audit-probe-l3a-redact","project":"audit_probe","turns":[{"turn_id":"t1","status":"failed","tool_calls":[{"tool_name":"login_tool","status":"error","error":{"type":"ValueError","message":"token=abc123def456 rejected"},"arguments_summary":"{'"'"'password'"'"': '"'"'hunter2'"'"'}"}]}]}'
+HTTP 201
+$ jq -c '.payload.turns[0].tool_calls[0]' <response>
+{"arguments_summary":"{'password': 'hunter2'}","error":{"message":"token=abc123def456 rejected","type":"ValueError"},"status":"error","tool_name":"login_tool"}
+# 判读：SECRET_PATTERNS（crates/ingest/src/sanitizer.rs:35）只匹配双引号形态；单引号 repr 与裸 token= 均未脱敏。
+# 独立 verifier 同结论：40-verify/02-independent-receipts.txt:822-829（c_single_quote / d_bare_token）。
+
+## R7. 清理与护栏
+$ $PSQL -c "select count(*) from traces where session_id like 'audit-probe-l3a%';"
+23
+$ $PSQL -c "delete from traces where session_id like 'audit-probe-l3a%';"
+DELETE 23
+$ $PSQL -c "select count(*) from traces where session_id like 'audit-probe-l3a%';"
+0
+$ $PSQL -c "select count(*) from traces;"
+37
+$ $PSQL -c "select count(*) from traces where project='job_copilot';"
+37
+$ $PSQL -c "select md5(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';"
+8abb872238435ca09fada802cda322db
+$ $PSQL -c "select count(*) from traces where session_id like 'audit-probe%';"
+0

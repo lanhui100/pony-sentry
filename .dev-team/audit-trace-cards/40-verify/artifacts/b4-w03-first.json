@@ -1,0 +1,3 @@
+{"session_id":"audit-probe-verify-9691a9-w03","project":"audit_probe","run_id":"run_w03","turn_id":"turn_w03_1",
+ "turns":[{"turn_id":"turn_w03_1","status":"failed","duration_ms":10,"input_tokens":5,"output_tokens":5}],
+ "total_input_tokens":1000,"total_output_tokens":1000,"total_duration_ms":10,"reported_at_ms":1792754960002}

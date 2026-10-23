@@ -1,0 +1,1 @@
+{"session_id":"audit-probe-e5-resp-vs-db","project":"audit_probe","run_id":"run_probe_e5_A","turn_id":"turn_probe_e5_1","turns":[{"turn_id":"turn_probe_e5_1","status":"failed","duration_ms":120000,"input_tokens":100,"output_tokens":10}],"total_input_tokens":100,"total_output_tokens":10,"total_duration_ms":120000,"reported_at_ms":1792754960002}

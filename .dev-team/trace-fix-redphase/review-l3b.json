@@ -1,0 +1,93 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "id": "L3B-F1",
+      "file": "crates/server/src/routes.rs",
+      "line": 1237,
+      "rule": "C5：任何 4xx/5xx 响应体不得包含数据库错误原文。issue 读/PATCH 路径用 `e.to_string()` 直出 RepositoryError，Display 为 `Database error: {sqlx::Error}`（crates/core/src/repository.rs:10），同类点还有 routes.rs:1249/1256/1292/1297/1325/1334/1348。",
+      "counterexample": "实测：SQLite 另一方持 BEGIN EXCLUSIVE 时 `GET /api/v1/issues`（带 x-admin-token）返回 500 text/plain，body=`Database error: error returned from database: (code: 5) database is locked`；PG 下同等路径会回显 constraint/表列名。同一时刻 trace 端点正确返回 `Internal error`，说明仅 issue 路径漏改。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F2",
+      "file": "crates/server/src/routes.rs",
+      "line": 1456,
+      "rule": "C7 指标 label 来自客户端且无界：`project`（routes.rs:1431 原样入库）与 `turn_status`（trace_v2.rs:209 返回客户端原始字符串）直接成为 traces_total/trace_turns_total 的 label；无长度/字符集校验、无 series 上限、进程内 BTreeMap 永不淘汰（routes.rs:57/89/94），每次 scrape 还全量 clone（routes.rs:110-118）。",
+      "counterexample": "实测：两次 POST /api/v1/traces 各带 100KB 的 project（总数仅 3 条 trace）→ `/metrics` 膨胀到 201881 字节、traces_total 出现 5 条 series；单进程可用 2MB/请求的 project 持续堆出百万级 label 组合（内存常驻 + scrape 放大）。`status=\"WEIRD-status-42\"` 同样被接受并出现在指标里。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F3",
+      "file": "migrations/0005_trace_turns.sql",
+      "line": 42,
+      "rule": "C1.1/C1.3 要求无 turn_id 的 turn 用 `turn_auto_<sha256(payload)[:16]>`；迁移里 SQLite 用 `substr(lower(hex(j.value)),1,16)`（=JSON 前 8 字节 hex），PG 用 `substr(md5(...),1,16)`（migrations/postgres/0005_trace_turns.sql:39），与运行时 sha256（crates/core/src/trace_v2.rs:238-245）三套口径不一致，回填行永不被后续上报命中。",
+      "counterexample": "实测（SQLite，0001-0004 建库 + 1 条 legacy turn 无 turn_id）：迁移后行 `turn_auto_7b22737461747573`（即 `{\"status` 的 hex），POST 同一 turn 无 turn_id → 追加 `turn_auto_16883215494afe36`，`turns_count` 1→2、payload.turns 2 条、token 汇总翻倍。现有测试只回填带显式 turn_id 的 turn（crates/core/tests/trace_v2_repository_test.rs:774-777），故 C9.10 未覆盖。",
+      "severity": "BLOCKER"
+    },
+    {
+      "id": "L3B-F4",
+      "file": "migrations/postgres/0005_trace_turns.sql",
+      "line": 29,
+      "rule": "既有生产库的 DDL/DML 全部串在一条 multi-statement raw_sql 里（crates/core/src/pg_repository.rs:55-57），隐式单事务：`ALTER TABLE traces ADD COLUMN`（:25-27）取 ACCESS EXCLUSIVE，3 个 `CREATE INDEX`（:21-22/29-31）无 CONCURRENTLY、全表 `UPDATE traces`（:53-60）无分批，锁一直持到语句结束。",
+      "counterexample": "traces 1e6 行时：整个迁移期间读请求（GET /api/v1/traces|issues、/metrics 的 COUNT）也被 ADD COLUMN 的 ACCESS EXCLUSIVE 挡住，写全部排队；单事务还叠加大表全量重写（表体积翻倍 + 回填 jsonb_array_elements 全扫）。另外 migrate() 每次启动无条件重放（pg_repository.rs:53-58），`WHERE COALESCE(turns_count,0)=0` 每次启动再全表扫一遍。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F5",
+      "file": "migrations/postgres/0005_trace_turns.sql",
+      "line": 60,
+      "rule": "C1.3 明文要求「down 迁移（PG）删除新表/列/索引，SQLite 以重建表实现或明确记录不支持回滚」；仓库无任何 0005 down 文件，.dev-team 与 docs 也无「不支持回滚」的记录。",
+      "counterexample": "生产升级后需回退：无 SQL 可删除 trace_turns/3 列/6 索引；且在 0005 已提交后降级到旧二进制，旧代码不写 trace_turns，聚合与轮次表持续分叉（仅靠 hydrate_legacy_turns 兜底）。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F6",
+      "file": "crates/server/src/routes.rs",
+      "line": 1565,
+      "rule": "PATCH /api/v1/traces/:id 直接吃 `Json<UpdateTraceRequest>` 的 axum 默认 rejection，未像 ingest 那样统一成 `Bad request`；返回 text/plain 且回显 serde 内部结构与全部合法枚举值。",
+      "counterexample": "实测 `PATCH /api/v1/traces/x` body `{\"eval_status\":\"bogus\"}` → 422 `Failed to deserialize the JSON body into the target type: eval_status: unknown variant `bogus`, expected one of `unreviewed`, `triage_good`, `triage_bad`, `eval_dataset`, `optimized`, `wontfix``；`{}` → 422 暴露 `missing field`。非 DB 原文，故不计为 F1，但违反 C5 统一错误体约定。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F7",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 235,
+      "rule": "`turn_auto_` 前缀未保留：显式 turn_id 无校验直接采用，客户端可提交 `turn_auto_<hex16>` 冒充服务端生成键；配合 session_id 完全由客户端指定（routes.rs:1399），持写 token 者可对已知会话的轮次做终态覆盖（C2.1 新终态覆盖旧）。",
+      "counterexample": "实测 `POST /api/v1/traces {\"session_id\":\"s3\",\"turns\":[{\"turn_id\":\"turn_auto_deadbeefdeadbeef\",\"status\":\"failed\"}]}` → 201，行 turn_id 即伪造值。实际利用需已知 session_id 与 turn 内容（turn_auto 键=内容哈希），不构成新增越权（任意 turn_id 本来可写），故列 MINOR。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F8",
+      "file": "web/src/App.vue",
+      "line": 913,
+      "rule": "抽屉无条件对整份 payload 做 `JSON.stringify(..., null, 2)`（另见 :508），无长度上限；而 traces.payload 是会话级聚合、每次上报全量重写且轮次无上限（crates/core/src/sqlite_repository.rs:875-884），列表一次最多回 100 行全量 payload。",
+      "counterexample": "构造 2MB/次的 trace 上报若干轮后打开抽屉：每次 nowRef 定时器（App.vue:1802，30s）触发重渲染都会重新 stringify 数 MB 对象；列表页 100×大 payload 直接拉爆主线程/标签页。无 XSS（全仓 0 处 v-html/innerHTML，纯插值）。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F9",
+      "file": "web/src/App.vue",
+      "line": 1449,
+      "rule": "C2 终态集里的 timed_out / max_tokens / aborted 不在 TURN_STATUS_FAILURE，徽标落 `neutral`（灰），而服务端同时给出 `diagnostics.error_contract=missing` 红字（trace_v2.rs:30/79），同一轮次出现「灰徽标 + 红失败原因」自相矛盾。",
+      "counterexample": "上报 `{\"status\":\"timed_out\"}`（无 error）→ 列表徽标显示灰色 unknown 风格、抽屉失败原因区显示红色「未上报错误详情」。未知状态未误判为绿色（unknown→neutral 正确），故非绿错判。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F10",
+      "file": "crates/server/src/routes.rs",
+      "line": 1432,
+      "rule": "写 token（非 admin）可经 ingest 直接写评审结论 `eval_status`（crates/core/src/sqlite_repository.rs:1083 仅在已有非 unreviewed 值时保留旧值，首次 INSERT 即采纳客户端值），绕过 PATCH 的 admin 鉴权边界；docs/trace-contract.md:12 把它文档化为可选上报键，属设计遗留而非实现偏离。",
+      "counterexample": "实测 `POST /api/v1/traces` 仅带 x-client-token，body 含 `\"eval_status\":\"triage_good\"` → 201 响应与库内列均为 triage_good；控制台将把 agent 自评显示为已评审。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F11",
+      "file": "crates/server/src/routes.rs",
+      "line": 594,
+      "rule": "/metrics 挂在顶层 Router，未挂 admin_auth_middleware（对比 admin_routes :581-584）；无凭证即可读到客户端可控的 project 名与计数，且每次 scrape 做 events 全表 COUNT（:873）。",
+      "counterexample": "实测不带任何 token `curl /metrics` → 200，含 `pony_sentry_traces_total{project=\"p1\",turn_status=\"completed\"}`；与 F2 叠加时匿名方可枚举/放大客户端 project。",
+      "severity": "MINOR"
+    }
+  ]
+}

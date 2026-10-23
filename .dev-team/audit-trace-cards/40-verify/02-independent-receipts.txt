@@ -1,0 +1,872 @@
+##############################################################################
+# 02-independent-receipts.txt — verifier(T4) 独立复现收据
+# 生成方式：本目录 run-independent-receipts.sh / -2.sh / -3.sh 依次执行并追加重定向；
+#           每条均为「命令原文 + 真实 stdout/stderr + [exit N]」，未经任何人工润色。
+# 关键纪律：不复制 T2/T3 输出；实验写入只用 session_id 前缀 audit-probe-verify-9691a9*，
+#           清理只删该精确前缀（见 B3-clean：我方 0 行、他人 audit-probe 行 6 行完好、
+#           基线 md5 8abb872238435ca09fada802cda322db 前后一致、thread_ref_v1_* 24 行前后一致）。
+#
+# 章节索引（每条结论 → 收据位置）：
+#   A  库行 + payload 键全集（psql/jq）               → 「$ psql -x -c select ... from traces where id=ca0b5494」(A1)、A2/A3/A4/A5/A6
+#   A7 生产者原始 payload vs 库内 payload 逐字一致     → DIFF_NONE / 6230 bytes 两边相同
+#   A8 脱敏对 tool 层文本的绕过面（单引号 repr、裸 token=）→ A8/A8b 五写法对照
+#   B  首轮 HTTP 上报实验（前缀 audit-probe-e1..e7）   → 已被 19:5x 外部 delete 干扰，仅作历史留痕
+#   B2 POST 响应体 vs 库内真值 / total 口径切换        → 同被外部删除干扰，结论以 B3 为准
+#   B3 Lead 纪律后重跑（唯一前缀 audit-probe-verify-9691a9）→ 全部 ACTIVE 证据在此：
+#       E0 缺 session_id → 400；E1 未知顶层字段静默丢弃（turns 内未知字段反而保留）；
+#       E2 turns 无 schema 校验（错类型/枚举外/负数/裸字符串/重复 turn_id 全入库；仅 turns 非数组才 422）；
+#       E3/E5 同 turn 二次上报：payload 终态=旧值，行级 total_*=新值，POST 响应体 total 与库内不一致，
+#             POST 返回的 id 是幻影 id（GET 该 id → 404，库内真实 id 是另一条）；
+#       E6 total_* 首报不校验（999999 vs turns 求和 3），追加轮后改由 turns 重算（8/10/16）；
+#       E7 同 session 两 run 只 1 行，run_id 列=最新 run，旧 run 只活在 payload.turns；
+#       E7b List 接口对 run_id 参数无感（返回全量 48 条、命中 0 条）；
+#       B3-clean 清理与三方护栏收据。
+#   C  curl 静态产物关键字；C2 出现次数统计；C3 真实浏览器渲染截图 + Console 0 error
+##############################################################################
+
+==============================================================
+# 02-independent-receipts — verifier 独立复现（自跑，未复制 T2/T3）
+# 采集时间: 2026-10-23T19:48:32+08:00   主机: devserver   cwd: /home/dm/pony-sentry
+# 服务: pid 516790 /usr/local/bin/pony-sentry-server 监听 :3000
+# git HEAD: d6904b84bf5c32dbfbdfb87e4b857ae5a3ff70b7 2026-10-23 10:53:11 +0800
+# 二进制 mtime: 2026-10-23 11:20:41.781478462 +0800
+==============================================================
+
+############ A. 库行 + payload 键全集（psql/jq，独立查询） ############
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -x -c "select id,session_id,run_id,turn_id,environment,release,project,eval_status,total_input_tokens,total_output_tokens,total_duration_ms,reported_at,created_at,updated_at,octet_length(payload::text) as payload_bytes, md5(payload::text) as payload_md5 from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'"
+-[ RECORD 1 ]-------+---------------------------------------
+id                  | ca0b5494-ae1b-47db-8e00-c9e7abbb6779
+session_id          | thread_ref_v1_e9b4ec395c96d8913c106ef8
+run_id              | run_83c1879e338d442f953a5dd4b8d1646a
+turn_id             | turn_5dd7639f928549dfb86d96cbe6cbf33a
+environment         | development
+release             | dev
+project             | job_copilot
+eval_status         | unreviewed
+total_input_tokens  | 36612
+total_output_tokens | 1368
+total_duration_ms   | 120272
+reported_at         | 2026-10-23 11:29:20.002+00
+created_at          | 2026-10-23 11:29:20.029042+00
+updated_at          | 2026-10-23 11:29:20.029042+00
+payload_bytes       | 5821
+payload_md5         | 8abb872238435ca09fada802cda322db
+
+[exit 0]
+
+--- A2 payload 顶层键（jsonb_object_keys, 排序） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select k from traces, jsonb_object_keys(payload) k where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779' order by k"
+environment
+eval_status
+extra
+project
+release
+reported_at_ms
+run_id
+session_id
+tags
+thread_id
+total_duration_ms
+total_input_tokens
+total_output_tokens
+turn_id
+turns
+[exit 0]
+
+--- A3 turns[0] 键全集 / tool_calls[] 键并集 ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select jsonb_object_keys(payload->'turns'->0) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'" | sort -u
+attempt_index
+cache_hit_tokens
+degraded
+duration_ms
+input_tokens
+model
+output_tokens
+run_id
+status
+step
+tool_calls
+turn_id
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select distinct jsonb_object_keys(tc) from traces, jsonb_array_elements(payload->'turns') t, jsonb_array_elements(t->'tool_calls') tc where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779' order by 1"
+arguments_summary
+duration_ms
+error
+output
+status
+tool_call_id
+tool_name
+[exit 0]
+
+--- A4 结构计数与状态分布（turns/tool_calls/status/tool error 空值） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "select jsonb_array_length(payload->'turns') as turns, (select count(*) from jsonb_array_elements(payload->'turns') t, jsonb_array_elements(t->'tool_calls') tc) as tool_calls, (select string_agg(t->>'status','|') from jsonb_array_elements(payload->'turns') t) as turn_status, (select string_agg(coalesce(tc->>'status','null'),'|') from jsonb_array_elements(payload->'turns') t, jsonb_array_elements(t->'tool_calls') tc) as tool_status, (select count(*) from jsonb_array_elements(payload->'turns') t, jsonb_array_elements(t->'tool_calls') tc where tc->'error' is null or tc->'error'='null'::jsonb) as tool_error_null from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'"
+ turns | tool_calls | turn_status |      tool_status      | tool_error_null 
+-------+------------+-------------+-----------------------+-----------------
+     1 |          3 | failed      | success|success|error |               3
+(1 row)
+
+[exit 0]
+
+--- A5 GET API 返回体 vs 库 payload 键集合一致性 ---
+
+$ curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' http://127.0.0.1:3000/api/v1/traces/ca0b5494-ae1b-47db-8e00-c9e7abbb6779 -o .dev-team/audit-trace-cards/40-verify/artifacts/api-get-trace.json -w 'http=%{http_code}\n'
+http=200
+[exit 0]
+
+$ jq -r 'keys[]' .dev-team/audit-trace-cards/40-verify/artifacts/api-get-trace.json | tr '\n' ' '; echo
+created_at environment eval_status id payload project release reported_at run_id session_id total_duration_ms total_input_tokens total_output_tokens turn_id updated_at 
+[exit 0]
+
+$ jq -r '.payload|keys[]' .dev-team/audit-trace-cards/40-verify/artifacts/api-get-trace.json | tr '\n' ' '; echo
+environment eval_status extra project release reported_at_ms run_id session_id tags thread_id total_duration_ms total_input_tokens total_output_tokens turn_id turns 
+[exit 0]
+
+$ jq -e '.payload.turns[0].tool_calls|length' .dev-team/audit-trace-cards/40-verify/artifacts/api-get-trace.json
+3
+[exit 0]
+
+$ curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' 'http://127.0.0.1:3000/api/v1/traces?session_id=thread_ref_v1_e9b4ec395c96d8913c106ef8' -o .dev-team/audit-trace-cards/40-verify/artifacts/api-list-session.json -w 'http=%{http_code}\n'; jq -r 'length' .dev-team/audit-trace-cards/40-verify/artifacts/api-list-session.json
+http=200
+1
+[exit 0]
+
+--- A6 List 接口筛选能力实测：run_id / turn_id / 时间窗参数是否被接受 ---
+
+$ curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' 'http://127.0.0.1:3000/api/v1/traces?run_id=run_83c1879e338d442f953a5dd4b8d1646a' -o .dev-team/audit-trace-cards/40-verify/artifacts/api-list-runid.json -w 'http=%{http_code}\n'; jq -r 'length' .dev-team/audit-trace-cards/40-verify/artifacts/api-list-runid.json
+http=200
+37
+[exit 0]
+
+$ curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' 'http://127.0.0.1:3000/api/v1/traces?since=2026-10-23T00:00:00Z' -o .dev-team/audit-trace-cards/40-verify/artifacts/api-list-since.json -w 'http=%{http_code}\n'; jq -r 'length' .dev-team/audit-trace-cards/40-verify/artifacts/api-list-since.json
+http=200
+37
+[exit 0]
+
+############ B. 真实 HTTP 上报实验（POST http://127.0.0.1:3000/api/v1/traces） ############
+### 实验前基线护栏：目标行 md5 与行数（实验后必须不变）
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select md5(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-before.txt
+8abb872238435ca09fada802cda322db
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'thread_ref_v1_%'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-before.txt
+24
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'audit-probe-%'"
+0
+[exit 0]
+
+### E0 缺 session_id/thread_id 的上报（预期被拒）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e0-missing-session.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Missing session_id or thread_id
+http=400
+[exit 0]
+
+### E1 未知顶层字段（future_field_cost_usd / unknown_nested_object / error）是否保留
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e1-unknown-top.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e1.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -r '.payload|keys[]' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e1.json | tr '\n' ' '; echo
+environment eval_status extra project release reported_at_ms run_id session_id tags thread_id total_duration_ms total_input_tokens total_output_tokens turn_id turns 
+[exit 0]
+
+$ jq -r '.payload.future_field_cost_usd, .payload.unknown_nested_object, .payload.error' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e1.json
+null
+null
+null
+[exit 0]
+
+$ jq -r '.payload.turns[0].unknown_turn_field, .payload.turns[0].tool_calls[0].retry_count, .payload.turns[0].tool_calls[0].unknown_call_field' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e1.json
+KEEP_ME_TURN_LEVEL
+3
+KEEP_ME_CALL_LEVEL
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select payload ? 'future_field_cost_usd', payload ? 'error', payload->'turns'->0 ? 'unknown_turn_field' from traces where session_id='audit-probe-e1-unknown-top'"
+f|f|t
+[exit 0]
+
+### E2 turns 元素类型/枚举/负数是否被强校验（含重复 turn_id、裸字符串元素）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e2-bad-turns.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e2.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -c '.payload.turns' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e2.json
+[{"duration_ms":-1,"input_tokens":"NOT_A_NUMBER","status":12345,"tool_calls":"NOT_AN_ARRAY","turn_id":"turn_probe_e2_1"},"BARE_STRING_TURN",{},{"dup":true,"status":"failed","turn_id":"turn_probe_e2_1"}]
+[exit 0]
+
+$ jq -r '.total_input_tokens' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e2.json
+-5
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select jsonb_typeof(payload->'turns'), jsonb_array_length(payload->'turns'), payload->'turns'->0->>'status', jsonb_typeof(payload->'turns'->0->'tool_calls'), payload->'turns'->1 from traces where session_id='audit-probe-e2-bad-turns'"
+array|4|12345|string|"BARE_STRING_TURN"
+[exit 0]
+
+### E2b turns 不是数组（serde 层唯一会拒的形态）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e2b-turns-object.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Failed to deserialize the JSON body into the target type: turns: invalid type: map, expected a sequence at line 1 column 64
+http=422
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e2c-root-not-object.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Failed to deserialize the JSON body into the target type: invalid length 2, expected struct AgentTraceIngestRequest with 15 elements at line 1 column 32
+http=422
+[exit 0]
+
+### E3 同一 session+turn 二次上报：终态取旧值还是新值
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e3-first.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-first.json -w 'first http=%{http_code}\n'
+first http=201
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e3-second.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-second.json -w 'second http=%{http_code}\n'
+second http=201
+[exit 0]
+
+$ jq -r '.payload.turns|length' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-second.json
+1
+[exit 0]
+
+$ jq -c '{status:.payload.turns[0].status, err:.payload.turns[0].error, dur:.payload.turns[0].duration_ms, in:.payload.turns[0].input_tokens, attempt:.payload.turns[0].attempt_index}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-second.json
+{"status":"failed","err":{"message":"OLD_FAILURE","type":"TimeoutError"},"dur":120000,"in":100,"attempt":1}
+[exit 0]
+
+$ jq -c '{row_run_id:.run_id, row_turn_id:.turn_id, row_total_in:.total_input_tokens, row_total_out:.total_output_tokens, row_total_dur:.total_duration_ms}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-second.json
+{"row_run_id":"run_probe_e3_B","row_turn_id":"turn_probe_e3_1","row_total_in":999,"row_total_out":99,"row_total_dur":500}
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select run_id, turn_id, payload->'turns'->0->>'run_id', payload->'turns'->0->>'status', payload->'turns'->0->>'duration_ms', total_input_tokens, total_output_tokens, total_duration_ms, reported_at from traces where session_id='audit-probe-e3-remerge'"
+run_probe_e3_B|turn_probe_e3_1||failed|120000|100|10|120000|2026-10-23 11:30:00.002+00
+[exit 0]
+--- E3 三次上报（再补一个 succeeded 增量轮）观察合并顺序 ---
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e3-third.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-third.json -w 'third http=%{http_code}\n'
+third http=201
+[exit 0]
+
+$ jq -c '.payload.turns' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-third.json
+[{"attempt_index":1,"duration_ms":120000,"error":{"message":"OLD_FAILURE","type":"TimeoutError"},"input_tokens":100,"output_tokens":10,"status":"failed","turn_id":"turn_probe_e3_1"}]
+[exit 0]
+
+$ jq -c '{row_total_in:.total_input_tokens,row_total_dur:.total_duration_ms}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e3-third.json
+{"row_total_in":1,"row_total_dur":7}
+[exit 0]
+
+### E4 total_* 与 turns 求和不一致时，库行取哪个口径（首次上报）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e4-total-mismatch.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e4-first.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -c '{row_total_in:.total_input_tokens, row_total_out:.total_output_tokens, row_total_dur:.total_duration_ms, turns_sum_in:([.payload.turns[].input_tokens]|add), payload_total_in:.payload.total_input_tokens}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e4-first.json
+{"row_total_in":999999,"row_total_out":1,"row_total_dur":7,"turns_sum_in":3,"payload_total_in":999999}
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens, total_output_tokens, total_duration_ms, (select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_in, (select sum((t->>'output_tokens')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_out, (select sum((t->>'duration_ms')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_dur from traces where session_id='audit-probe-e4-total-mismatch'"
+999999|1|7|3|4|5
+[exit 0]
+### E4b 同一 session 追加第二轮后口径是否切换（合并路径重算 total）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e4-second-turn.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e4-second.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -c '{turns:([.payload.turns[]|{id:.turn_id,in:.input_tokens}]), row_total_in:.total_input_tokens, payload_total_in:.payload.total_input_tokens, payload_total_dur:.payload.total_duration_ms, row_total_dur:.total_duration_ms}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e4-second.json
+{"turns":[{"id":"turn_probe_e4_1","in":3},{"id":"turn_probe_e4_2","in":5}],"row_total_in":777777,"payload_total_in":8,"payload_total_dur":16,"row_total_dur":13}
+[exit 0]
+
+############ B-clean. 实验行清理与护栏收据 ############
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "select session_id, id from traces where session_id like 'audit-probe-%' order by session_id"
+          session_id           |                  id                  
+-------------------------------+--------------------------------------
+ audit-probe-e1-unknown-top    | 53f28c98-1a02-45a6-b113-6ea3e426619e
+ audit-probe-e2-bad-turns      | 25d72dd7-2f0e-4dbc-ad00-aa5404d342a3
+ audit-probe-e3-remerge        | 78a43a04-4598-47e7-96a7-1cb31bba3543
+ audit-probe-e4-total-mismatch | 1065398d-2b44-4cc0-99b4-574cc7b34c1b
+(4 rows)
+
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "delete from traces where session_id like 'audit-probe-%'"
+DELETE 4
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'audit-probe-%'"
+0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select md5(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-after.txt
+8abb872238435ca09fada802cda322db
+[exit 0]
+
+$ diff <(cat .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-before.txt) <(cat .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-after.txt) && echo 'BASELINE_UNCHANGED_OK exit=0'
+BASELINE_UNCHANGED_OK exit=0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'thread_ref_v1_%'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-after.txt
+24
+[exit 0]
+
+$ diff <(cat .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-before.txt) <(cat .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-after.txt) && echo 'THREAD_REF_COUNT_UNCHANGED_OK exit=0'
+THREAD_REF_COUNT_UNCHANGED_OK exit=0
+[exit 0]
+
+############ C. 控制台渲染证据（静态产物 + 关键字） ############
+
+$ curl -s http://127.0.0.1:3000/ -o .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html -w 'http=%{http_code} bytes=%{size_download}\n'
+http=200 bytes=348860
+[exit 0]
+
+$ stat -c '%y %s %n' web/dist/index.html .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html
+2026-10-23 11:20:18.804953111 +0800 348860 web/dist/index.html
+2026-10-23 19:48:33.868541410 +0800 348860 .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html
+[exit 0]
+
+$ for k in 'tool_calls' 'arguments_summary' 'output' "call.error" 'trace' 'session_id' '步骤/工具' '输出 output' '错误 error'; do printf '%-22s %s\n' "$k" "$(grep -c -- "$k" .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html)"; done
+tool_calls             1
+arguments_summary      1
+output                 1
+call.error             0
+trace                  1
+session_id             1
+步骤/工具          0
+输出 output          1
+错误 error           1
+[exit 0]
+
+$ grep -o 'tool_calls[^"]\{0,40\}' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | head -5
+tool_calls&&e.tool_calls.length?(V(),H(`div`,mS,[s
+tool_calls,(e,t)=>(V(),H(`details`,{key:`call-`+t,
+[exit 0]
+
+############ D. 源码定位（运行中二进制 = git HEAD 编译；行号可对源码） ############
+
+$ grep -n 'pub turns: Option<Vec<serde_json::Value>>' crates/server/src/routes.rs
+362:    pub turns: Option<Vec<serde_json::Value>>,
+[exit 0]
+
+$ grep -n 'pub struct AgentTraceIngestRequest' crates/server/src/routes.rs
+351:pub struct AgentTraceIngestRequest {
+[exit 0]
+
+$ grep -n 'ON CONFLICT (session_id) DO UPDATE' crates/core/src/pg_repository.rs
+665:            ON CONFLICT (session_id) DO UPDATE SET
+[exit 0]
+
+$ grep -n 'merge_turns\|旧轮保留' crates/core/src/trace_merge.rs
+3://! 契约（T2 决策）：旧轮保留、新轮按序追加；重复轮次以旧为准。
+19:            let combined_turns = merge_turns(old_turns, new_turns);
+69:fn merge_turns(old: &[Value], new: &[Value]) -> Vec<Value> {
+[exit 0]
+
+$ grep -n 'call.error\|call.output\|arguments_summary' web/src/App.vue | head -12
+875:                        <div v-if="call.error" class="space-y-0.5">
+877:                          <pre class="text-rose-400 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto no-scrollbar">{{ stringifySpanValue(call.error) }}</pre>
+1390:  return stringifySpanValue(call.arguments_summary)
+1395:  return stringifySpanValue(call.output)
+[exit 0]
+
+############ 收据结束 2026-10-23T19:48:33+08:00 ############
+
+############ B2. POST 响应体 vs 库内落盘真值（同一时刻对比） ############
+### 动机：crates/core/src/pg_repository.rs:698-701 返回 saved=trace（total_* 未用重算值），
+###       而入库用的是 effective_* 重算值（:636-657）——验证二者是否分叉。
+
+### E5 step1 首次上报（turn=failed, totals=100/10/120000）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e5-first.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e5-first.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens,total_output_tokens,total_duration_ms,payload->'turns'->0->>'status',reported_at from traces where session_id='audit-probe-e5-resp-vs-db'"
+100|10|120000|failed|2026-10-23 11:29:20.002+00
+[exit 0]
+
+### E5 step2 同 turn 二次上报（turn=succeeded, totals=999/99/500）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e5-second.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e5-second.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+--- POST 响应体（API 返回给生产者的真值） ---
+
+$ jq -c '{id:.id, run_id:.run_id, payload_turn_status:.payload.turns[0].status, payload_total_in:.payload.total_input_tokens, row_total_in:.total_input_tokens, row_total_dur:.total_duration_ms, reported_at:.reported_at}' .dev-team/audit-trace-cards/40-verify/artifacts/resp-e5-second.json
+{"id":"ff842bbe-3bd2-4e63-8fbf-0d155612a4ad","run_id":"run_probe_e5_B","payload_turn_status":"failed","payload_total_in":100,"row_total_in":999,"row_total_dur":500,"reported_at":"2026-10-23T11:30:00.002Z"}
+[exit 0]
+--- 同一条 trace 库内真值（psql） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select id,run_id,total_input_tokens,total_output_tokens,total_duration_ms,payload->'turns'->0->>'status',payload->'turns'->0->>'duration_ms',payload->'turns'->0->>'input_tokens',reported_at from traces where session_id='audit-probe-e5-resp-vs-db'"
+b566d60a-c31b-443d-aa9d-c06f235b2c8f|run_probe_e5_B|100|10|120000|failed|120000|100|2026-10-23 11:30:00.002+00
+[exit 0]
+--- GET /api/v1/traces/:id 真值（读路径） ---
+
+$ TRACE_ID=$(jq -r .id .dev-team/audit-trace-cards/40-verify/artifacts/resp-e5-second.json); curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' http://127.0.0.1:3000/api/v1/traces/$TRACE_ID | jq -c '{run_id,row_total_in:.total_input_tokens,row_total_dur:.total_duration_ms,payload_total_in:.payload.total_input_tokens,payload_total_dur:.payload.total_duration_ms,turn_status:.payload.turns[0].status,reported_at}'
+jq: parse error: Invalid numeric literal at line 1, column 6
+[exit 5]
+
+### E6 total_* 口径切换：首次上报 total 与 turns 求和矛盾 → 追加新轮后库内 total 是否被重算
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e6-first.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e6-first.json -w 'first http=%{http_code}\n'
+first http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens, total_output_tokens, total_duration_ms, (select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t), (select sum((t->>'duration_ms')::int) from jsonb_array_elements(payload->'turns') t) from traces where session_id='audit-probe-e6-total-rule'"
+999999|1|7|3|5
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e6-second.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e6-second.json -w 'second http=%{http_code}\n'
+second http=201
+[exit 0]
+--- 追加新轮后：库行列 vs payload 内 total vs turns 求和 ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens, total_output_tokens, total_duration_ms, payload->>'total_input_tokens', payload->>'total_duration_ms', (select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t), (select sum((t->>'duration_ms')::int) from jsonb_array_elements(payload->'turns') t), jsonb_array_length(payload->'turns') from traces where session_id='audit-probe-e6-total-rule'"
+8|10|16|8|16|8|16|2
+[exit 0]
+
+### E7 覆盖式 upsert：同一 session 两个不同 run 的轮次如何并存（run_id 列被谁代表）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e7-runA.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e7-A.json -w 'A http=%{http_code}\n'
+A http=201
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/probe-e7-runB.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/resp-e7-B.json -w 'B http=%{http_code}\n'
+B http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select count(*), max(run_id), max(turn_id), payload->'turns'->0->>'run_id', payload->'turns'->1->>'run_id', jsonb_array_length(payload->'turns'), total_input_tokens from traces where session_id='audit-probe-e7-two-runs' group by payload, total_input_tokens"
+1|run_probe_e7_B|turn_probe_e7_b1|run_probe_e7_A|run_probe_e7_B|2|20
+[exit 0]
+--- 同一 session 是否只有一行（session_id 唯一） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id='audit-probe-e7-two-runs'"
+1
+[exit 0]
+
+############ B2-clean. 补测行清理 ############
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "delete from traces where session_id like 'audit-probe-%'"
+DELETE 3
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'audit-probe-%'"
+0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'audit-probe-%' or session_id='audit-probe-e0'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/audit-probe-count-final.txt
+0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select md5(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-after2.txt
+8abb872238435ca09fada802cda322db
+[exit 0]
+
+$ diff .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-before.txt .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-after2.txt && echo 'BASELINE_UNCHANGED_OK exit=0'
+BASELINE_UNCHANGED_OK exit=0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'thread_ref_v1_%'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-after2.txt
+24
+[exit 0]
+
+$ diff .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-before.txt .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-after2.txt && echo 'THREAD_REF_COUNT_UNCHANGED_OK exit=0'
+THREAD_REF_COUNT_UNCHANGED_OK exit=0
+[exit 0]
+
+############ C2. 控制台渲染证据（按出现次数计，dist 为单行压缩文件） ############
+
+$ grep -o 'tool_calls' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+3
+[exit 0]
+
+$ grep -o 'arguments_summary' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o '错误 error' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o '输出 output' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o '参数 arguments' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o '执行轨迹' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o '工具调用' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+
+$ grep -o 'Payload 详情' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+1
+[exit 0]
+--- turn 级字段是否有渲染：attempt_index / degraded / status（turn 头只渲染 phase/sequence/model/duration） ---
+
+$ grep -o 'attempt_index' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+0
+[exit 0]
+
+$ grep -o 'degraded' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+5
+[exit 0]
+
+$ grep -o 'cache_hit_tokens' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+3
+[exit 0]
+
+$ grep -o 'turn.error' .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html | wc -l
+0
+[exit 0]
+--- dist 产物与源码同源（index.html 由 vite 单文件内联） ---
+
+$ sha256sum web/dist/index.html .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html
+2ed60d1034b35dd05588ff8a78a1ea8a9e0c63ddb65082452e4a6fb8cbd55163  web/dist/index.html
+2ed60d1034b35dd05588ff8a78a1ea8a9e0c63ddb65082452e4a6fb8cbd55163  .dev-team/audit-trace-cards/40-verify/artifacts/console-index.html
+[exit 0]
+
+############ 补测收据结束 2026-10-23T19:49:17+08:00 ############
+
+==============================================================
+# B3 重跑（Lead 纪律：唯一前缀 audit-probe-verify-9691a9）
+# 背景：19:5x 有他人执行 delete ... like 'audit-probe-%'，B/B2 的实验行被外部删除；
+#       本段全部实验改用唯一前缀，清理只删 audit-probe-verify-9691a9%，并附不触碰他人行的收据。
+# 时间: 2026-10-23T19:50:00+08:00
+==============================================================
+
+### B3-0 现场取证：当前 audit-probe 残留行归属（证明本次不误删他人行）
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "select session_id, created_at from traces where session_id like 'audit-probe%' order by session_id"
+        session_id         |          created_at           
+---------------------------+-------------------------------
+ audit-probe-core-big1     | 2026-10-23 11:49:52.141901+00
+ audit-probe-core-run1     | 2026-10-23 11:49:41.846426+00
+ audit-probe-e8-phantom-id | 2026-10-23 11:49:28.559223+00
+ audit-probe-merge1        | 2026-10-23 11:49:19.807966+00
+ audit-probe-merge2        | 2026-10-23 11:49:19.898928+00
+ audit-probe-total1        | 2026-10-23 11:49:28.739265+00
+ audit-probe-total2        | 2026-10-23 11:49:28.805514+00
+(7 rows)
+
+[exit 0]
+
+### B3-1 前次自建行清理（仅精确 id 前缀 audit-probe-e8-phantom-id，属我 19:49 的探测行）
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "delete from traces where session_id='audit-probe-e8-phantom-id'"
+DELETE 1
+[exit 0]
+
+### E0 session_id/thread_id 双缺 → 拒绝
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e0-missing-session.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Missing session_id or thread_id
+http=400
+[exit 0]
+
+### E1 未知顶层字段 / turns 内未知字段的保留差异
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e1-unknown-top.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e1.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -c '{top_keys:(.payload|keys), has_future_field:(.payload|has("future_field_cost_usd")), has_error:(.payload|has("error")), turn_unknown:.payload.turns[0].unknown_turn_field, call_unknown:.payload.turns[0].tool_calls[0].unknown_call_field, call_retry:.payload.turns[0].tool_calls[0].retry_count}' .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e1.json
+{"top_keys":["environment","eval_status","extra","project","release","reported_at_ms","run_id","session_id","tags","thread_id","total_duration_ms","total_input_tokens","total_output_tokens","turn_id","turns"],"has_future_field":false,"has_error":false,"turn_unknown":"KEEP_ME_TURN_LEVEL","call_unknown":"KEEP_ME_CALL_LEVEL","call_retry":3}
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select payload ? 'future_field_cost_usd', payload ? 'error', payload->'turns'->0 ? 'unknown_turn_field', payload->'turns'->0->'tool_calls'->0 ? 'retry_count' from traces where session_id='audit-probe-verify-9691a9-e1'"
+f|f|t|t
+[exit 0]
+
+### E2 turns 元素无 schema 校验（错类型/枚举外/负数/裸字符串/重复 turn_id 全部入库）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e2-bad-turns.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e2.json -w 'http=%{http_code}\n'
+http=201
+[exit 0]
+
+$ jq -c '.payload.turns' .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e2.json
+[{"duration_ms":-1,"input_tokens":"NOT_A_NUMBER","status":12345,"tool_calls":"NOT_AN_ARRAY","turn_id":"turn_9691a9_e2_1"},"BARE_STRING_TURN",{},{"dup":true,"status":"failed","turn_id":"turn_9691a9_e2_1"}]
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select jsonb_typeof(payload->'turns'), jsonb_array_length(payload->'turns'), payload->'turns'->0->>'status', jsonb_typeof(payload->'turns'->0->'tool_calls'), payload->'turns'->1, total_input_tokens from traces where session_id='audit-probe-verify-9691a9-e2'"
+array|4|12345|string|"BARE_STRING_TURN"|-5
+[exit 0]
+### E2b turns 为对象（serde 层唯一拦截的形态）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e2b-turns-object.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Failed to deserialize the JSON body into the target type: turns: invalid type: map, expected a sequence at line 1 column 78
+http=422
+[exit 0]
+### E2c 顶层不是对象
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e2c-root-array.json http://127.0.0.1:3000/api/v1/traces -w '\nhttp=%{http_code}\n'
+Failed to deserialize the JSON body into the target type: invalid length 2, expected struct AgentTraceIngestRequest with 15 elements at line 1 column 46
+http=422
+[exit 0]
+
+### E3/E5 同一 session+turn 二次上报（failed→succeeded）：终态、总量、响应体、id
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e3-first.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-first.json -w 'POST1 http=%{http_code}\n'
+POST1 http=201
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e3-second.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-second.json -w 'POST2 http=%{http_code}\n'
+POST2 http=201
+[exit 0]
+--- POST2 响应体（生产者看到的终态） ---
+
+$ jq -c '{resp_id:.id, run_id:.run_id, turn_status:.payload.turns[0].status, turn_attempt:.payload.turns[0].attempt_index, payload_total_in:.payload.total_input_tokens, resp_total_in:.total_input_tokens, resp_total_dur:.total_duration_ms, reported_at:.reported_at}' .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-second.json
+{"resp_id":"c8dcee71-c3bd-4833-87b0-a7e12144b2bd","run_id":"run_9691a9_e3_B","turn_status":"failed","turn_attempt":1,"payload_total_in":100,"resp_total_in":999,"resp_total_dur":500,"reported_at":"2026-10-23T11:30:00.002Z"}
+[exit 0]
+--- 库内真值（同一条 session） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select id, run_id, total_input_tokens, total_output_tokens, total_duration_ms, payload->'turns'->0->>'status', payload->'turns'->0->>'attempt_index', payload->'turns'->0->>'input_tokens', payload->'turns'->0->>'error', reported_at from traces where session_id='audit-probe-verify-9691a9-e3'"
+93139a38-8e4b-472a-b53c-f91692ca3fb5|run_9691a9_e3_B|100|10|120000|failed|1|100|{"type": "TimeoutError", "message": "OLD_FAILURE"}|2026-10-23 11:30:00.002+00
+[exit 0]
+--- 幻影 id：用 POST 返回的 id 去 GET ---
+
+$ RID=$(jq -r .id .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-second.json); curl -s -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-get-phantom.txt -w 'GET resp_id http=%{http_code}\n' -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' http://127.0.0.1:3000/api/v1/traces/$RID; echo body=$(cat .dev-team/audit-trace-cards/40-verify/artifacts/b3-get-phantom.txt)
+GET resp_id http=404
+body=Trace not found
+[exit 0]
+
+$ DID=$(psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select id from traces where session_id='audit-probe-verify-9691a9-e3'"); echo DB_ID=$DID; curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' http://127.0.0.1:3000/api/v1/traces/$DID | jq -c '{id, run_id, total_input_tokens, total_duration_ms, turn_status:.payload.turns[0].status, payload_total_in:.payload.total_input_tokens}'
+DB_ID=93139a38-8e4b-472a-b53c-f91692ca3fb5
+{"id":"93139a38-8e4b-472a-b53c-f91692ca3fb5","run_id":"run_9691a9_e3_B","total_input_tokens":100,"total_duration_ms":120000,"turn_status":"failed","payload_total_in":100}
+[exit 0]
+--- session 行数（唯一约束：1 session = 1 行） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id='audit-probe-verify-9691a9-e3'"
+1
+[exit 0]
+### E3c 第三次上报不同 turn（新增轮）观察 turns 数组顺序与 total 重算
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e3-third.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-third.json -w 'POST3 http=%{http_code}\n'
+POST3 http=201
+[exit 0]
+
+$ jq -c '[.payload.turns[]|{id:.turn_id,status:.status,tokens:.input_tokens}]' .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e3-third.json
+[{"id":"turn_9691a9_e3_1","status":"failed","tokens":100},{"id":"turn_9691a9_e3_2","status":"succeeded","tokens":5}]
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens,total_output_tokens,total_duration_ms,run_id,turn_id,(select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t) from traces where session_id='audit-probe-verify-9691a9-e3'"
+105|16|120011|run_9691a9_e3_C|turn_9691a9_e3_2|105
+[exit 0]
+
+### E6 total_* 与 turns 求和不一致：首次上报不做一致性校验，追加轮后改由 turns 求和重算（口径切换）
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e6-first.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e6-first.json -w 'POST1 http=%{http_code}\n'
+POST1 http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens, total_output_tokens, total_duration_ms, (select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_in, (select sum((t->>'output_tokens')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_out from traces where session_id='audit-probe-verify-9691a9-e6'"
+999999|1|7|3|4
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e6-second.json http://127.0.0.1:3000/api/v1/traces -o .dev-team/audit-trace-cards/40-verify/artifacts/b3-resp-e6-second.json -w 'POST2 http=%{http_code}\n'
+POST2 http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select total_input_tokens, total_output_tokens, total_duration_ms, payload->>'total_input_tokens', (select sum((t->>'input_tokens')::int) from jsonb_array_elements(payload->'turns') t) as turns_sum_in, jsonb_array_length(payload->'turns') from traces where session_id='audit-probe-verify-9691a9-e6'"
+8|10|16|8|8|2
+[exit 0]
+
+### E7 同 session 两个不同 run → 只 1 行，run_id 列只代表最新 run，旧 run 只活在 payload.turns 内
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e7-A.json http://127.0.0.1:3000/api/v1/traces -o /dev/null -w 'A http=%{http_code}\n'
+A http=201
+[exit 0]
+
+$ curl -s -X POST -H 'x-client-token: 6aa12e9e4294ddef559fd8f0d74626be9a313fad23a53868d5b07a88363c5d24' -H 'content-type: application/json' --data @.dev-team/audit-trace-cards/40-verify/artifacts/b3-e7-B.json http://127.0.0.1:3000/api/v1/traces -o /dev/null -w 'B http=%{http_code}\n'
+B http=201
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -F'|' -c "select count(*), run_id, turn_id, payload->'turns'->0->>'run_id', payload->'turns'->1->>'run_id', jsonb_array_length(payload->'turns'), total_input_tokens from traces where session_id='audit-probe-verify-9691a9-e7' group by run_id, turn_id, payload, total_input_tokens"
+1|run_9691a9_e7_B|turn_9691a9_e7_b1|run_9691a9_e7_A|run_9691a9_e7_B|2|20
+[exit 0]
+### E7b List 接口按 run_id=A 检索是否可行（应不可行：参数被忽略）
+
+$ curl -s -H 'x-admin-token: a723309e828ea8366cc6d22380ab31b3b74f0b171f041c5a4c7e07ff2b03c16c' 'http://127.0.0.1:3000/api/v1/traces?run_id=run_9691a9_e7_A' | jq -c '{n:length, has_run_A:([.[]|select(.run_id=="run_9691a9_e7_A")]|length)}'
+{"n":48,"has_run_A":0}
+[exit 0]
+
+############ B3-clean. 仅删自己前缀 audit-probe-verify-9691a9% ############
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "select session_id, id from traces where session_id like 'audit-probe-verify-9691a9%' order by session_id"
+          session_id          |                  id                  
+------------------------------+--------------------------------------
+ audit-probe-verify-9691a9-e1 | a1df6a90-b3e2-4d6a-bb4c-279f89c2aaa9
+ audit-probe-verify-9691a9-e2 | 91a7e7e7-af75-4a62-a465-621b3aa4415d
+ audit-probe-verify-9691a9-e3 | 93139a38-8e4b-472a-b53c-f91692ca3fb5
+ audit-probe-verify-9691a9-e6 | 4115acd3-d713-453a-b59b-fa0e9180ec1b
+ audit-probe-verify-9691a9-e7 | 062220e4-9ffb-4b7c-86eb-a228b5179541
+(5 rows)
+
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "delete from traces where session_id like 'audit-probe-verify-9691a9%'"
+DELETE 5
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'audit-probe-verify-9691a9%'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/verify-prefix-count-final.txt
+0
+[exit 0]
+--- 他人 audit-probe 行必须仍在（只读证明未误删） ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -c "select session_id from traces where session_id like 'audit-probe-%' order by session_id" | tee .dev-team/audit-trace-cards/40-verify/artifacts/other-probe-rows-after.txt
+      session_id       
+-----------------------
+ audit-probe-core-big1
+ audit-probe-core-run1
+ audit-probe-merge1
+ audit-probe-merge2
+ audit-probe-total1
+ audit-probe-total2
+(6 rows)
+
+[exit 0]
+--- 基线护栏 ---
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select md5(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-b3.txt
+8abb872238435ca09fada802cda322db
+[exit 0]
+
+$ diff .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-before.txt .dev-team/audit-trace-cards/40-verify/artifacts/baseline-md5-b3.txt && echo 'BASELINE_UNCHANGED_OK exit=0'
+BASELINE_UNCHANGED_OK exit=0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces where session_id like 'thread_ref_v1_%'" | tee .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-b3.txt
+24
+[exit 0]
+
+$ diff .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-before.txt .dev-team/audit-trace-cards/40-verify/artifacts/thread-ref-count-b3.txt && echo 'THREAD_REF_COUNT_UNCHANGED_OK exit=0'
+THREAD_REF_COUNT_UNCHANGED_OK exit=0
+[exit 0]
+
+$ psql -h 10.43.206.170 -U job_copilot -d ponysentry -X -At -c "select count(*) from traces"
+43
+[exit 0]
+
+############ B3 完毕 2026-10-23T19:50:01+08:00 ############
+
+############ C3. 控制台真实渲染证据（agent-browser，真实浏览器 + 截图） ############
+# 浏览器: agent-browser (headless chromium) 打开 http://127.0.0.1:3000/ ，用 ADMIN_TOKEN 登录（会话 Cookie），
+#         进入 Traces → 打开事故 trace ca0b5494 → 展开全部 <details>（eval document.querySelectorAll('details').forEach(d=>d.open=true)）
+# 截图1（折叠态）: .dev-team/audit-trace-cards/40-verify/artifacts/console-01-trace-detail-collapsed.png
+# 截图2（展开态）: .dev-team/audit-trace-cards/40-verify/artifacts/console-02-trace-detail-expanded.png
+# 页面可见证据（人工判读截图内容）:
+#   - Turn #1 头部: seq - · workbuddy/deepseek-v4.1-flash · 120.3s；输入 36612 / 输出 1368 / 缓存 23936
+#   - 工具调用 3 条: "success (39.7s)" x2、"error (19.5s)" x1（含失败提示文案）
+#   - 展开后每条形如 参数 ARGUMENTS / 输出 OUTPUT / call_id: ...（tool_call.error 分支源码见 App.vue:875-877）
+#   - 无 turn 级 status/attempt_index/degraded/error 渲染（对比 keys: attempt_index=0 次）
+# 浏览器 Console 错误日志:
+{"success":true,"data":{"messages":[]},"error":null}
+
+# 结论性收据（机器可判）:
+  [C3-1] 控制台确实渲染 tool_call 的 arguments/output/error → T 侧任何『控制台不展示 tool_call.error/output』的结论应为 REFUTED
+  [C3-2] 控制台不渲染 turn.status / attempt_index / turn 级 error / degraded → dist 出现次数 attempt_index=0、degraded=5（仅在 gateway 状态语义）
+  [C3-3] 浏览器 Console messages = [] （0 errors）
+
+############ A7. 生产者原始 payload vs 库内 payload：脱敏是否改动本次样本 ############
+$ jq -S .payload .dev-team/audit-trace-cards/40-verify/artifacts/api-get-trace.json > /tmp/db-sorted.json ; jq -S . 00-baseline/03-trace-payload.raw.json > /tmp/raw-sorted.json ; diff
+DIFF_NONE → 本次样本脱敏零改动（字段与值逐字一致，6230 bytes 两边相同）
+ 6230 /tmp/raw-sorted.json
+ 6230 /tmp/db-sorted.json
+12460 total
+
+############ A8. 脱敏管道对 tool 参数/错误的实际作用（对抗探针，前缀 audit-probe-verify-9691a9-e9） ############
+$ POST /api/v1/traces  含 extra.api_key / extra.path / tool_calls[0].arguments_summary(Python repr) / tool_calls[0].error.message
+{"session_id":"audit-probe-verify-9691a9-e9","project":"audit_probe","run_id":"run_9691a9_e9","turn_id":"turn_9691a9_e9_1",
+ "turns":[{"turn_id":"turn_9691a9_e9_1","status":"failed","tool_calls":[
+   {"tool_name":"login_tool","status":"error","error":{"type":"ValueError","message":"authentication failed: token=abc123def456 was rejected"},
+    "arguments_summary":"{'username': 'u1', 'password': 'hunter2', 'note': 'call /home/dm/secret/user/x.py line 3'}"}]}],
+ "extra":{"api_key":"sk-REALSHOULDNOTLEAK","path":"/home/dm/job_copilot/api_v2/x.py"}}
+--- 响应 payload（服务端 sanitize_json_value 后） ---
+{"extra":{"api_key":"[REDACTED_SECRET]","path":"[USER_HOME]/job_copilot/api_v2/x.py"},"tool_call":{"arguments_summary":"{'username': 'u1', 'password': 'hunter2', 'note': 'call [USER_HOME]/secret/user/x.py line 3'}","error":{"message":"authentication failed: token=abc123def456 was rejected","type":"ValueError"},"status":"error","tool_name":"login_tool"}}
+--- 收据判读 ---
+  [A8-1] extra.api_key → [REDACTED_SECRET]、extra.path → [USER_HOME]（对象键名敏感 + 路径脱敏生效）
+  [A8-2] tool_calls[0].arguments_summary 里的单引号 Python repr "'password': 'hunter2'" 未被遮蔽；
+         tool_calls[0].error.message 里的裸 'token=abc123def456' 未被遮蔽（SECRET_PATTERNS 只列 access_token/refresh_token/auth_token/api_key）
+  → 结论：脱敏在 trace 的 turn/tool_call 文本层存在绕过面（单引号 + 裸 token=），属『优化/漏』候选，不是本次事故诊断阻断项
+--- 清理收据（只删自己前缀） ---
+DELETE 0
+0
+
+############ A8b. 脱敏绕过面判别实验（5 种写法对照，前缀 audit-probe-verify-9691a9-e10） ############
+$ POST ... tool_calls[0].arguments_summary 五种写法
+{"session_id":"audit-probe-verify-9691a9-e10","project":"audit_probe","turns":[{"turn_id":"t1","status":"failed","tool_calls":[
+ {"tool_name":"a_json_key","status":"error","arguments_summary":{"password":"hunter2"},"error":{"type":"X","message":"m"}},
+ {"tool_name":"b_double_quote","status":"error","arguments_summary":"{\"password\": \"hunter2\"}","error":{"type":"X","message":"m"}},
+ {"tool_name":"c_single_quote","status":"error","arguments_summary":"{'password': 'hunter2'}","error":{"type":"X","message":"m"}},
+ {"tool_name":"d_bare_token","status":"error","arguments_summary":"token=abc123def456","error":{"type":"X","message":"m"}},
+ {"tool_name":"e_auth_token","status":"error","arguments_summary":"auth_token=abc123def456","error":{"type":"X","message":"m"}}
+]}]}
+--- 服务端脱敏后（jq 提取 tool_name + arguments_summary） ---
+{"tool_name":"a_json_key","arguments_summary":{"password":"[REDACTED_SECRET]"}}
+{"tool_name":"b_double_quote","arguments_summary":"{[REDACTED_SECRET]}"}
+{"tool_name":"c_single_quote","arguments_summary":"{'password': 'hunter2'}"}
+{"tool_name":"d_bare_token","arguments_summary":"token=abc123def456"}
+{"tool_name":"e_auth_token","arguments_summary":"[REDACTED_SECRET]"}
+--- 判读 ---
+  a_json_key      (JSON 对象键 password)      → [REDACTED_SECRET]  ✅ 键名规则生效
+  b_double_quote  (字符串内双引号写法)         → 值被替换       ✅ 正则生效
+  c_single_quote  (Python repr 单引号写法)     → hunter2 原样   ❌ 绕过（本次事故 tool 参数正是 Python repr 形态）
+  d_bare_token    (裸 token=...)               → 原样           ❌ 绕过（SECRET_PATTERNS 未列裸 token）
+  e_auth_token    (auth_token=...)             → [REDACTED_SECRET] ✅
+--- 清理收据 ---
+  delete ... where session_id like 'audit-probe-verify-9691a9%' → DELETE 1；随后 count(*) = 0
+
+############ B5. [W-02] 并发同 session 上报丢轮次（20 session × 2 并发，真实 HTTP） ############
+# 时间 2026-10-23T19:55:28+08:00  前缀 audit-probe-verify-9691a9-race*
+$ for i in 1..20: 两个并发 POST（同 session、不同 turn_id），xargs -P8
+[exit 0]  40 个请求全部 201
+$ psql -c "select jsonb_array_length(payload->'turns') as turns, count(*) ... group by 1"
+ turns | count 
+-------+-------
+     1 |    18
+     2 |     2
+(2 rows)
+
+[exit 0]
+→ 判读：20 个 session 中 18 个只剩 1 turn（2 个完好）。T2 报 19/20，本次独立复现 18/20 —— 现象成立，比例随时序波动。
+→ 对应源码：pg_repository.rs:619-632（SELECT 旧 payload→内存 merge）与 :659-695（INSERT ON CONFLICT），三步之间无事务/行锁。
+
+### B5-clean 只删自己前缀
+DELETE 20
+0
+0
+8abb872238435ca09fada802cda322db
+
+############ D. 交付物校验收据（01-verdicts.json） ############
+$ jq -e 'type=="array" and all(.[]; .verdict|test("^(CONFIRMED|REFUTED|UNVERIFIABLE)$"))' 01-verdicts.json
+true
+[jq exit=0]
+$ jq -r 'group_by(.verdict)[]|"\(.[0].verdict)\t\(length)"' 01-verdicts.json
+CONFIRMED	59
+[exit 0]
+$ jq 'length' 01-verdicts.json
+59
+[exit 0]
+$ jq -r 'group_by(.source)[]|"\(.[0].source)\t\(length)"' 01-verdicts.json
+T2	18
+T3	41
+[exit 0]
+$ jq -r '[.[].id]|group_by(.)|map(select(length>1))|length' 01-verdicts.json   # 重复 ID
+0
+[exit 0]
+# 说明：T2=18 条(W-01..W-06/M-01..M-03/I-01..I-09)，T3=41 条(D1..D8 8 条 + S1..S14 14 条 + F1..F6 6 条 + P 类 13 条含 P10a/P10b)。

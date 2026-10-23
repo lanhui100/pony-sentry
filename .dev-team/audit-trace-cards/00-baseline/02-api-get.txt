@@ -1,0 +1,5 @@
+# API receipts — 2026-10-23T19:45:14+08:00
+## GET /api/v1/traces/:id HTTP
+
+HTTP 200
+## payload keys vs DB

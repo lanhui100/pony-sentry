@@ -498,14 +498,17 @@
                           >
                             <span class="text-stone-600">{{ idx + 1 }}.</span>
                             <span class="text-stone-400">[{{ b.category || 'log' }}]</span>
-                            <span class="truncate">{{ b.message || JSON.stringify(b.data || {}) }}</span>
+                            <span class="truncate">{{ breadcrumbSummary(b) }}</span>
                           </div>
                         </div>
                       </div>
 
                       <div>
                         <span class="text-[10px] font-mono uppercase text-stone-500">Payload:</span>
-                        <pre class="bg-stone-950/70 p-2 rounded border border-stone-800/60 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-44 overflow-y-auto no-scrollbar">{{ JSON.stringify(ev.payload, null, 2) }}</pre>
+                        <pre class="bg-stone-950/70 p-2 rounded border border-stone-800/60 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-44 overflow-y-auto no-scrollbar">{{ getPayloadPreview(ev.payload).text }}</pre>
+                        <div v-if="getPayloadPreview(ev.payload).truncated" class="mt-1 font-mono text-[10px] text-amber-400">
+                          已截断：仅渲染前 {{ PAYLOAD_PREVIEW_LIMIT / 1024 }}KB（原始 {{ getPayloadPreview(ev.payload).total }} 字符）
+                        </div>
                       </div>
                     </article>
                   </div>
@@ -657,6 +660,9 @@
                     {{ formatEvalStatusText(trace.eval_status) }}
                   </Badge>
                   <Badge variant="neutral">{{ trace.project || trace.payload?.project || 'unknown' }}</Badge>
+                  <Badge data-testid="turn-status" :variant="turnStatusBadgeVariant(trace.turn_status)">
+                    {{ normalizeTurnStatus(trace.turn_status) }}
+                  </Badge>
                   <Badge variant="outline">{{ trace.environment }}</Badge>
                   <span class="text-[11px] font-mono text-stone-500">{{ trace.release }}</span>
                 </div>
@@ -762,8 +768,11 @@
                   class="bg-stone-900/50 p-3 rounded border border-stone-800/80 space-y-2"
                 >
                   <div class="flex justify-between items-baseline font-mono text-[11px] border-b border-stone-800/60 pb-1">
-                    <span class="font-semibold text-stone-300">
+                    <span class="font-semibold text-stone-300 flex items-center gap-1.5 flex-wrap">
                       Turn #{{ idx + 1 }}
+                      <Badge :variant="turnStatusBadgeVariant(turn.status)">{{ normalizeTurnStatus(turn.status) }}</Badge>
+                      <span v-if="hasSpanValue(turn.attempt_index)" class="text-stone-400 font-normal">attempt #{{ turn.attempt_index }}</span>
+                      <Badge v-if="hasDegradedFlag(turn)" variant="warning">降级 {{ formatDegradedLabel(turn.degraded) }}</Badge>
                       <span v-if="turn.phase" class="text-stone-500 font-normal">({{ turn.phase }})</span>
                     </span>
                     <span class="text-stone-500">seq {{ turn.sequence ?? '-' }} · {{ turn.model || turn.node || turn.step || '-' }} · {{ formatDuration(turn.duration_ms) }}</span>
@@ -772,6 +781,23 @@
                     <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
                     <span v-if="turn.output_tokens">输出: {{ turn.output_tokens }}</span>
                     <span v-if="turn.cache_hit_tokens">缓存: {{ turn.cache_hit_tokens }}</span>
+                  </div>
+
+                  <!-- 失败原因（C8）：仅当服务端标注了 diagnostics 时渲染；字段缺失一律降级不抛错 -->
+                  <div
+                    v-if="hasTurnDiagnostics(turn)"
+                    class="rounded border border-rose-900/60 bg-rose-950/20 p-2 space-y-1"
+                  >
+                    <div class="text-[10px] font-mono uppercase text-rose-300/90">失败原因</div>
+                    <div v-if="turn.diagnostics?.error_contract === 'missing'" class="font-mono text-[11px] text-rose-400">
+                      未上报错误详情（失败终态但缺少 error / error_type 字段）
+                    </div>
+                    <div v-if="turn.diagnostics?.status_conflict === true" class="font-mono text-[11px] text-amber-400">
+                      工具状态与输出矛盾（声明 success 但输出命中失败特征）
+                    </div>
+                    <div v-if="turn.diagnostics?.error_missing === true" class="font-mono text-[11px] text-rose-400">
+                      工具状态为 error 但错误详情未上报
+                    </div>
                   </div>
 
                   <!-- interrupt span 明细：结构化展示 HITL 中断（source / reason / query / user_choice） -->
@@ -872,9 +898,10 @@
                           <div class="text-[10px] uppercase text-stone-500">输出 output</div>
                           <pre class="text-stone-300 whitespace-pre-wrap break-all leading-relaxed max-h-60 overflow-y-auto no-scrollbar">{{ toolCallOutput(call) }}</pre>
                         </div>
-                        <div v-if="call.error" class="space-y-0.5">
+                        <div class="space-y-0.5">
                           <div class="text-[10px] uppercase text-stone-500">错误 error</div>
-                          <pre class="text-rose-400 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto no-scrollbar">{{ stringifySpanValue(call.error) }}</pre>
+                          <pre v-if="call.error" class="text-rose-400 whitespace-pre-wrap break-all leading-relaxed max-h-40 overflow-y-auto no-scrollbar">{{ stringifySpanValue(call.error) }}</pre>
+                          <span v-else class="text-stone-500">未上报</span>
                         </div>
                         <div v-if="toolCallId(call)" class="text-[10px] text-stone-600 break-all">
                           call_id: {{ toolCallId(call) }}
@@ -886,7 +913,10 @@
 
                 <div class="pt-2">
                   <div class="text-[11px] font-mono uppercase text-stone-400 mb-1">Payload 详情</div>
-                  <pre class="bg-stone-950/70 p-2.5 rounded border border-stone-800/80 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto no-scrollbar">{{ JSON.stringify(selectedTrace.payload, null, 2) }}</pre>
+                  <pre class="bg-stone-950/70 p-2.5 rounded border border-stone-800/80 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto no-scrollbar">{{ payloadPreview.text }}</pre>
+                  <div v-if="payloadPreview.truncated" class="mt-1 font-mono text-[10px] text-amber-400">
+                    已截断：仅渲染前 {{ PAYLOAD_PREVIEW_LIMIT / 1024 }}KB（原始 {{ payloadPreview.total }} 字符）
+                  </div>
                 </div>
               </div>
 
@@ -1403,6 +1433,99 @@ const toolCallStatusClass = (call) => {
   if (TOOL_CALL_REJECTED_STATUSES.includes(status)) return 'text-amber-400 font-semibold'
   if (TOOL_CALL_FAILURE_STATUSES.includes(status)) return 'text-rose-400'
   return 'text-stone-400'
+}
+
+// ---- C8 turn 状态徽标：数据缺失一律降级为 unknown（灰），任何字段缺失都不抛错 ----
+
+// failed/error/cancelled/timed_out/max_tokens/aborted → red tier（C2 终态失败集，避免灰徽标+红失败原因矛盾）
+const TURN_STATUS_FAILURE = ['failed', 'error', 'cancelled', 'timed_out', 'max_tokens', 'aborted']
+// interrupted → amber (yellow) tier
+const TURN_STATUS_INTERRUPTED = ['interrupted']
+// succeeded/completed → emerald (green) tier
+const TURN_STATUS_SUCCESS = ['succeeded', 'completed']
+
+// unknown → gray (stone/neutral) tier；非字符串/空串一律回落 unknown
+const normalizeTurnStatus = (status) => {
+  const raw = typeof status === 'string' ? status.trim().toLowerCase() : ''
+  return raw || 'unknown'
+}
+
+const turnStatusBadgeVariant = (status) => {
+  const key = normalizeTurnStatus(status)
+  if (TURN_STATUS_FAILURE.includes(key)) return 'danger'
+  if (TURN_STATUS_INTERRUPTED.includes(key)) return 'warning'
+  if (TURN_STATUS_SUCCESS.includes(key)) return 'success'
+  return 'neutral'
+}
+
+// 非空判定：undefined/null/空串视为缺失
+const hasSpanValue = (value) => {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  return true
+}
+
+const formatDegradedLabel = (value) => {
+  if (value === true) return 'degraded'
+  return stringifySpanValue(value)
+}
+
+// degraded 有值才显示：false/null/undefined/空串均不渲染
+const hasDegradedFlag = (turn) => {
+  const value = turn && typeof turn === 'object' ? turn.degraded : undefined
+  if (value === false || !hasSpanValue(value)) return false
+  return true
+}
+
+// C8 失败原因区：diagnostics 缺失或无任何命中标志时不渲染
+const hasTurnDiagnostics = (turn) => {
+  const diag = turn && typeof turn === 'object' ? turn.diagnostics : null
+  if (!diag || typeof diag !== 'object') return false
+  if (diag.error_contract === 'missing') return true
+  if (diag.status_conflict === true) return true
+  if (diag.error_missing === true) return true
+  return false
+}
+
+// ---- F8 payload 预览上限：大会话 payload 只渲染前 20KB，避免拆解数 MB 对象 ----
+const PAYLOAD_PREVIEW_LIMIT = 20 * 1024
+// 按 payload 对象身份缓存结果：30s relTime 定时器触发的重渲染不会重复 stringify
+const payloadPreviewCache = new WeakMap()
+
+const getPayloadPreview = (payload) => {
+  if (payload === null || payload === undefined) return { text: '', truncated: false, total: 0 }
+  const isObject = typeof payload === 'object'
+  if (isObject) {
+    const cached = payloadPreviewCache.get(payload)
+    if (cached) return cached
+  }
+  let text = ''
+  try {
+    const serialized = JSON.stringify(payload, null, 2)
+    text = typeof serialized === 'string' ? serialized : String(payload)
+  } catch {
+    text = stringifySpanValue(payload)
+  }
+  const preview = text.length > PAYLOAD_PREVIEW_LIMIT
+    ? { text: text.slice(0, PAYLOAD_PREVIEW_LIMIT), truncated: true, total: text.length }
+    : { text, truncated: false, total: text.length }
+  if (isObject) payloadPreviewCache.set(payload, preview)
+  return preview
+}
+
+const payloadPreview = computed(() => getPayloadPreview(selectedTrace.value?.payload))
+
+// F8 同类收口：事件面板面包屑的 data 兜底文案同样受 20KB 上限约束，单行展示再压到 512 字符
+const BREADCRUMB_SUMMARY_LIMIT = 512
+const breadcrumbSummary = (breadcrumb) => {
+  if (!breadcrumb || typeof breadcrumb !== 'object') return ''
+  if (breadcrumb.message) return String(breadcrumb.message)
+  const preview = getPayloadPreview(breadcrumb.data ?? {})
+  const flatText = preview.text.replace(/\s+/g, ' ').trim()
+  if (preview.truncated || flatText.length > BREADCRUMB_SUMMARY_LIMIT) {
+    return `${flatText.slice(0, BREADCRUMB_SUMMARY_LIMIT)}…（已截断）`
+  }
+  return flatText
 }
 
 const fetchTraces = async () => {

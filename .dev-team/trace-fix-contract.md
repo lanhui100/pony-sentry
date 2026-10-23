@@ -123,3 +123,18 @@
   2) 空桩纯度门禁采用 `rust-stub-purity`（自建负样本可失败），`dev-stub-lint.py` 对 `.rs` 恒真，不作为有效门禁；两条都记录在 `gates-t1.txt`。
   3) C9.8（retention）若黑盒不可触发，允许标注 SKIP 并由核心单测覆盖，但必须在红相收据写明原因。
 ## amend v1.2（Lead）: C2 per-turn token 字段口径 = turns[].input_tokens / output_tokens / duration_ms（与现有 trace_merge 求和口径一致），不在本轮改名。
+- **v1.3（2026-10-23，Lead 裁决）**：
+  1) 批准 `pub fn merge_top_level(old: &Value, incoming: &Value) -> Value`；写路径调用序为
+     `aggregate_session(&turns, &merge_top_level(&old_payload, &incoming_payload))`（extra/tags 深合并在此完成）。
+  2) 编译衍生豁免：`crates/core/src/{sqlite,pg}_repository.rs` 行映射字面量与 `crates/core/tests/**`
+     允许为新增字段做**纯占位**补齐（不改变任何语义/断言）；语义与迁移由 task-7 统一落地。
+  3) `crates/core/tests/**` 中依赖旧合并语义的用例，由 task-7 按 C2 新语义更新并在收据中逐条说明。
+- **v1.4（2026-10-23，Lead 裁决，依据 L3-A/L3-B 审查）**：
+  1) 迁移回填改由 Rust 执行，统一用运行时 `turn_key_of`（sha256），SQL 迁移只建 schema；hydration 以「行数 < payload.turns 条数」判覆盖度。
+  2) 服务端生成 turn_id 前缀由 `turn_auto_` 改为 `turn_srv_`（防客户端冒充）；客户端显式 `turn_auto_*` 不特殊处理。
+  3) `tool_calls` 缺 `tool_call_id` 时按 `(tool_name, arguments)` 作为合并键，禁止无界追加。
+  4) 终态→终态且新终态为 success 类（completed/succeeded）时，清空旧 `error`/`error_type`/`diagnostics`。
+  5) ingest **忽略**客户端 `eval_status`（一律 `unreviewed`）；评审仅 admin PATCH。
+  6) 指标 label 归一：`project` 截断 64 字符 + 非 `[A-Za-z0-9_.:-]` 替换为 `_`；`turn_status` 仅受控集合，其余 `other`；series 上限 512，超出记 `overflow` 并只告警一次。
+  7) 所有 HTTP 错误响应（含 issue 路径、PATCH rejection）统一 `Bad request`/`Internal error`，不得回显 DB/serde 原文。
+  8) 提供 `migrations/postgres/0005_trace_turns.down.sql`；SQLite 不支持 down，需在 docs 明记。

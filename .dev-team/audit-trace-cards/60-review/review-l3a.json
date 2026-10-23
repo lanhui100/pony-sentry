@@ -1,0 +1,117 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "id": "L3A-F1",
+      "file": "50-report/report-draft.md",
+      "line": 281,
+      "rule": "验证层未回填且未吸收独立复核结论：报告仍写“待 verifier”，关键数字与 verifier 终态冲突。",
+      "counterexample": "`jq -r 'group_by(.verdict)[]|\"\\(.[0].verdict) \\(length)\"' .dev-team/audit-trace-cards/40-verify/01-verdicts.json` → `CONFIRMED 59`；`sed -n '10,16p' .dev-team/audit-trace-cards/40-verify/03-gap-report.md` → 0 REFUTED + G-01..G-04；但 report-draft.md:281 仍是占位，:19 写 19/20（verifier B-03 为 18/20），:41 写 3405B（B-01 为 5821 bytes），且全文无 G-01/G-02/G-04。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F2",
+      "file": "50-report/report-draft.md",
+      "line": 41,
+      "rule": "证据基线单位错误：把 payload=3405 字符数写成 3405B 字节数。",
+      "counterexample": "`$PSQL -F'|' -c \"select pg_column_size(payload),octet_length(payload::text),length(payload::text) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';\"` → `2641|5821|3405`（60-review/receipts-l3a.txt:11）；3405 是 `length()` 字符数（中文多字节），字节数为 5821；10-contract/01-field-matrix.md:172 明确要求任何体积结论注明表达式。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F3",
+      "file": "50-report/report-draft.md",
+      "line": 115,
+      "rule": "漏审 POST 201 响应的 id 契约：二次上报返回幻影 id，按该 id GET 直接 404。",
+      "counterexample": "`60-review/receipts-l3a.txt:22-26`：POST2 响应 id=0193e6fc…，库内 id=39530988…，GET 响应 id → `http=404 body=Trace not found`；verifier 独立复现见 40-verify/02-independent-receipts.txt:641-644。根因 `crates/core/src/pg_repository.rs:659-699`（ON CONFLICT 不更新 id，`saved=trace` 返回新 UUID）；报告 W-01/W-04 未列。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F4",
+      "file": "50-report/report-draft.md",
+      "line": 129,
+      "rule": "漏审 POST 响应体与库内落盘值的分叉：同一请求存在两个 total_* 真值。",
+      "counterexample": "`40-verify/02-independent-receipts.txt:634` 响应 `resp_total_in=999/resp_total_dur=500`，同 session 库内 `100|10|120000`（:639）；根因 `pg_repository.rs:636-657` 用 effective_* 入库、`:697-699` 返回未重算的 `trace.total_*`。报告 W-03 只写“库内三套口径”，未写响应体是第四套。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F5",
+      "file": "50-report/report-draft.md",
+      "line": 207,
+      "rule": "I-07 只审“脱敏改写过度”，漏审“该挡没挡住”：单引号 Python repr 与裸 token= 可绕过脱敏。",
+      "counterexample": "`60-review/receipts-l3a.txt:65-66`：`arguments_summary=\"{'password': 'hunter2'}\"` 与 `message=\"token=abc123def456 rejected\"` 原样落库；正则 `crates/ingest/src/sanitizer.rs:35` 只匹配双引号形态；verifier 同结论 40-verify/03-gap-report.md:53-60（G-04），并指出本次事故 tool 参数正是单引号 repr。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F6",
+      "file": "50-report/report-draft.md",
+      "line": 25,
+      "rule": "严重度体系与冻结判据不一致：双向漂移，且未声明重排依据。",
+      "counterexample": "10-contract/02-audit-criteria.md:542 定 `P0 = W1,W7,M1,M2,M4,I1,I3,I4`；报告却把 W1→W-06 降 P1（:145）、M2→M-02 降 P1（:181）、I1→I-03 降 P1（:203）、I3→I-02 降 P1（:202），并整条丢掉 criteria W7/M4；同时把未在本次样本触发的 W-01/W-02 列为 P0（:25；W-01 本属 criteria I4 的 P0，问题在严重度定义与样本影响不一致）。按报告自己的 D 表（:161-164 D2/D3/D5“不能”），这些正是“阻断诊断”。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F7",
+      "file": "50-report/report-draft.md",
+      "line": 217,
+      "rule": "路线图顺序与“P0 立即”及“消费者零改动”自相矛盾。",
+      "counterexample": "00-baseline/00-brief.md:73 要求“P0 立即 / P1 近期 / P2 择机”，报告却先做 Wave A（生产者字段，:217）、后做 Wave B（P0 止血，:218）；Wave A 写“消费者零改动”，但 30-diagnostic/03-cross-project-contract.md:19（F5）明确“补字段后需纯前端展示改动”，报告自己的 I-05（:205）也承认控制台不渲染 turn.status。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F8",
+      "file": "50-report/report-draft.md",
+      "line": 15,
+      "rule": "27 条冻结判据中 11 条无对应 finding（报告仅 18 条且含新增条目），且未给映射/缺席说明；brief 要求的逐字段对照矩阵也未进报告。",
+      "counterexample": "10-contract/02-audit-criteria.md:127-138（W5 eval_status 双写）、:157-194（W7/W8）、:232-311（M3-M8：重试/超时/父子/input_text/R19/关联键/采样丢弃）、:463-480（I11 422 无痕）在报告中无对应 finding；`grep -n '逐字段对照矩阵' .dev-team/audit-trace-cards/50-report/report-draft.md` → NO_HITS（brief:69 要求该节）。报告:15/61 声称“18 条发现 / 27 条判据”，却无映射表。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F9",
+      "file": "50-report/report-draft.md",
+      "line": 124,
+      "rule": "W-02 的“止血 SELECT … FOR UPDATE + 事务”对首次上报竞态无效。",
+      "counterexample": "`60-review/receipts-l3a.txt:55-58`：session 首次上报时行不存在，`SELECT … FOR UPDATE` 返回 0 行、不产生行锁；两个并发事务都能通过 SELECT 并各自 INSERT，ON CONFLICT 再以各自旧 payload 覆盖。`60-review/receipts-l3a.txt:49-51` 的 20/20 丢轮正是该形态；须用 `pg_advisory_xact_lock(hashtext(session_id))`、可合并的 upsert 或 serializable+重试；源码 `crates/core/src/pg_repository.rs:619-632`。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F10",
+      "file": "50-report/report-draft.md",
+      "line": 218,
+      "rule": "Wave B/I-03 的 schema/长事务改动未评估与冻结 console-timeout 契约及 brief Non-Goal 的冲突。",
+      "counterexample": "`.dev-team/contract-console-timeout.md:21,25`（R4/R8：`acquire_timeout` 每个站点必须恰为 3000，变更须重走冻结并复核 `API_TIMEOUT_MS`）；实际值 `crates/server/src/main.rs:152`、`crates/core/src/db.rs:9` 均 3000，控制台 `web/src/lib/apiTimeout.js:6`=8000；报告 Wave B 行锁/事务会拉长连接持有时间，未见池等待/500 误判分析；I-03/Wave B 的 `turn_status` 列与 `trace_turns` 表又违反 00-baseline/00-brief.md:30“不改数据库 schema”（报告:203,218 未标 Non-Goal/裁决）。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F11",
+      "file": "50-report/report-draft.md",
+      "line": 209,
+      "rule": "死契约只抓到 stats_incomplete，漏掉 phase/sequence/node 三个“控制台渲染、生产者不产出”的字段。",
+      "counterexample": "`grep -n 'turn.phase\\|turn.sequence\\|turn.node' web/src/App.vue` → 767、769；`grep -rn '\"phase\"\\|\"sequence\"\\|\"node\"' /home/dm/job_copilot/api_v2/src/modules/agent/pony_sentry_trace/` → 0 命中；10-contract/01-field-matrix.md:105-122 的 turns 15 键中无这三键。报告 I-09 只列 `stats_incomplete`。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F12",
+      "file": "50-report/report-draft.md",
+      "line": 178,
+      "rule": "M-01 要求 `error` 含 `{type,message}`，但生产者当前把 `error` 写成字符串；这不是“向后兼容新增字段”。",
+      "counterexample": "`sed -n '296p' /home/dm/job_copilot/api_v2/src/modules/agent/pony_sentry_trace/payload.py` → `\"error\": str(tc.get(\"error\") or \"\")[:500] if tc.get(\"error\") else None`；10-contract/01-field-matrix.md:135 记为 string。报告:179 却标“契约影响：是（向后兼容新增字段）”，与 §7（:239-241 用独立 `error_type`）也不一致；须明确 string vs object 的兼容策略。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F13",
+      "file": "50-report/report-draft.md",
+      "line": 17,
+      "rule": "归属错配：把生产者丢弃 `error_type` 说成“R1 契约不外发任何错误文本”。",
+      "counterexample": "`sed -n '30p' .dev-team/audit-trace-cards/30-diagnostic/03-cross-project-contract.md` 明确“不改 R1（R1 只禁 error_message 自由文本）”；`trace_safety.py:287-300` 的 `_SAFE_ERROR_TYPES` 已含 22 类；生产者 `payload.py:296` 只取 `error` 字符串、中间件把 `error_type` 拿到后丢弃。报告:17/253 的表述会让读者以为必须先改契约，掩盖了“生产者零契约变更即可补受控 error_type”的最便宜修点。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F14",
+      "file": "50-report/report-draft.md",
+      "line": 114,
+      "rule": "两处引用/口径错误：old-wins 冻结测试指向 248（实为 :323），M-01 写 output:null（实为键缺失）。",
+      "counterexample": "`nl -ba crates/core/tests/trace_repository_test.rs | sed -n '248,249p;322,324p'` → :248 是 `test_trace_upsert_on_same_session_id`，:323 才是 `test_trace_incremental_merge_upsert_dedup`；`jq -c '.payload.turns[0].tool_calls[2]|{status,error,has_output:has(\"output\")}'` → `has_output:false`（40-verify/03-gap-report.md:66-68、74-78；report:175 写 `\"output\":null`）。结论方向不变，但会误导修 W-01 时要改哪条测试、以及 error/output 的必填 vs 可空语义。",
+      "severity": "MINOR"
+    }
+  ]
+}

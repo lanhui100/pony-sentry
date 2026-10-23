@@ -130,17 +130,27 @@ pub trait TraceRepository: Send + Sync {
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError>;
 
+    async fn update_trace_review(
+        &self,
+        id: &str,
+        status: EvalStatus,
+        note: Option<&str>,
+    ) -> Result<TraceRecord, RepositoryError>;
+
+    /// 兼容入口（既有调用方只改状态）：等价于 `update_trace_review(id, status, None)`。
     async fn update_trace_eval_status(
         &self,
         id: &str,
         status: EvalStatus,
-    ) -> Result<TraceRecord, RepositoryError>;
+    ) -> Result<TraceRecord, RepositoryError> {
+        self.update_trace_review(id, status, None).await
+    }
 
     /// Trace 维度已出现过的项目名去重排序列表（不含 NULL 与空串），
     /// 供 Web 端项目筛选下拉与 `/api/v1/projects` 聚合使用。
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError>;
 
-    /// 分批删除 `created_at < cutoff` 的 traces，返回本批删除行数（retention 任务）。
+    /// 分批删除 `COALESCE(updated_at, created_at) < cutoff` 的 traces（`C6`），返回本批删除行数。
     async fn delete_traces_older_than(
         &self,
         cutoff: DateTime<Utc>,

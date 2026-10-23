@@ -35,6 +35,7 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `WEBHOOK_URL` | 空（关闭通知） | issue 新建/回归时的旁路通知（5s 超时，失败不重试） |
 | `RETENTION_DAYS_EVENTS` | `180` | events 保留天数 |
 | `RETENTION_DAYS_TRACES` | `90` | traces 保留天数 |
+| `METRICS_TOKEN` | 空（不鉴权） | 设置后 `/metrics` 需 `x-metrics-token` 或 `Authorization: Bearer`；空值保持探针免鉴权 |
 | `RETENTION_DISABLED` | 未设置 | `=1` 关闭每日清理任务 |
 | `RETENTION_DRY_RUN` | 未设置 | `=1` 只打印清理计划不删除（首次上线观察用） |
 | `PONY_REINDEX_FINGERPRINTS` | 未设置 | `=1` 执行一次全量指纹重索引后退出。**会重塑 issue 分组，仅运维手动执行** |
@@ -161,10 +162,27 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
 - `/healthz` 与 `/metrics` 不鉴权（探针/抓取面）；`/healthz` 做 DB 探活（2s 超时），
   DB 不通 → `503 {"status":"degraded","db":"down"}`；`/metrics` 暴露
   `pony_sentry_issues_total{status,environment}`、`pony_sentry_events_total`、
-  `pony_sentry_ingest_requests_total{result}`、`pony_sentry_ingest_level_degraded_total`。
+  `pony_sentry_ingest_requests_total{result}`、`pony_sentry_ingest_level_degraded_total`，
+  以及 trace 面四个指标：`pony_sentry_traces_total{project,turn_status}`、
+  `pony_sentry_trace_turns_total{status}`、`pony_sentry_trace_status_conflicts_total`、
+  `pony_sentry_trace_ingest_rejected_total{reason}`。
 
 **retention（契约 R11.1）**：进程启动 30s 后首轮，此后每 24h 分批（5000 行/批，批间释放事务）
 删除过期 `events`/`traces`；`issues` 聚合行永久保留、`count` 不回退。
+
+## trace（Agent 轨迹）
+
+`POST /api/v1/traces`（`x-client-token`）写入；`GET /api/v1/traces[/:id]`、`PATCH`（admin）读取与评审批注。
+**字段/合并/诊断/指标的唯一契约在 [`docs/trace-contract.md`](docs/trace-contract.md)**，这里只列三个最容易踩的语义：
+
+- **同 `(session_id, turn_id)` 增量合并，终态单调**：非终态→终态可覆盖，终态不会被迟到的非终态回退；
+  重复上报不会丢 `error`/`tool_calls` 的迟到补全。
+- **totals 是派生值**：`total_*` 由轮次求和，客户端上报值不落库；`payload.eval_status` 不再存在（列是唯一真源）。
+- **服务端诊断**：`turns[].diagnostics` 标注 `error_contract:"missing"` / `status_conflict` / `error_missing`，
+  控制台据此红/黄标；诊断在脱敏之后生成，不携带原始错误文本。
+
+`traces` 每 `session_id` 一行（聚合视图），`trace_turns` 每轮次一行（权威存储）；并发上报由
+PG `pg_advisory_xact_lock` / SQLite `BEGIN IMMEDIATE` 串行化。指标见 `/metrics` 的 `pony_sentry_trace*`。
 
 ## limitations
 

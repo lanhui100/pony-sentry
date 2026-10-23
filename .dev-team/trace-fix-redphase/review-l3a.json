@@ -1,0 +1,87 @@
+{
+  "verdict": "FAIL",
+  "reviewer": "L3-A",
+  "contract": ".dev-team/trace-fix-contract.md (FROZEN v1.3)",
+  "findings": [
+    {
+      "id": "L3A-F1",
+      "file": "migrations/0005_trace_turns.sql",
+      "line": 42,
+      "rule": "C1.3 回填兜底键：缺失 turn_id 时须生成稳定哈希键；SQLite `hex()` 是字节编码而非哈希，截前 16 个 hex 字符 = 只取 JSON 文本前 8 字节",
+      "counterexample": "实测（/tmp 独立库直接执行本迁移）：payload={\"turns\":[{\"status\":\"succeeded\",\"input_tokens\":7},{\"status\":\"failed\",\"input_tokens\":5}]}（两条均无 turn_id）→ 两个兜底键都是 turn_auto_7b22737461747573 → ON CONFLICT DO NOTHING 静默丢弃第 2 条：trace_turns=1 行、turns_count=1，而 payload.turns 仍为 2 条，迁移后立即出现 turns_count != len(payload.turns) 的不变量破坏；同一会话任意两条以相同 8 字符开头的 turn（如都以 {\"status\" 开头）必撞。",
+      "severity": "BLOCKER"
+    },
+    {
+      "id": "L3A-F2",
+      "file": "migrations/0005_trace_turns.sql",
+      "line": 42,
+      "rule": "C1.1/C1.3：迁移兜底键与运行时 `turn_key_of` 必须是同一算法，否则同一 turn 两把键",
+      "counterexample": "迁移用 hex/md5 前 16 位（PG: migrations/postgres/0005_trace_turns.sql:39 `md5(e.turn::text)`），运行时用 sha256（crates/core/src/trace_v2.rs:238-245）。同一 legacy turn（无 turn_id）迁移后键为 turn_auto_7b22737461747573，升级后再上报时 turn_key_of 得到 turn_auto_117bf6b6f370aa6a → 新增一行（不合并）→ turns_count 虚增、total_* 对同一轮次重复求和（该 turn 带 input_tokens=7 时总计翻倍）。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F3",
+      "file": "crates/core/src/pg_repository.rs",
+      "line": 927,
+      "rule": "C1.3/§7-3 升级窗口补齐须按『覆盖度』而非『是否已有任意行』判定（SQLite 同缺陷：sqlite_repository.rs:952）",
+      "counterexample": "会话的 trace_turns 已有 1 行、而 payload.turns 仍有 3 条（F1 丢行后、或滚动升级期间老 pod 只写 payload 只追加）时，hydrate_legacy_turns 因 `SELECT 1 ... LIMIT 1` 命中即 return，随后 aggregate_session 只用 1+N 行重写 payload，另外 2 条历史轮次永久消失且无任何告警——门禁 §7-3 声称的『防丢历史轮次』只覆盖空表场景。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F4",
+      "file": "crates/core/src/pg_repository.rs",
+      "line": 780,
+      "rule": "C3/C6：retention 的聚合行删除与 trace_turns 孤儿清理必须同事务，并与 ingest 共用 hashtext(session_id) 锁（SQLite 因单写者串行化影响较小，PG 无此保护）",
+      "counterexample": "T_retention 语句1（:767）删掉会话 S 的 traces 行并提交；T_ingest（持 advisory lock）此前已读到旧行、写入新 turn 并执行 list_turn_payloads；语句2（:780-790）在 T_ingest 提交前用 LEFT JOIN traces 判定 S 无聚合行，删掉 S 其余 trace_turns 行；T_ingest 提交后 traces.turn_status/turns_count/payload.turns 与实际行数漂移（payload 含已删轮次）或历史轮次静默丢失。两条 DELETE 均为自动提交、无事务、无锁。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F5",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 371,
+      "rule": "C2 幂等：无法归并的 tool_calls 条目必须去重，否则同一 turn 反复重报导致无限增长（C2.3 未规定无 tool_call_id 条目，实现选择无条件 push）",
+      "counterexample": "连续 3 次上报同一 turn {\"turn_id\":\"t1\",\"status\":\"running\",\"tool_calls\":[{\"tool_name\":\"x\",\"status\":\"success\",\"output\":\"ok\"}]}（无 tool_call_id，属文档允许的 opaque JSON）→ tool_calls 长度 1→2→3，每次重报 +1，payload 无界增长且控制台重复展示同一调用；用 OpenAI 风格 `id` 字段的生产者必中。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F6",
+      "file": "crates/core/tests/trace_v2_repository_test.rs",
+      "line": 581,
+      "rule": "C1.3「迁移必须幂等（重复执行）」需要真正再执行一次回填并断言 0 写入，而非依赖 migrate() 的列探测跳过",
+      "counterexample": "SQLite `migrate()` 以 `turns_count` 列存在为守卫（sqlite_repository.rs:106-116），第二次 migrate 根本不会执行 0005；把回填 INSERT 改成无 ON CONFLICT 的重复插入版本，本用例（:581-588）仍然绿——它证明的只是『没跑』，不是『重跑幂等』。PG 用例同样被 turns_count=0 的 WHERE 短路，ON CONFLICT 分支零覆盖。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F7",
+      "file": "crates/core/tests/trace_v2_repository_test.rs",
+      "line": 677,
+      "rule": "C3/C9.2 并发门禁不得『SKIP 即通过』；C9.2 明文要求 PG 测试库，冻结验收只跑 SQLite",
+      "counterexample": "未设 PONY_TEST_PG_URL 时 `return;` → 2 条 PG 用例计为 passed；Lead 最终门禁 `cargo test --workspace --offline`（gates-lead-final.txt）没有该变量，故 advisory lock、PG 回填、PG 孤儿清理在最终门禁中零执行仍全绿，且无任何断言统计 SKIP 数；tests/acceptance_trace_v2.rs:228 的 C9.2 并发只用 harness 的 SQLite 临时库，与 C9.2「PG 测试库上 20 并发」不符。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-F8",
+      "file": "crates/core/src/pg_repository.rs",
+      "line": 622,
+      "rule": "C3 锁键应无碰撞（或碰撞仅带来阻塞而非正确性问题，需显式记录）",
+      "counterexample": "`pg_advisory_xact_lock(hashtext($1)::bigint)` 的键空间只有 32 位：约 7.7 万会话即有 ~50% 概率出现跨会话同键（birthday），两个无关会话被串行化；不影响正确性，但高基数下写吞吐劣化且无监控/注释说明取舍。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F9",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 394,
+      "rule": "C2 聚合求和须防溢出（turn 字段直接来自客户端 payload）",
+      "counterexample": "两个 turn 各带 input_tokens=9223372036854775807 → `total + value` 在 debug 构建 panic（服务 500），release 构建回绕为负数并落库到 traces.total_input_tokens，污染聚合口径；缺 checked_add 与上限校验，也无对应负向用例。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-F10",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 129,
+      "rule": "C2.1「终态单调」在实现上是『任意新终态覆盖任意旧终态』（契约原文如此，但存在迟到的 succeeded 抹掉 failed 的终态丢失路径）",
+      "counterexample": "t1 先 failed（error 详情齐全），随后一次更早 attempt 的迟到重报 status=succeeded → merge_turn 取新终态覆盖，status 变 succeeded 而旧 error 仍残留（字段级合并不清空），既丢失终态又产生 status 与 error 自相矛盾的行；单元测试 c2_1_late_terminal_status_advances_between_terminal_states 正是把该行为固化。",
+      "severity": "MINOR"
+    }
+  ]
+}

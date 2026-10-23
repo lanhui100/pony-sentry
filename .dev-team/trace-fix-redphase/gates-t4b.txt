@@ -1,0 +1,190 @@
+T4b HTTP 面与 trace 指标门禁收据（executor-http / task-9）
+================================================================================
+契约：`.dev-team/trace-fix-contract.md`（FROZEN v1.3）C5 / C7（并落实 C9.4 / C9.7 / C9.9 的 HTTP 面）
+写域：`crates/server/src/routes.rs`、`crates/server/tests/api_test.rs`（未触碰 core / migrations / web / tests / docs）
+时间：2026-10-23 21:22–21:47 (Asia/Shanghai)
+基线：T3b 交付后 `cargo check -p pony-sentry-server` 恒失败（routes.rs:1220 TraceRecord 缺 note/turn_status/turns_count；
+      :1265 TraceFilter 缺 from/run_id/to/turn_status）——本任务即该接线工作。
+
+## Gate 1 · cargo test --workspace --offline
+$ cargo test --workspace --offline
+      Running unittests src/lib.rs (pony-sentry-core)                      => 38 passed
+      Running tests/pg_repository_test.rs                                  =>  4 passed
+      Running tests/storage_test.rs                                        =>  2 passed
+      Running tests/trace_repository_test.rs                               =>  8 passed
+      Running tests/trace_v2_repository_test.rs                            => 14 passed
+      Running unittests src/lib.rs (pony-sentry-fingerprint)               => 12 passed
+      Running tests/hasher_test.rs                                         =>  1 passed
+      Running unittests src/lib.rs (pony-sentry-ingest)                    => 31 passed
+      Running tests/sanitizer_test.rs                                      =>  2 passed
+      Running unittests src/lib.rs (pony-sentry-server)                    => 16 passed
+      Running unittests src/main.rs                                        =>  0 passed
+      Running tests/adversarial_tailnet_trust.rs                           =>  3 passed
+      Running tests/api_test.rs                                            => 16 passed   # 原 11 + 新增 5
+      Running tests/pg_api_duplicate_test.rs                               =>  1 passed
+      Running tests/reindex_test.rs                                        =>  1 passed
+      Running tests/trust_unit.rs                                          => 11 passed
+      Doc-tests ×4                                                          =>  0 passed
+   合计：160 passed / 0 failed / 0 ignored      TEST_EXIT=0
+
+## Gate 2 · cargo clippy --workspace --all-targets -- -D warnings
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Checking pony-sentry-core v0.1.0 … pony-sentry-server v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+    CLIPPY_EXIT=0
+
+## Gate 3 · cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline
+$ cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline
+test c9_1_terminal_status_overrides_and_never_regresses ... ok
+test c9_1_tool_calls_merged_by_id_and_new_turn_appended ... ok
+test c9_2_concurrent_ingest_loses_no_turn ... ok
+test c9_3_post_id_gettable_and_totals_match_turns_sum ... ok
+test c9_4_invalid_query_params_rejected_without_db_leak ... ok
+test c9_5_diagnostics_three_flags ... ok
+test c9_6_extra_retained_eval_status_absent_session_id_source ... ok
+test c9_7_note_patch_and_aggregates_advance ... ok
+test c9_8_retention_judges_by_updated_at ... ok
+test c9_9_metrics_expose_four_trace_counters ... ok
+test c9_10_migration_backfills_trace_turns_from_legacy_payload ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 155.05s
+    ACCEPT_EXIT=0
+（本轮测试文件未做任何修改：`git diff --stat tests/` 为空。）
+
+## §1 改动点（routes.rs）
+
+1. `IngestMetrics` 扩四个 `C7` 计数器（进程内、与既有 issue 计数同寿命；`BTreeMap` 保证 `/metrics` 稳定有序）：
+   - `traces_total: Mutex<BTreeMap<(project, turn_status), u64>>`
+   - `turns_total: Mutex<BTreeMap<status, u64>>`
+   - `status_conflicts: AtomicU64`
+   - `ingest_rejected: Mutex<BTreeMap<reason, u64>>`
+   - 新增 `record_trace_ingested / record_trace_status_conflict / record_trace_ingest_rejected / trace_snapshot`
+     （`trace_snapshot` 为 pub：`/metrics` 与服务的公开面；既有 `snapshot()` 签名不变）。
+2. `handle_ingest_trace`：
+   - 形参改 `Result<Json<AgentTraceIngestRequest>, JsonRejection>`：**先鉴权后解析**（401 优先于 422/415），
+     非 413 的解析拒绝统一 400 `Bad request` 并计入 `ingest_rejected{reason="invalid_params"}`；
+     413 保留 `Payload too large`（传输层限制，非上报语义错误）。
+   - `session_id` 优先 / `thread_id` 回退，**空白也算缺失**；两者皆空 → 400 `Missing session_id or thread_id`
+     并计入 `ingest_rejected{reason="session_missing"}`。
+   - `TraceRecord` 补 `turn_status="unknown"` / `turns_count=0` / `note=None`（聚合列由 core 依据 turns 重算；
+     `note` 仅 PATCH 写入）。
+   - 成功路径：`record_trace` 返回**库内持久化行**直接作响应（`201` + Json(saved)，
+     响应 `id` 可 GET、`total_*`/`turn_status`/`turns_count` 均来自 DB）。
+   - DB 失败 → `tracing::error!` 记原文 + 响应体仅 `Internal error`（**不回显 DB 原文**）。
+3. `TraceQuery` + `handle_list_traces`：
+   - 新增 `run_id` / `turn_status` / `from` / `to`（后二者 RFC3339 → `DateTime<Utc>`）；
+   - `limit`/`offset` 走自定义 deserializer（非数字 → 400）；handler 内负值 → 400；
+     `limit` 其余值 `clamp(1,100)`（`limit=100000` → 100 行且 200）；未知参数按 serde 默认忽略；
+   - `eval_status` 非法 → 400（错误文本自造，不含 DB/内部串）；repo 失败 → 500 `Internal error`。
+4. `handle_update_trace`：改调 `update_trace_review(id, eval_status, note.as_deref())`（note 落库；None 保留旧值），
+   404 语义不变，500 统一 `Internal error`。CSRF/会话分支未改动（`patch` 路由层逻辑保持原样）。
+5. `handle_get_trace` / `handle_metrics`：DB 失败改为「日志原文 + 响应 `Internal error`」（顺带消除既有 500 泄漏面）。
+6. `/metrics`：追加四个 `C7` 指标族（HELP/TYPE + label 值经既有 `escape_label` 转义，label 组合按 key 升序）。
+
+## §2 指标触发语义（避免"计数正确但口径含糊"）
+
+| 指标 | 触发点 | 累加语义 |
+| :--- | :--- | :--- |
+| `pony_sentry_traces_total{project,turn_status}` | ingest 成功（201） | 每次成功 ingest +1；label 取**持久化行**的 `project`（null → `unknown`）与 `turn_status` |
+| `pony_sentry_trace_turns_total{status}` | ingest 成功（201） | 本次 `payload.turns` 逐条按 `trace_v2::turn_status_of` 归一后 +1（重报同一 turn 会再计一次 = 上报口径，非 DB 行数口径） |
+| `pony_sentry_trace_status_conflicts_total` | ingest 成功且本次任一 turn 命中 `C4 status_conflict` | 每次 ingest 至多 +1（用 `trace_v2::annotate_turn` 在**入参副本**上判定，不污染入库数据、不依赖历史 diagnostics） |
+| `pony_sentry_trace_ingest_rejected_total{reason}` | ingest 被拒 | `session_missing`（无/空白 session_id+thread_id）/ `invalid_params`（请求体解析拒绝，非 413） |
+
+## §3 物理收据（真实进程 + curl stdout；二进制由本次代码 `cargo build` 产出）
+
+启动：`PORT=18101 DATABASE_URL=sqlite:/tmp/t4b-probe/p.db?mode=rwc CLIENT_TOKEN=tok ADMIN_TOKEN=adm ./target/debug/pony-sentry-server`
+
+$ # 1) POST /api/v1/traces —— 返回库内持久化行（客户端直传 total_input_tokens=99999 被忽略）
+$ curl -s -o post.json -w 'http_code=%{http_code}\n' -H 'x-client-token: tok' -H 'content-type: application/json' \
+    -X POST http://127.0.0.1:18101/api/v1/traces -d '{"session_id":"gate-t4b-1","run_id":"run-gate-xyz","project":"job_copilot","total_input_tokens":99999,"reported_at_ms":1792754960002,"turns":[{"turn_id":"t1","status":"failed","input_tokens":10,"output_tokens":5,"duration_ms":100,"tool_calls":[{"tool_call_id":"c1","tool_name":"format_jd_to_json","status":"success","output":"职位解析失败（原因: 模型返回空结果）"}]}]}'
+http_code=201
+$ jq -c '{id,session_id,turns_count,turn_status,total_input_tokens,total_output_tokens,total_duration_ms}' post.json
+{"id":"09d21a47-af5e-4ebd-8c47-39eea2a64038","session_id":"gate-t4b-1","turns_count":1,"turn_status":"failed","total_input_tokens":10,"total_output_tokens":5,"total_duration_ms":100}
+
+$ # 2) C5：参数校验
+  ?limit=-5 -> 400 Bad request: `limit` must not be negative
+  ?limit=abc -> 400 Failed to deserialize query string: Bad request: integer query parameter expected
+  ?offset=-1 -> 400 Bad request: `offset` must not be negative
+  ?from=not-a-time -> 400 Failed to deserialize query string: Bad request: RFC3339 timestamp expected
+  ?limit=100000 -> 200 [{"id":"09d21a47-af5e-4ebd-8c47-39eea2a64038","session_id":"gate-t4b-1","run_id":"run-gate-xyz","tur…
+  ?unknown_param=1 -> 200 [{"id":"09d21a47-af5e-4ebd-8c47-39eea2a64038","session_id":"gate-t4b-1","run_id":"run-gate-xyz","tur…
+（400 响应体全部不自造 DB 文本；验收 C9.4 另以 `Database error`/`SQLITE`/`sqlx`/`syntax error`/`no such` 反向断言。）
+
+$ # 3) C5：新增过滤维度
+  ?run_id=run-gate-xyz  -> ["gate-t4b-1"]
+  ?run_id=__nope__      -> 0
+  ?turn_status=failed   -> ["gate-t4b-1"]
+  ?from=2026-10-23T11:29:20Z&to=2026-10-23T11:29:21Z -> ["gate-t4b-1"]
+  ?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z -> 0
+
+$ # 4) ingest 错误响应统一
+  缺 session_id -> Missing session_id or thread_id [http_code=400]
+  非法 JSON     -> Bad request [http_code=400]
+
+$ # 5) C9.7：PATCH 落 note 并回显
+  PATCH /api/v1/traces/09d21a47-… -> http_code=200 {"eval_status":"triage_good","note":"人工复核：失败原因已确认","turn_status":"failed","turns_count":1}
+  GET 详情 -> {"note":"人工复核：失败原因已确认","payload_has_eval_status":false,"session_id_source":"session_id"}
+
+$ # 6) C7：/metrics（真实文本，含四个指标）
+# HELP pony_sentry_traces_total trace 上报成功计数（按 project 与 turn_status 维度；每次 ingest 成功 +1）
+# TYPE pony_sentry_traces_total counter
+pony_sentry_traces_total{project="job_copilot",turn_status="failed"} 1
+# HELP pony_sentry_trace_turns_total 上报 turn 计数（按归一 status 维度；每次 ingest 按 payload.turns 逐条累加）
+# TYPE pony_sentry_trace_turns_total counter
+pony_sentry_trace_turns_total{status="failed"} 1
+# HELP pony_sentry_trace_status_conflicts_total 「成功状态 + 失败文案」矛盾上报次数（C4 status_conflict）
+# TYPE pony_sentry_trace_status_conflicts_total counter
+pony_sentry_trace_status_conflicts_total 1
+# HELP pony_sentry_trace_ingest_rejected_total trace 上报被拒计数（按 reason 维度）
+# TYPE pony_sentry_trace_ingest_rejected_total counter
+pony_sentry_trace_ingest_rejected_total{reason="invalid_params"} 1
+pony_sentry_trace_ingest_rejected_total{reason="session_missing"} 1
+
+## §4 既有断言更新（仅 2 处，均为 C2 新语义的必要同步；其余 11 条 old 用例未动）
+
+1. `crates/server/tests/api_test.rs::test_traces_ingest_supports_langgraph_thread_id_and_upsert`
+   - 旧：两轮 turn 无计量字段，却断言 `total_input_tokens==3200`、`total_duration_ms==5000`（依赖客户端直传值落库）。
+   - 新：per-turn 补 `input_tokens/output_tokens/duration_ms`，使 turns 求和恰为 `3200/800/5000`（断言值不变、
+     仍证明「累积已刷新」），并补 `turns_count==2`。依据：C2「total_* = turns 求和（单一真相）」+ C9.3。
+2. `crates/server/tests/api_test.rs::test_traces_server_side_sanitization`
+   - 旧：断言 `payload.total_input_tokens==1200`（客户端直传值）。
+   - 新：断言 `payload.total_input_tokens==800`（= 唯一 turn 的 input_tokens）且列 `total_input_tokens==800`。
+     脱敏语义断言（`[USER_HOME]` / `[REDACTED_SECRET]` / Bearer 正则）一条未改。依据同上。
+
+## §5 新增集成用例（`crates/server/tests/api_test.rs`，+5）
+
+- `test_trace_query_params_reject_invalid_without_db_leak`：`limit=-5|abc`、`offset=-1|xyz`、`from/to` 非法 → 400 且无 DB 串；
+  `limit=100000`（库内 101 行）→ 100 行；未知参数 → 200。
+- `test_trace_metrics_expose_four_counters_and_grow`：四指标存在且随上报增长；label 维度存在（project/turn_status/status/reason）；
+  `traces_total` 严格递增。
+- `test_trace_note_patch_persists_and_survives_reingest`：PATCH 回显 note → GET 详情 → list 可见 → 重复 ingest 不清空，
+  `turns_count`/`turn_status` 推进。
+- `test_trace_ingest_response_matches_persisted_row`：POST 响应 id 可 GET 200；响应 `total_*` == GET == turns 求和；
+  `turns_count`/`turn_status` 为持久化值；`payload.eval_status` 不存在。
+- `test_trace_ingest_malformed_body_is_400_without_db_leak`：非法 JSON 体 → 400 `Bad request`，且 `invalid_params` 计数增长。
+
+## §6 偏离与说明（须知会 Lead）
+
+1. **`invalid_params` 从"声明"变为"真实触发"**：C7 给出 `invalid_params / session_missing` 两值，但 T3b 之后
+   ingest 只有 session 缺失一种 400。本任务把「请求体解析拒绝（非 413）」映射为 400 + `invalid_params`，
+   使 reason 词表有实际来源；顺带把「鉴权先于解析」修正（401 不再被 422 抢先）。
+2. **413 未被并入 400**：`DefaultBodyLimit=2MB`（`routes.rs` 路由层）超限属传输层拒绝，保留 413 + `Payload too large`；
+   若 Lead 要求严格「一律 400」，一行可改（会与 2MB 上限语义相悖，故默认保留）。
+3. **`traces_total` / `turns_total` 是"上报口径"而非"库内行数口径"**：重复上报同一 session/turn 会再计数
+   （与既有 `pony_sentry_ingest_requests_total` 的计数哲学一致）。HELP 文案已显式写入口径，避免将来误读为去重后的行数。
+4. **`turn_status` / `turns_count` 入参占位**：`TraceRecord` 的这两列由 core 在写事务内依据 turns 重算，
+   服务层传 `unknown/0` 仅满足结构体字面量；响应/库内值均来自 core 回查行（已在 §3-1 实证）。
+5. **`/metrics` 的 DB 失败响应**由原文改为 `Internal error`（+ 日志原文）：顺带收敛 C5 的"任何 4xx/5xx 不得回显 DB 原文"要求，
+   属既有面小修，不改指标集合。
+6. **格式化**：`cargo fmt --check crates/server/{src/routes.rs,tests/api_test.rs}` 已单文件清零（全仓 57 处 fmt 漂移均在
+   core 等其他写域，未触碰）。
+
+## §7 剩余缺口 / 交接
+
+1. **C9.11（前端徽标/失败原因区）不在本任务**：`web/` 为他人写域；`/metrics`/HTTP 面已为其提供 `turn_status`、
+   `diagnostics`、`note`、`turns_count` 数据。
+2. **C7 缺 `turn_status` 直方图/gauge 维度以外的告警阈值**：契约只要求计数器，未做告警规则（C10 非目标）。
+3. **`pony_sentry_trace_status_conflicts_total` 无 label**：按契约原文实现为无维度计数器；若后续需要按 project 归因，
+   需契约 amend（当前不做）。
+4. **PG 路径**：本任务全部用例走 SQLite（`crates/server` 集成测试）与 `tests/` 黑盒（SQLite 文件）；PG 的等价覆盖在
+   T3b 的 `pg::*` 用例中，HTTP 层未额外起 PG（避免与其他写域争用 `PONY_TEST_PG_URL`）。**[NON-MACHINE]** 若要 PG 的 HTTP 面实证，
+   需 Lead 提供独立 PG 库名。

@@ -1,0 +1,19 @@
+# Lead 最终门禁（PG 启用）— 2026-10-23T22:03:14+08:00
+
+$ PONY_TEST_PG_URL=... cargo test --workspace --offline
+EXIT=0
+passed=175 failed=0
+SKIP lines: 0
+
+$ cargo clippy --workspace --all-targets -- -D warnings
+EXIT=0
+
+$ acceptance_trace_v2
+EXIT=0
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 72.09s
+
+$ (cd web && pnpm test && pnpm build)
+TEST_EXIT=0
+# pass 40
+# fail 0
+BUILD_EXIT=0

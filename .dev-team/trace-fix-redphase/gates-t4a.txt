@@ -1,0 +1,36 @@
+# T4a 门禁凭证（executor-web，2026-10-23T21:01:58+08:00）
+
+## 1) cd web && pnpm test
+EXIT=0
+  duration_ms: 0.407154
+  type: 'test'
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 237.364794
+
+## 2) cd web && pnpm build
+EXIT=0
+vite v8.3.3 building client environment for production...
+transforming...
+✓ 2286 modules transformed.
+rendering chunks...
+[plugin vite:singlefile] 
+
+[plugin vite:singlefile] Inlining: index-B7Ioallu.js
+[plugin vite:singlefile] Inlining: style-CZAPNsFR.css
+computing gzip size...
+dist/index.html  351.30 kB │ gzip: 105.29 kB
+
+✓ built in 2.13s
+
+## 3) 改动范围
+git diff --stat (web/src):
+ web/src/App.vue | 82 ++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 79 insertions(+), 3 deletions(-)

@@ -1,0 +1,7 @@
+{
+  "session_id": "audit-probe-e3-remerge",
+  "run_id": "run_probe_e3_C",
+  "turn_id": "turn_probe_e3_1",
+  "turns": [{"turn_id": "turn_probe_e3_1", "status": "interrupted", "duration_ms": 7, "input_tokens": 1, "output_tokens": 1}],
+  "total_input_tokens": 1, "total_output_tokens": 1, "total_duration_ms": 7
+}

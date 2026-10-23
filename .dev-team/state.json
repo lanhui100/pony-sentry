@@ -77,5 +77,128 @@
       "status": "completed",
       "green_commit": "pony-sentry 4d33df8 + 6fc0f46 + 055be29"
     }
-  ]
+  ],
+  "audit_trace_cards": {
+    "date": "2026-10-23",
+    "sample": {
+      "trace_id": "ca0b5494-ae1b-47db-8e00-c9e7abbb6779",
+      "session_id": "thread_ref_v1_e9b4ec395c96d8913c106ef8",
+      "run_id": "run_83c1879e338d442f953a5dd4b8d1646a",
+      "project": "job_copilot",
+      "environment": "development"
+    },
+    "status": "completed",
+    "grading": {
+      "level": "B",
+      "reason": "跨项目只读审核（pony-sentry 消费者 + job_copilot 生产者 + 控制台/DB/API 三层），涉及安全/容量/契约多面；无业务代码写入"
+    },
+    "roster": [
+      "lead",
+      "protocol-scribe",
+      "auditor-core",
+      "auditor-diagnostic",
+      "verifier",
+      "subagent:explorer×3",
+      "subagent:l3a×2",
+      "subagent:l3b×2"
+    ],
+    "findings": {
+      "total": 27,
+      "wrong": 10,
+      "missing": 6,
+      "improve": 11,
+      "p0": 2,
+      "p1": 16,
+      "p2": 9
+    },
+    "verification": {
+      "verifier_confirmed": 59,
+      "refuted": 0,
+      "l3a_findings": 14,
+      "l3b_findings": 14,
+      "adjudication": "PASS (CLOSED 26 / PARTIAL 2 / OPEN 0)"
+    },
+    "artifacts": {
+      "report": "docs/release/trace-audit-cards-2026-10-23/report.md",
+      "adr": ".agents/notes/proposed/process/2026-10-23-pony-sentry-trace-diagnosability-audit.md",
+      "meta": ".dev-team/meta-retrospective-trace-audit.md",
+      "evidence_dir": ".dev-team/audit-trace-cards/",
+      "appendix": "docs/release/trace-audit-cards-2026-10-23/appendix-field-matrix.md",
+      "benchmark": "docs/release/trace-audit-cards-2026-10-23/dsh-benchmark-review.md"
+    },
+    "hygiene": {
+      "probe_rows_remaining": 0,
+      "traces_total": 37,
+      "business_row_intact": true
+    },
+    "l3p": "N/A（无代码交付、无 NFR 基准变更，五问否决制不适用）",
+    "notes": "只审核评估，不实施修复；建议按 Wave A→D 另立 backlog。",
+    "benchmark": {
+      "ref": "dsh-v0.2.1-rc.2-1-g5ad609c9ea",
+      "validated": 18,
+      "revised": 7,
+      "not_comparable": 3,
+      "refuted": 0,
+      "doc": "docs/release/trace-audit-cards-2026-10-23/dsh-benchmark-review.md",
+      "note": "DSH 无 trace/span，调用级时序由成对事件派生；UI 对缺失显式渲染 not recorded"
+    }
+  },
+  "wave7_trace_fix": {
+    "date": "2026-10-23",
+    "status": "completed",
+    "grading": {
+      "level": "C",
+      "reason": "跨 core/server/web/migrations 四层 + DB 迁移与回填 + 合并语义破坏性变更；用户批准 schema 变更"
+    },
+    "contract": ".dev-team/trace-fix-contract.md (FROZEN v1, C1-C10)",
+    "tasks": {
+      "T1": "protocol-scribe: trace_v2 空桩 + NFR 基线",
+      "T2": "test-agent: 黑盒验收红相(12条)",
+      "T3": "executor-db: 迁移+合并v2+并发+仓储",
+      "T4a": "executor-web: 控制台徽标/失败原因",
+      "T4b": "executor-api: HTTP面+指标"
+    },
+    "write_scopes": {
+      "protocol": [
+        "crates/core/src/trace_v2.rs"
+      ],
+      "test": [
+        "tests/acceptance_trace_v2.rs",
+        "web/tests/trace-ui.test.js"
+      ],
+      "db": [
+        "migrations/",
+        "crates/core/src/"
+      ],
+      "web": [
+        "web/src/"
+      ],
+      "api": [
+        "crates/server/src/"
+      ]
+    },
+    "gates": {
+      "cargo_test_workspace": "175 passed / 0 failed (PG enabled, SKIP=0)",
+      "clippy": "Exit 0",
+      "acceptance_trace_v2": "11 passed",
+      "web": "pnpm test 40/40, build Exit 0",
+      "red_phase": "11 rust + 3 web failed",
+      "smoke": "real incident payload: diagnostics 3 flags, id GET 200, no regression, 4 metrics",
+      "l3a": "FAIL 1 BLOCKER/5 MAJOR/4 MINOR -> all fixed",
+      "l3b": "FAIL 1 BLOCKER/4 MAJOR/6 MINOR -> all fixed"
+    },
+    "db": {
+      "test_database": "ponysentry_test@10.43.206.170",
+      "prod_migration": "未执行（仅开发验证；部署步骤待收口文档化）"
+    },
+    "nfr_baseline": ".dev-team/nfr-baseline.json#trace_*",
+    "red_commit": "9695676 test(wave-7-trace-v2): freeze red-phase acceptance tests",
+    "amend_commit": "9786975 test(wave-7-trace-v2): amend C9.6 per contract v1.4",
+    "contract_amend": "v1.1/v1.2/v1.3/v1.4 (.dev-team/trace-fix-contract.md)",
+    "artifacts": {
+      "doc": "docs/trace-contract.md",
+      "adr": ".agents/notes/implemented/architecture/2026-10-23-trace-merge-v2-and-turn-store.md",
+      "meta": ".dev-team/meta-retrospective-trace-fix.md"
+    }
+  }
 }

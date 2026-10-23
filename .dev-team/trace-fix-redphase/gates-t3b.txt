@@ -1,0 +1,116 @@
+T3b 存储层门禁收据（executor-db / task-7）
+================================================================================
+契约：`.dev-team/trace-fix-contract.md`（FROZEN v1.3）C1 / C2 / C3 / C4 / C5 / C6
+写域：`crates/core/src/**`、`crates/core/tests/**`、`migrations/**`（另 + `crates/core/Cargo.toml` 一行依赖，见 §6-1）
+时间：2026-10-23 21:1x (Asia/Shanghai)；原始日志：`.dev-team/trace-fix-redphase/gates-t3b.raw.log`
+
+## Gate 1 · cargo test -p pony-sentry-core --offline（PG 已启用）
+$ PONY_TEST_PG_URL='postgresql://job_copilot:***@10.43.206.170:5432/ponysentry_test' \
+    cargo test -p pony-sentry-core --offline
+     Running unittests src/lib.rs
+running 38 tests … test result: ok. 38 passed; 0 failed; 0 ignored
+     Running tests/pg_repository_test.rs
+running 4 tests  … test result: ok. 4 passed; 0 failed; 0 ignored        # PG 用例真实执行（非 SKIP）
+     Running tests/storage_test.rs
+running 2 tests  … test result: ok. 2 passed; 0 failed; 0 ignored
+     Running tests/trace_repository_test.rs
+running 8 tests  … test result: ok. 8 passed; 0 failed; 0 ignored
+     Running tests/trace_v2_repository_test.rs
+running 14 tests … test result: ok. 14 passed; 0 failed; 0 ignored
+   Doc-tests pony_sentry_core … 0 tests
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core --all-targets -- -D warnings
+    Checking pony-sentry-core v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CLIPPY_EXIT=0
+
+## Gate 3 · cargo check -p pony-sentry-core
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CHECK_EXIT=0
+
+## §1 迁移文件与结构
+- `migrations/0005_trace_turns.sql`（SQLite）：`trace_turns(session_id, turn_id, seq, status, payload,
+  created_at, updated_at)` PK(session_id,turn_id) + 索引 `(session_id,seq)`、`(status)`；
+  `traces` 增列 `turn_status NOT NULL DEFAULT 'unknown'`、`turns_count NOT NULL DEFAULT 0`、`note`；
+  索引 `(run_id)`、`(turn_status)`、`(updated_at)`；`json_each` + `ON CONFLICT DO NOTHING` 幂等回填。
+- `migrations/postgres/0005_trace_turns.sql`（PG）：同结构（payload JSONB、created_at/updated_at TIMESTAMPTZ），
+  全部 `IF NOT EXISTS` / `ON CONFLICT DO NOTHING`，每次启动重放安全；`jsonb_array_elements … WITH ORDINALITY`
+  回填。SQLite 的 ADD COLUMN 由 `migrate()` 列探测守卫 + 单事务包裹（范式同 0004）。
+- 回填口径：同 turn_id 以**首个**为准；`turns_count` = 回填行数；`turn_status` = **最后一个** turn 的
+  status（缺失 `unknown`）；seq = 数组下标（0 起）。
+
+## §2 回填数字（真实数据快照，dev 库只读）
+做法：把 dev 库 `traces` 37 行 `COPY … TO STDOUT` 到 `ponysentry_test` 的临时 schema（t3b_probe，
+按 0003 建表），再执行 0005；dev 库全程只读（迁移后复核仍 37 行）。探测 schema 用完已 DROP。
+$ … 0005 执行：CREATE TABLE / CREATE INDEX ×2 / ALTER TABLE ×3 / CREATE INDEX ×3 / INSERT 0 57 / UPDATE 37
+  traces_rows | turn_rows | sum_turns_count | rows_without_turns
+            37 |        57 |              57 |                  0
+  turn_status 分布：succeeded 19 / completed 13 / interrupted 2 / failed 2 / unknown 1
+  turns_count 与 jsonb_array_length(payload->'turns') 不一致的行数：0
+幂等重放：再执行 0005 → `INSERT 0 0` / `UPDATE 0`，`trace_turns` 仍 57 行。
+SQLite 回填由单测背书：`v2_migration_backfills_trace_turns_from_legacy_payload`
+（旧形态库 → 回填 2 行、seq 顺序 `lt-1,lt-2`、turns_count=2、turn_status=failed、重复 migrate 不重复回填）。
+
+## §3 并发结果（修 W-02）
+- SQLite（`BEGIN IMMEDIATE`）：`v2_concurrent_ingest_loses_no_turn_on_sqlite` — 20 并发 × 2 turn
+  → `turns_count=40`、`payload.turns=40`（修复前实测 19/20 会话丢轮）。
+- PG（`pg_advisory_xact_lock(hashtext(session_id))` + 事务）：`v2_pg_terminal_merge_and_concurrency`
+  — 20 并发 × 2 turn → `turns_count=40`、`payload.turns=40`。
+- 并发期间每个请求都 2xx（测试内 `expect` 断言，无 500/锁超时）。
+
+## §4 合并 / 聚合 / 诊断 / 过滤 / 保留期 用例（14 条新单测）
+trace_v2_repository_test.rs：
+  v2_terminal_status_wins_and_tool_calls_merge_by_id   C2.1/C2.3 终态覆盖 + 迟到 error + tool_calls 按 id 合并 + 禁止回退
+  v2_new_turn_is_appended_with_monotonic_seq           C2.5 新 turn seq=max+1、按 seq 升序
+  v2_totals_sum_turns_and_top_level_fields_merge       C2 token 单一真相（拒绝客户端 99999）/ extra 深合并 / eval_status 移除 / session_id_source
+  v2_totals_are_null_when_no_turn_carries_token_fields C2 无 turn 字段时 total=null
+  v2_thread_id_fallback_marks_session_id_source        C5 thread_id 回退标注
+  v2_diagnostics_are_generated_by_server               C4 error_contract / status_conflict / error_missing / 健康轮次无 diagnostics
+  v2_note_patch_persists_and_survives_reingest         C1.2 note 落库 + 详情/列表回显 + 再次上报不覆盖 + turn_status/turns_count 推进
+  v2_list_supports_run_id_turn_status_and_time_window  C5 run_id / turn_status / from / to + limit clamp + offset<0 兜底
+  v2_retention_judges_by_updated_at                    C6 COALESCE(updated_at, created_at) + trace_turns 孤儿清理
+  v2_migration_backfills_trace_turns_from_legacy_payload C1.3 回填
+  v2_legacy_payload_is_hydrated_on_next_ingest         升级窗口：有 payload.turns 无 trace_turns 时先补齐再合并（防丢历史轮次）
+  v2_concurrent_ingest_loses_no_turn_on_sqlite         C3 SQLite 并发
+  pg::v2_pg_terminal_merge_and_concurrency             C2.1 + C3 PG 并发（PONY_TEST_PG_URL 门控）
+  pg::v2_pg_migration_backfills_legacy_payload         C1.3 PG 回填 + C6 PG 孤儿清理
+lib 单测新增 3 条：`trace_v2::tests::turn_key_prefers_explicit_id_and_hashes_missing_id_deterministically`、
+  `normalize_incoming_turn_keeps_non_object_payloads`、`session_id_source_follows_payload_or_falls_back_to_thread_id`；
+  `trace_merge` 单测改为 v2 语义（5 条，含"同 id 合并 + 终态覆盖 + total 求和"）。
+
+## §5 旧断言更新（按 C2 新语义，逐条说明）
+1. `crates/core/tests/trace_repository_test.rs::test_trace_upsert_on_same_session_id`
+   - 旧：`total_input_tokens == Some(300)`、`total_duration_ms == Some(1200)`（二报客户端直传值覆盖）。
+   - 新：两者均为 `None`（两个 turn 都不带 token/duration 字段 ⇒ 求和为 null），并补 `turns_count==2`、
+     `turn_status=="unknown"`、`payload.turns==["turn-1","turn-2"]`、`payload.total_input_tokens` 为 null。
+   - 依据：C2「total_* = turns 求和（单一真相）」+ C9.3（客户端直传 99999 必须被拒）。旧断言等于把
+     W-03 的缺陷写成契约，故替换。
+2. `test_trace_incremental_merge_upsert_dedup`：v2 下仍成立（t2 同 id 合并、顺序 [t1,t2,t3] 不变），未改断言。
+3. 其余 trace 用例（lifecycle / adversarial / 迁移补列 / project 过滤）与 v2 语义兼容，未改。
+
+## §6 接口变化（交给 task-9 接线）
+1. `TraceRepository::update_trace_review(id, status, note)` 新增；`update_trace_eval_status` 保留为
+   **默认包装**（`note=None`），故既有 PATCH 调用能编译，但要让 note 落库必须改调 `update_trace_review`。
+2. `record_trace` 返回值改为**库内持久化行**（同事务内回查：id / created_at / updated_at / total_* /
+   turn_status / turns_count 均来自 DB），POST 响应可直接当 GET 用（C5/W-08）。
+3. `TraceFilter` 新增 `run_id / turn_status / from / to` 已生效（`reported_at` 含端点）；服务层需解析
+   RFC3339、非法值 → 400，并保证错误体不含 DB 原文（C5/C9.4）。
+4. `payload.session_id_source` 由核心依据 `payload.session_id` / `thread_id` 推断写入（上报方显式值优先）；
+   服务层无需重复实现，但若显式写入则以其为准（C5/C9.6）。
+5. `traces.payload` 现在是聚合视图：**不含 `eval_status`**、含 `session_id_source`、每个 turn 带 `seq`；
+   客户端直传 `total_*` 不再落库（payload 与列都以 turns 求和为准）。
+6. retention 删除聚合行后**同时清理 `trace_turns` 孤儿行**（新表无外键，防泄漏）。
+7. 当前 `cargo check -p pony-sentry-server` 失败（预期，task-9 范围）：
+   - `crates/server/src/routes.rs:1220` TraceRecord 缺 `note/turn_status/turns_count`；
+   - `crates/server/src/routes.rs:1265` TraceFilter 缺 `from/run_id/to/turn_status`。
+
+## §7 偏离与说明（须知会 Lead）
+1. `crates/core/Cargo.toml` 增 `sha2 = "0.10"`：C1.1 要求 `turn_auto_<sha256(payload)[:16]>`；该 crate 已在
+   `Cargo.lock`（fingerprint crate 传递依赖），`Cargo.lock` 仅新增一条依赖边，离线可用。
+2. 迁移期「缺失 turn_id 的存量 turn」兜底哈希用 PG `md5()` / SQLite `hex()` 的前 16 位（SQL 方言无 sha256）；
+   运行时新写入路径用真 sha256。真实 37 行快照**全部带 turn_id**，未触发该兜底。
+3. 新增两项实现细节（不改契约语义）：① 升级窗口 hydration（聚合行有 `payload.turns` 但 `trace_turns` 为空时
+   先补齐再合并，防滚动升级/手工导入丢历史轮次）；② retention 清理 `trace_turns` 孤儿行。
+4. 未改动 `crates/server/**`、`web/**`、仓库根 `tests/**`、`README.md`、`docs/**`（`crates/core/tests/**` 为契约
+   amend v1.3-3 授权范围）。

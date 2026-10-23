@@ -1,0 +1,21 @@
+{
+  "verdict": "PASS",
+  "reviewer": "final-adjudicator-round2 (read-only)",
+  "round": 2,
+  "scope": ["L3A-F4", "L3B-F4", "L3A-F8", "L3A-F9", "L3A-F6", "L3B-F11", "L3B-F8"],
+  "closed": {
+    "L3A-F4": "CLOSED — ingest 与 retention 共用同一把 64 位 advisory 锁：record_trace pg_advisory_xact_lock(hashtextextended($1,0))（crates/core/src/pg_repository.rs:819）；delete_traces_older_than（:957-1043）先快照固定候选 id 集，再按 id 升序逐 session 取同键 advisory（:1003）→ 持锁后 FOR UPDATE SKIP LOCKED 复检过期性（:1005-1016）→ 固定 session/id 集删 trace_turns/traces 同事务。两路径锁序统一「advisory → 行锁」（行锁只在 advisory 之后取），不存在「行锁→advisory」反向边，故无环；实测并发交错 v2_pg_retention_and_ingest_interleaving_stays_consistent（2 ingest×6 轮×6 session vs 2 retention×12 批，trace_v2_repository_test.rs:1366）输出「聚合行=6 轮次行=73 不一致行=0」且断言不一致=0/孤儿=0（gates-fix-core2.raw.log 末段），无死锁回滚。",
+    "L3B-F4": "CLOSED — migrate() 不再整段 raw_sql(0005)，改 ensure_trace_v2_schema（pg_repository.rs:79-140）：按 ';' 拆条逐句 autocommit（:284 schema_statements）；ADD COLUMN 先查 information_schema.columns（:143）存在即 skipped，不再每次启动取 ACCESS EXCLUSIVE；5 个索引先查 pg_indexes（:157），缺失才 CREATE INDEX CONCURRENTLY（事务外），失败 DROP INDEX CONCURRENTLY IF EXISTS 后重试一次并 WARN。实测 0005 五索引均为非 unique `CREATE INDEX IF NOT EXISTS`（migrations/postgres/0005_trace_turns.sql:23-24,31-33），故全部走 CONCURRENTLY。测试 v2_pg_schema_ensure_is_idempotent_and_restart_light（trace_v2_repository_test.rs:1304-1357）断言首次 (3,5)、二次 (0,0)+skipped(3,5)、invalid 索引=0；raw log 报告 columns_added:0 columns_skipped:3 indexes_created:0 indexes_skipped:5，即二次启动 0 ALTER/0 CREATE INDEX。",
+    "L3A-F8": "CLOSED — grep 'pg_advisory_xact_lock' crates/core/src/pg_repository.rs = 2 处（:819 ingest、:1003 retention），均为 hashtextextended($1, 0)；grep 'hashtext(' 全仓 = 0，32 位键空间已无残留。",
+    "L3A-F9": "CLOSED — sum_turn_field 改 total.checked_add(value)，溢出返回 (None,true)（trace_v2.rs:483-497）；aggregate_session 溢出时 total 置 null 并写 stats_incomplete:true（:202-210），且每次聚合先 remove 旧标记再重算（:208），不 panic/不回绕。用例：trace_v2::tests::c2_totals_use_checked_add_and_flag_stats_incomplete（:865，本轮实跑 ok）与 v2_totals_overflow_marks_stats_incomplete_instead_of_panicking（trace_v2_repository_test.rs:923，assert total_in=null / stats_incomplete=true）。",
+    "L3A-F6": "CLOSED — v2_migration_twice_keeps_turn_store_stable（trace_v2_repository_test.rs:949-991）在二次 migrate 断言快照不变后，强制 DELETE lt-2 行 + turns_count=0，使回填扫描条件 json_array_length>turns_count 命中并真实重放 INSERT 路径（hydrate_trace_turns 中 existing.len()<2 → store_trace_turn 插入 lt-2，sqlite_repository.rs:1000-1024），断言键/seq/聚合列与首次逐字段一致。本轮实跑：1 passed。",
+    "L3B-F11": "CLOSED — /metrics 可选鉴权：AppState.metrics_token 默认 None（routes.rs:295-324，with_metrics_token 空串归一 None），metrics_authorized（:1003-1026）未配置放行、配置后接受 x-metrics-token 或 Authorization: Bearer（常量时间 token_matches）；handle_metrics（:1042-1044）鉴权先于任何 DB 访问返回 401 'Unauthorized'；main.rs:179-181 读取 METRICS_TOKEN（空串视为未配置）。默认行为未变：acceptance C9.9 get_anon('/metrics') 仍 200（gates-fix-http2.txt 回归 11 passed）。本轮实跑 api_test metrics 5 项全部 ok（含匿名 200、配置后无凭证/错误凭证 401、正确凭证 200）。",
+    "L3B-F8": "CLOSED — 事件面板 payload 预览改用 getPayloadPreview（web/src/App.vue:508-511），20KB 上限 + WeakMap 按对象身份缓存（:1486-1516）；面包屑改 breadcrumbSummary（:1520-1529）复用同一预览并再压到 512 字符，不再全量 stringify。grep 'JSON.stringify' 全仓仅剩请求体（:1200,:1555,:1675）、span 值渲染（:1381）、原始预览函数内部（:1504，已截断）、turn input/output 文本化（:1340,:1346，非本 finding 面），已无 JSON.stringify(ev.payload)。本轮实跑 web pnpm test 40 passed。"
+  },
+  "open": [],
+  "notes": [
+    "L3A-F7 不在本轮复核清单（前轮 OPEN/MINOR）：默认 cargo test --workspace 在无 PONY_TEST_PG_URL 时仍打印 SKIP 后 return（trace_v2_repository_test.rs:1114），冻结 C9.2 仍走 SQLite harness。未复核、状态未变，如需闭环另开一轮。",
+    "残差（非本轮 finding）：`CREATE TABLE IF NOT EXISTS trace_turns` 每次启动仍执行（catalog no-op）；0005 若未来引入 CREATE UNIQUE INDEX，当前 replacen('CREATE INDEX', 'CREATE INDEX CONCURRENTLY') 不会改写 UNIQUE 形式；breadcrumb.message 分支未套 512 截断；stringifySpanValue / turn input-output 仍无长度上限。",
+    "物理收据：gates-fix-core2.txt（core 81 passed、clippy 0）、gates-fix-http2.txt（workspace 178 passed、acceptance 11 passed）、gates-fix-web2.txt（web 40 passed）、gates-lead-final3.txt（workspace 183 passed、SKIP=0）；本轮复核仅只读 + 定向实跑（core lib 1、trace_v2_repository 1、server api_test metrics 5、web 40 全绿）。"
+  ]
+}

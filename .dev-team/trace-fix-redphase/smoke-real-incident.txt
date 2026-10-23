@@ -1,0 +1,23 @@
+# 真实事故 trace 冒烟 — 2026-10-23T22:18:58+08:00
+## 1) POST 真实 payload（audit-trace-cards 基线）
+HTTP 201
+persisted id = 5e4ee2a6-c42d-4f69-81ef-8929ebbc4c5c
+## 2) GET by 响应 id（W-07）
+HTTP 200
+id==response: True
+turn_status: failed | turns_count: 1
+diagnostics: {"error_contract": "missing", "error_missing": true, "status_conflict": true}
+has eval_status in payload: False
+session_id_source: session_id
+total_in/out/dur: 36612 1368 120272
+## 3) 参数校验（I-10）
+limit=-5     -> HTTP 400 Bad request: `limit` must not be negative
+offset=-1    -> HTTP 400 Bad request: `offset` must not be negative
+limit=abc    -> HTTP 400 Failed to deserialize query string: Bad request: integer que
+## 4) /metrics 四个 trace 指标
+pony_sentry_traces_total{project="job_copilot",turn_status="failed"} 1
+pony_sentry_trace_turns_total{status="failed"} 1
+pony_sentry_trace_status_conflicts_total 1
+## 5) 二次上报：failed -> running 不回退（W-01）
+HTTP 201
+after re-report status = failed | turns_count = 1

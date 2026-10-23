@@ -1,0 +1,38 @@
+# T13 控制台小修门禁凭证（executor-web，2026-10-23T21:53:30+08:00）
+# 修复：L3B-F9 终态失败集补色 / L3B-F8 payload 预览 20KB 上限（含 30s 重渲染缓存）
+
+## 1) cd web && pnpm test
+EXIT=0
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 324.436962
+
+## 2) cd web && pnpm build
+EXIT=0
+
+[plugin vite:singlefile] Inlining: index-BOAeWcMs.js
+[plugin vite:singlefile] Inlining: style-CZAPNsFR.css
+computing gzip size...
+dist/index.html  351.90 kB │ gzip: 105.52 kB
+
+✓ built in 1.13s
+
+## 3) F9 配色映射（从 src/App.vue 抽取真实实现执行）
+F9 OK: 13/13 mapping
+EXIT=0
+
+## 4) F8 预览上限（从 src/App.vue 抽取真实实现执行）
+F8 OK: 8/8 checks
+EXIT=0
+
+## 5) 改动范围（web/src 仅 App.vue；web/tests 未改）
+ M web/dist/index.html
+ M web/src/App.vue
+ web/src/App.vue | 115 ++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 111 insertions(+), 4 deletions(-)

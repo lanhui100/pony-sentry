@@ -1,0 +1,419 @@
+[
+  {
+    "id": "W-01",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-W01：首报 running(无 error/tool_calls) → 二报 failed(带 error+tool_calls)；库内实测 status=running、error=NULL、tool_calls 键缺失、duration_ms=1000，而行级 total_input_tokens=20（二报值）。§B3-E3/E5 反向 failed→succeeded 同样保持 failed。源码 trace_merge.rs:69-83 + pg_repository.rs:629-632。",
+    "note": "old-wins 的「先到先得」已由我自己的 HTTP+DB 复现；终态与错误详情被永久钉在第一帧成立。",
+    "source": "T2"
+  },
+  {
+    "id": "W-02",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B5（自跑，未抄 T2）：20 个 session × 2 并发 POST（同 session、不同 turn_id），40 个请求全部 201；DB 聚合 18/20 只剩 1 turn、2 个完好。源码 pg_repository.rs:619-627(SELECT 旧 payload)→:629-632(内存 merge)→:659-695(ON CONFLICT)，三步间无事务/行锁。",
+    "note": "T2 报 19/20，我独立复现 18/20，比例随时序波动但丢轮现象确凿；这是本报告唯一「并发竞态」类结论。",
+    "source": "T2"
+  },
+  {
+    "id": "W-03",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-W03：首报 total=1000 而 turns 求和=5（不做一致性校验）；二报不带 turns（total=7777/8888/99）→ 行 total=7777|8888|99、payload.total_input_tokens=7777、turns 求和仍=5，同档行内三套口径并存。§B3-E6：追加新轮后改由 turns 求和重算（8|10|16）。",
+    "note": "另发现 T2 未记的一层：POST 响应体 total_* 与库内落盘值可不一致（见 gap G-02，§B3-E3/E5）。",
+    "source": "T2"
+  },
+  {
+    "id": "W-04",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E7：同 session 报 run_A 再报 run_B → 库内 1 行、列 run_id=run_9719a9_e7_B、turn_id=turn_..._b1、payload.turns=[A,B]。§B4-W01 再次显示列级 turn_id 被最后一次上报覆盖。pg_indexes 显示 uq_traces_session_id 唯一索引；pg_repository.rs:665-667 ON CONFLICT 直接覆盖列。",
+    "note": "列语义（最近一次）与 payload 语义（全部轮次）冲突成立；session 唯一约束使「多 run 一 session」无法分行。",
+    "source": "T2"
+  },
+  {
+    "id": "W-05",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-W05：reported_at_ms=9999999999999 → HTTP 201，落库 reported_at=2286-11-20 17:46:39.999Z，与 created_at 差 94991 天 05:51:36。排序 ORDER BY created_at（pg_repository.rs:753-754）；界面 relTime(trace.reported_at || created_at)（App.vue:670）。",
+    "note": "未来时间可入已被我实测；显示与排序口径分离成立。",
+    "source": "T2"
+  },
+  {
+    "id": "W-06",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1/A4 + 00-baseline/03-trace-payload.raw.json：tool_calls[0]、[1] 均 status=success、error=null，而 output 正文为「职位解析失败（原因: 模型返回空结果）」；控制台按 status 染色（App.vue:1400-1406 success→emerald）+ :854 显示 “success (39.7s)”。我直查 job_copilot 库该 run 的 tool span：completed×2 + cancelled×1（CancelledError）。",
+    "note": "「status 与 output 语义互相打脸」机器可证。T2 文中「实际 3 次调用全部失败」属业务层推断（依据 output 文案与 producer verdict），传输层 span 是 completed/cancelled，我按语义矛盾判 CONFIRMED。",
+    "source": "T2"
+  },
+  {
+    "id": "M-01",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3/A4：turns[0].tool_calls[2] 键集合 = [arguments_summary,duration_ms,error,status,tool_call_id,tool_name]（**没有 output 键**）、error=null、status=error；§B4-M01：构造 status=error 且不带 error 字段 → 201 入库（payload ? 'error' = false）。消费端零校验（routes.rs:362、1196-1236）。",
+    "note": "核心结论成立。T2 把第 3 条描述为 “output:null”，实测是「output 键缺失」——两者对诊断影响相同（渲染都是空），但口径应以键缺失为准（gap G-05）。",
+    "source": "T2"
+  },
+  {
+    "id": "M-02",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A2/A3：payload 顶层 15 键、turn 12 键、tool_call 7 键，均无 llm_calls/span/attempts/started_at。我直查 job_copilot v2_agent_observability_span（run_83c1879e…）：llm span 共 8 条（completed×3 / error×4 / cancelled×1）、tool span 3 条，而 trace 只有 1 个 turn 聚合。",
+    "note": "「无 LLM 调用级 span、无重试/超时语义位置」成立，且我用生产者库证明了数据本身存在、只是没进 payload。",
+    "source": "T2"
+  },
+  {
+    "id": "M-03",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-M03：PATCH /api/v1/traces/:id 带 note=VERIFY_SHORT_NOTE_9691a9 → HTTP 200、eval_status 变为 triage_good、响应体 has_note=false、库内 payload/列 0 命中。`grep -rn pony_sentry_traces crates/` = 0；events 侧指纹/issue/webhook 见 routes.rs:892/911/965。",
+    "note": "note 被静默丢弃 + trace 无 issue/告警/指标通道，两条均已机器验证。",
+    "source": "T2"
+  },
+  {
+    "id": "I-01",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E1：POST 含 future_field_cost_usd / unknown_nested_object / error 三个未知顶层键 → 201，响应 payload 顶层 15 键不含它们（has=false）；同请求 turns[].unknown_turn_field、tool_calls[].unknown_call_field/retry_count 反而保留（t|t）。全仓 deny_unknown_fields=0；routes.rs:1196 用 typed struct 重新序列化。",
+    "note": "「顶层丢、turn 内不丢」的不对称成立，属潜在风险而非本次触发项。",
+    "source": "T2"
+  },
+  {
+    "id": "I-02",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E2：turns 内含 status=12345、tool_calls=\"NOT_AN_ARRAY\"、input_tokens=\"NOT_A_NUMBER\"、duration_ms=-1、裸字符串 turn、重复 turn_id → 201 且原样入库（jsonb_typeof=array|4；“12345”|string）。仅 turns 为对象/顶层为数组时 422（§B3-E2b/E2c）。",
+    "note": "「turns 零 schema 校验」成立；我额外确认 serde 只拦“非数组”这一层。",
+    "source": "T2"
+  },
+  {
+    "id": "I-03",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-I-03：?run_id=run_… / ?status=failed / ?since=… / ?has_error=true / ?nonsense=x 全部 HTTP 200 且返回全量 41 行（结果集恒定）。TraceQuery 仅 session_id/eval_status/environment/release/project/limit/offset（routes.rs:372-380）。§B3-E7b 用真实存在的 run_id 检索：n=48、命中 0。",
+    "note": "“未知参数静默忽略 + 无法按 run_id 检索”双成立；静默忽略比“不支持”更危险（返回全量却像已过滤）。",
+    "source": "T2"
+  },
+  {
+    "id": "I-04",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-I-04：?limit=100000 → 200、2,016,030 bytes、41 行；无 payload 投影（返回键含整 payload）；pg_repository.rs:753-755 直接拼 LIMIT（无 clamp），对照 events 侧 :395 clamp(1,100)。",
+    "note": "结论成立。我另测到 limit=-5&offset=-3 → HTTP 500 且回显 “Database error: … OFFSET must not be negative”（T2 未记录，gap G-03）。",
+    "source": "T2"
+  },
+  {
+    "id": "I-05",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §C2/C3：dist 内 attempt_index=0 次、error_type=0 次、llm_calls=0 次；agent-browser 真实渲染截图 artifacts/console-01-trace-detail-collapsed.png / console-02-trace-detail-expanded.png 显示 Turn 头仅 seq/模型/耗时/tokens、无 turn.status；call.error 空则整块不渲染（App.vue:875-878）；列表行无状态徽标（App.vue:653-667）。",
+    "note": "注意口径：控制台**确实**渲染 tool_call 的 arguments/output/error（T2 §0 第 5 行也说“都展示”），不成立的是 turn.status / 失败原因区 / attempt_index / degraded。",
+    "source": "T2"
+  },
+  {
+    "id": "I-06",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4：`grep -rn pony_sentry_traces crates/` = 0（无 trace 指标）；main.rs:46 RETENTION_DAYS_TRACES=90 全局；routes.rs:422 DefaultBodyLimit::max(2MB) 为唯一硬限。",
+    "note": "“采集侧静默失效无人知”成立；retention 按项目分层未实现。",
+    "source": "T2"
+  },
+  {
+    "id": "I-07",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A8：extra.path=/home/dm/job_copilot/api_v2/x.py → [USER_HOME]/job_copilot/api_v2/x.py；extra.api_key → [REDACTED_SECRET]；tool_calls[].arguments_summary 内的路径同样被改写。trace 路径无 redaction 计数返回（响应体无任何 warnings 字段）。",
+    "note": "结论成立。我另发现脱敏有绕过面（§A8b：单引号 Python repr 的 password、裸 token= 均未遮蔽），T2 只讲“改写过度”，未讲“该挡没挡住”（gap G-04）。",
+    "source": "T2"
+  },
+  {
+    "id": "I-08",
+    "verdict": "CONFIRMED",
+    "receipt": "README.md:129-133 仅有鉴权矩阵（/api/v1/traces 仅出现在端点×凭证表）；docs/decisions/ 只有 001-004（tech-stack / postgres-network / webhook-dsh / console-tailnet，均与 trace 字段契约无关）；docs/INDEX.md 无 trace 条目。",
+    "note": "“trace ingest 字段契约无文档之家”成立，字段语义只活在 routes.rs:351-369。",
+    "source": "T2"
+  },
+  {
+    "id": "I-09",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4：`grep -c stats_incomplete web/src/App.vue` = 1（App.vue:702 渲染徽标）；`grep -rn stats_incomplete crates/` = 0（后端从不写入）。",
+    "note": "死契约成立：前端会渲染、后端永不产出该键。",
+    "source": "T2"
+  },
+
+  {
+    "id": "D1",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1/A5：turns[0].status=failed、total_duration_ms=120272、project=job_copilot、environment=development、release=dev、model=workbuddy/deepseek-v4.1-flash、eval_status=unreviewed；job_copilot v2_agent_run_identity.status=failed 交叉印证。",
+    "note": "“能判定失败 + 项目/环境/版本/模型可聚合”成立（评分 1.0 属裁量，事实成立）。",
+    "source": "T3"
+  },
+  {
+    "id": "D2",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3：turn 键集合仅 [attempt_index,cache_hit_tokens,degraded,duration_ms,input_tokens,model,output_tokens,run_id,status,step,tool_calls,turn_id]，step=other；无 node/parent_span/llm_calls/span_type。job_copilot 库同一 run 有 llm/step/run/tool 四类 span（含 parent_span_id）但未外发。",
+    "note": "“无法指认失败所在层/节点”成立；缺口是节点身份与父子关系，不是数据不存在。",
+    "source": "T3"
+  },
+  {
+    "id": "D3",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3/A4：turn 无任何 error* 键；3 条 tool_call 的 error 全为 null（含 status=error 那条，tool_error_null=3）。契约 R1 原文只禁 error_message 自由文本（job_copilot .dev-team/contracts-pony-sentry-trace.md §3.2.1）。",
+    "note": "“无错误类型/消息/堆栈可读”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "D4",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A4：tool_name=format_jd_to_json×3、duration 39706/39342/19554、tool_status=success|success|error、error 全 null；前两条 output 含「职位解析失败（原因: 模型返回空结果）」。",
+    "note": "“部分可答（知道哪个工具、知道失败文案，不知道为何空）”成立；与 T2 W-06 是同一事实的两个角度。",
+    "source": "T3"
+  },
+  {
+    "id": "D5",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3：attempt_index=1；job_copilot v2_agent_run_identity 该 turn 的 attempt_index=1（运行级），而同一 run 的 llm span 里 attempt_index 取值 1/2 且有 8 条调用、tool span 3 条——说明“3 轮重试”在 trace 里不可见。service.py:876-877 把 identity.attempt_index 写入 trace_context。",
+    "note": "“attempt_index 是运行级序号，不表达工具重试轮次”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "D6",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1：total_duration_ms=120272、turns[0].duration_ms=120272（≈120s 整数档）；payload 唯一时间点是 reported_at_ms=1792754960002；无 started_at/completed_at/timeout_ms。",
+    "note": "“只能靠 120s 数字猜超时”成立（部分可答 0.5 属评分裁量）。",
+    "source": "T3"
+  },
+  {
+    "id": "D7",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1 + 我直查 job_copilot 库：trace input_tokens=36612/output=1368/cache_hit=23936；同 run 8 条 llm span 中 3 条 completed 的 (prompt,completion,cached)=(11835,810,0)(12205,309,11776)(12572,249,12160)，求和恰为 36612/1368/23936；4 条 error + 1 条 cancelled 的 prompt_tokens 全 NULL。",
+    "note": "“只有合计、无逐次调用、失败调用 token 缺失”成立；同时印证 T3 S9 的“只计成功调用”。",
+    "source": "T3"
+  },
+  {
+    "id": "D8",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A2：payload 无 request_id / user_id；thread_id 键存在但值 null；session_id=thread_ref_v1_*（HMAC）。job_copilot span attributes 里存在 request_id=request_454616d…、user_id=510、thread_id=efd84b9f-…（本可外发）。observability_sink.py:849-861 的 enqueue kwargs 确实未传 request_id/user_id。",
+    "note": "“跨项目回链只能靠 run_id grep 日志”成立，且我确认了缺口是生产者漏传而非数据不存在。",
+    "source": "T3"
+  },
+
+  {
+    "id": "S1",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1/A4：turns[0].status=failed；job_copilot v2_agent_run_identity.status=failed（同一 run）。payload.py:239 白名单收敛，failed 在 APPROVED_RUNTIME_OUTCOMES 内（metrics.py:141-155）。",
+    "note": "“status 白名单未误伤”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "S2",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A4 + 00-baseline payload：trace 记 success|success|error，而前两条 output 是「职位解析失败（原因: 模型返回空结果）」；job_copilot 库 tool span 为 completed/completed/cancelled。exporter.py:225-235 只用 outcome（是否抛异常）归一到三态。",
+    "note": "“传输态冒充业务态，2 次业务失败记 success”成立，与 W-06 互为印证。",
+    "source": "T3"
+  },
+  {
+    "id": "S3",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A4：第 3 条 status=error、error=null；job_copilot 库该 tool span 实为 status=cancelled、error_type=CancelledError。收敛点见 exporter.py:234 的 else 分支与 payload.py:276-279 的重复实现。",
+    "note": "“取消/超时/失败在 tool 维度不可区分”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "S4",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A4（error 全 null）；生产侧 tool_observability_middleware.py:278 写入 error_type=_safe_exception_type(exc)、:279 写死 error_message=None、:115 取 error=payload.get('error_message')（三处行号逐一核对命中）；payload.py:296 用 str(tc.get('error'))[:500] 且 error 为空即 None。全库 274 条 tool_call 中 error 非空仅 15 条（我复算：274|15）。",
+    "note": "“采集点拿到 error_type 却硬编码丢弃”成立，是最便宜的修点。",
+    "source": "T3"
+  },
+  {
+    "id": "S5",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3（turn 无 error 键）；contracts-pony-sentry-trace.md §3.2.1 R1 只约束 error_message 不外发；trace_safety.py:287-300 _SAFE_ERROR_TYPES 存在、:554-555 未知值收敛 Exception。",
+    "note": "成立。唯一瑕疵：T3 引「payload.py:188 保留 kwarg」，实际 error_message kwarg 在 payload.py:177（同文件同函数内，偏移 11 行）——引用行号需修正，不影响结论（gap G-06）。",
+    "source": "T3"
+  },
+  {
+    "id": "S6",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3（attempt_index=1）与我直查 job_copilot：v2_agent_run_identity.attempt_index=1（run/turn 级），同 run llm span 的 attempt_index 为 1/2；service.py:876-877 将 identity.attempt_index 注入 trace_context；observability_store.py:686 缺省回填 1。",
+    "note": "“attempt_index 语义为运行级、会被读成‘第一次尝试就失败’”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "S7",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3：degraded=false。生产侧 service.py:79（degraded 字段定义）、:291 mark_degraded()、:2075-2077 按 runtime_context.degraded 标记；observability_sink.py:876-882 透传 degraded。job_copilot evidence 05-verdict.md:55 记录 ENABLE_NEW_FAILOVER=False（想降级但无降级链）。",
+    "note": "“degraded=false 只表示未走降级，不表示降级可用”成立（语义窄化，非 bug）。",
+    "source": "T3"
+  },
+  {
+    "id": "S8",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3：step=other。metrics.py:19-29 APPROVED_CURRENT_STEPS 恰 7 值（profiling/files_process/jd_analysis/resume_parser/interviewer/resume_diagnosis/modification），不含任何图节点名；trace_safety.py:517-521 只放行该词表 ∪ {streaming,unknown,other}。我直查 job_copilot event 表：seq1 current_step=profiling、seq14(run_failed) current_step=other。",
+    "note": "“节点身份在生产侧就没采到/没词表”成立，与 D2 的缺口同源。",
+    "source": "T3"
+  },
+  {
+    "id": "S9",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1 + 我直查 job_copilot llm span：3 条 completed 的 token 求和 = trace 的 36612/1368/23936；4 条 error + 1 条 cancelled 的 prompt_tokens/completion_tokens 全 NULL。cache 子集关系核对：11776<12205、12160<12572（成立）。",
+    "note": "“total_* 实为成功调用口径 + cache 是 input 子集且契约未声明”成立；其中失败调用“至少另 ~60k input 未计量”是 [EST]，我未复算、按估算对待。",
+    "source": "T3"
+  },
+  {
+    "id": "S10",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1（单 turn 时 total_duration_ms == turns[0].duration_ms == 120272）；生产侧 payload.py:334 规则6 直接镜像、:350-368 仅 len(turns)>1 时改写为求和；消费者 trace_merge.rs:20-50 合并后再求和一次。§B3-E6 实测消费者重算口径（8|10|16）。",
+    "note": "“双侧各有一套求和 → 口径漂移风险”成立（本次单 turn 未触发）。",
+    "source": "T3"
+  },
+  {
+    "id": "S11",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A1：事故行 reported_at-created_at = -27ms（正常）；全库 37 行业务行实测 min=-0.164987s、max=+16:30:05.769373（即确有 16.5h 级漂移）。routes.rs:1190-1194 直接用 reported_at_ms 换算。",
+    "note": "主结论成立（reported_at 是生产者时钟、不可当服务端时间）。**但 T3 的 “-19min” 下界在当前业务行不可复现**：我实测最小仅 -0.165s；该 -19:28 来自 T3 自己的实验行（reported_at_ms 固定 1792754960002 而 created_at 为实测时刻，现已删除）。见 gap G-01。",
+    "source": "T3"
+  },
+  {
+    "id": "S12",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E1：我的请求里没有 thread_id/eval_status，响应 payload 仍出现 thread_id:null、eval_status:null（消费者 struct 重新序列化的产物）；全库 37 行 payload 顶层键数 **恒为 15**（我复算：jsonb_object_keys count=15 / 37 rows）。trace_safety.py:440-459 显示 HMAC-SHA256 单向摘要。",
+    "note": "“null 是消费者归一化产物、session_id 不可逆”成立，且 15 键不变量我用全库统计证实。",
+    "source": "T3"
+  },
+  {
+    "id": "S13",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-W01 + §B3-E3/E5：同 turn_id 二报被丢弃（running 保持、error 丢失）；§B3-E1/E3c：换新 turn_id 时任意新键（含 error/tool_calls）原样入库。observability_sink.py:849-861 唯一投递点、exporter.py:315-348 consume 后清空。",
+    "note": "“先骨架后富化不可行、换新 turn_id 可绕过”两条均复现。",
+    "source": "T3"
+  },
+  {
+    "id": "S14",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3/00-baseline payload：output=\"Command(update={'messages': [{'role': 'tool', …}]})\"、arguments_summary=\"{'jd_text': '公司：健合集团…'}\"（单引号 Python repr）。生产侧 tool_observability_middleware.py:98 str(input_payload)[:1000]、:114 str(output_payload)[:5000]（行号核对命中）。",
+    "note": "“repr 冒充工具返回值、非结构化”成立；也解释了为何我 §A8b 的单引号脱敏绕过是真实风险面。",
+    "source": "T3"
+  },
+
+  {
+    "id": "F1",
+    "verdict": "CONFIRMED",
+    "receipt": "routes.rs:362 turns: Option<Vec<serde_json::Value>>；02-independent-receipts.txt §B3-E1：turn/tool_call 内未知键（unknown_turn_field / retry_count / unknown_call_field）原样入库并原样返回。",
+    "note": "“turn/tool_call 内新增字段零消费者改动即可持久化”成立，是本次建议的核心杠杆。",
+    "source": "T3"
+  },
+  {
+    "id": "F2",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E1：三个未知顶层键全部丢弃（has=false）；routes.rs:1196 重新序列化 typed struct。",
+    "note": "“顶层新增字段必须同步改 struct，否则静默丢失”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "F3",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-W01（同 turn 二报被吞）+ §B3-E1/E3c（新 turn_id 内容可入库）。trace_merge.rs:69-83、pg_repository.rs:629-632。",
+    "note": "与 T2 W-01 为同一机制的两种表述，两边一致。",
+    "source": "T3"
+  },
+  {
+    "id": "F4",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B4-I-03：?run_id=… 返回全量 41 行；routes.rs:372-380 TraceQuery 无 run_id；pg_indexes 输出 7 个索引（pkey/session_id/eval_status/environment/created_at/unique session_id/project），**无 run_id 索引**。",
+    "note": "“列表不支持 run_id 检索、也无索引”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "F5",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §C2/C3：dist 内 error_type=0、llm_calls=0 次；call.error/输出 output/参数 arguments 均有渲染（截图 console-02-trace-detail-expanded.png 可见 ARGUMENTS/OUTPUT 区块）。App.vue:838-880、:1344-1400。",
+    "note": "“已渲染 call.error/rejection_code，未渲染 error_type/llm_calls/时间戳”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "F6",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A8（脱敏扫描整包 payload）；routes.rs:419-423 DefaultBodyLimit 2MB；§B4-I-04：limit=100000 单次响应 2,016,030 bytes 说明 payload 体积确实可观。",
+    "note": "“2MB 上限 + 二次脱敏 + JSONB 单列”成立。",
+    "source": "T3"
+  },
+
+  {
+    "id": "P1",
+    "verdict": "CONFIRMED",
+    "receipt": "前提逐条核对：_SAFE_ERROR_TYPES 存在（job_copilot trace_safety.py:287-320）；R1 只禁 error_message（contracts §3.2.1）；turns 不透明（02-independent-receipts.txt §B3-E1）；error 恒 null 的生产代码位置见 S4 收据。",
+    "note": "verdict 仅覆盖技术前提（字段可外发、消费者免改 schema、不破 R1）；成本 S 与优先级属裁量，未验证。",
+    "source": "T3"
+  },
+  {
+    "id": "P2",
+    "verdict": "CONFIRMED",
+    "receipt": "extra 为自由字典（routes.rs:364）；job_copilot llm span attributes 内已有 request_id/user_id/failover_policy 实值（我直查 v2_agent_observability_span）；observability_sink.py:849-861 enqueue kwargs 未含 request_id/user_id。",
+    "note": "技术前提成立；“仅 dev/preprod 外发 user_id”属隐私策略裁量。",
+    "source": "T3"
+  },
+  {
+    "id": "P3",
+    "verdict": "CONFIRMED",
+    "receipt": "同一 run 本地确有 8 条 llm span 可收集（我直查 job_copilot 库：completed×3/error×4/cancelled×1）；turns 不透明存放（§B3-E1），新增 llm_calls 无需消费者改 schema。",
+    "note": "技术前提成立；体积估算（8 次≈1.5–2KB）与 1–2 人日成本未验证，属估算。",
+    "source": "T3"
+  },
+  {
+    "id": "P4",
+    "verdict": "CONFIRMED",
+    "receipt": "turn/tool_call 现无任何时间戳（§A3 键集合）；中间件确实持有单调时钟起点（tool_observability_middleware.py:250 附近 duration_seconds = time.monotonic() - started_at）；turns 不透明。",
+    "note": "技术前提成立；“需换墙钟”属实现细节判断。",
+    "source": "T3"
+  },
+  {
+    "id": "P5",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A4/W-06 收据：业务失败 2 次被记 success；中间件 outcome 仅反映是否抛异常（tool_observability_middleware.py:111）；turns 内加 business_status 可零 schema 变更持久化（§B3-E1）。",
+    "note": "技术前提成立；“是否动 status 语义”属需裁决项。",
+    "source": "T3"
+  },
+  {
+    "id": "P6",
+    "verdict": "CONFIRMED",
+    "receipt": "三态收敛在两处重复（exporter.py:231-235、payload.py:276-279，均已核对命中）；前端 TOOL_CALL_FAILURE_STATUSES=['error','failed'] 不含 cancelled（App.vue:1370）。",
+    "note": "技术前提与兼容影响成立。",
+    "source": "T3"
+  },
+  {
+    "id": "P7",
+    "verdict": "CONFIRMED",
+    "receipt": "APPROVED_CURRENT_STEPS 恰 7 值且无图节点名（metrics.py:19-29）；payload.py:237 step 走 sanitize_trace_string(\"current_step\")；trace_safety.py:517-521 放行集合；本地 event seq14 current_step=other（我直查）。",
+    "note": "技术前提成立；扩词表会改变历史 step 分布，属需裁决。",
+    "source": "T3"
+  },
+  {
+    "id": "P8",
+    "verdict": "CONFIRMED",
+    "receipt": "TraceQuery 无 run_id（routes.rs:372-380）；pg_indexes 7 个索引无 run_id；实测 ?run_id= 返回全量（§B4-I-03）。",
+    "note": "技术前提成立，且“需 DB 迁移 → 与 brief Non-Goal 冲突”判断正确；是否做属 Lead 裁决。",
+    "source": "T3"
+  },
+  {
+    "id": "P9",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §C2：dist 内 error_type=0、llm_calls=0、attempt_index=0 次；截图 console-01/02 显示 turn 头无 error_type/时间戳区。",
+    "note": "“补字段后需纯前端展示改动，否则不可见”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "P10a",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §B3-E1：新 turn_id 携带任意新键（error/tool_calls/unknown_*）→ 201 且原样入库；§B3-E3c：追加新 turn 后 turns 数组按序增长、total 重算。",
+    "note": "“换新 turn_id 可绕开 old-wins”已被我 HTTP+DB 复现。",
+    "source": "T3"
+  },
+  {
+    "id": "P10b",
+    "verdict": "CONFIRMED",
+    "receipt": "整轮 old-wins 已复现（§B4-W01、§B3-E3/E5）；改字段级合并即改 trace_merge.rs:69-83 的冻结合同语义。",
+    "note": "技术前提成立；该建议本身被 T3 标为“不推荐本轮做”，我认同并将之列为需 Lead 裁决。",
+    "source": "T3"
+  },
+  {
+    "id": "P11",
+    "verdict": "CONFIRMED",
+    "receipt": "token 只累计成功调用：3 条 completed llm span 求和 = trace totals（36612/1368/23936），4 error + 1 cancelled 全 NULL（我直查 job_copilot 库）；trace 无 calls_total/calls_failed 键（§A3）。",
+    "note": "技术前提成立；“token_scope/calls_* 属 turn 新键、向后兼容”成立。",
+    "source": "T3"
+  },
+  {
+    "id": "P12",
+    "verdict": "CONFIRMED",
+    "receipt": "02-independent-receipts.txt §A3：output=\"Command(update={…})\"、arguments_summary 为单引号 repr；tool_observability_middleware.py:98/114 的 str(...) 即根因（行号核对命中）。",
+    "note": "技术前提成立（改 json.dumps / 受控抽取不破坏 wire 类型）。",
+    "source": "T3"
+  }
+]

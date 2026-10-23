@@ -1,0 +1,474 @@
+# 可重放收据集（auditor-diagnostic / task-3）
+
+- 采集时间：2026-10-23 19:47–20:0x CST；本机 Tilt dev + 本地 pony-sentry(127.0.0.1:3000) + ponysentry PG(10.43.206.170) + job_copilot dev PG(kubectl)。
+- 凭证来源：`.dev-team/audit-trace-cards/00-baseline/00-brief.md` §9（与 Lead 基线一致，本文件不复述明文，统一用环境变量）。
+- 只读纪律：pony-sentry 只做 `GET` 与**已删除**的 `audit-probe-*` 写入；job_copilot 只做 `SELECT`；未改任何受版本控制文件。
+- 每条收据 = 命令 + 真实输出（`Exit Code 0` 或显式标注）。
+
+```bash
+# ---------- 公共前置（下文所有收据均基于这三个变量） ----------
+export PGPASSWORD=<brief §9 的 job_copilot PG 口令>
+PSQL="psql -h 10.43.206.170 -U job_copilot -d ponysentry"
+CLIENT=<brief §9 的 CLIENT token>
+ADMIN=<brief §9 的 ADMIN token>
+URL=http://127.0.0.1:3000/api/v1/traces
+ID=ca0b5494-ae1b-47db-8e00-c9e7abbb6779
+```
+
+---
+
+## RCP-01 · 目标 trace 的 DB 真值（行 + 索引）
+
+```bash
+$ $PSQL -c "\d traces"
+                                   Table "public.traces"
+       Column        |            Type             | Collation | Nullable |      Default
+---------------------+-----------------------------+-----------+----------+-------------------
+ id                  | text                        |           | not null |
+ session_id          | text                        |           | not null |
+ run_id              | text                        |           |          |
+ turn_id             | text                        |           |          |
+ environment         | text                        |           | not null |
+ release             | text                        |           | not null |
+ eval_status         | text                        |           | not null | 'unreviewed'::text
+ payload             | jsonb                       |           | not null |
+ total_input_tokens  | bigint                      |           |          |
+ total_output_tokens | bigint                      |           |          |
+ total_duration_ms   | bigint                      |           |          |
+ reported_at         | timestamp with time zone    |           | not null |
+ created_at          | timestamp with time zone    |           | not null |
+ updated_at          | timestamp with time zone    |           | not null |
+ project             | text                        |           |          |
+Indexes:
+    "traces_pkey" PRIMARY KEY, btree (id)
+    "idx_traces_created_at" btree (created_at)
+    "idx_traces_environment" btree (environment)
+    "idx_traces_eval_status" btree (eval_status)
+    "idx_traces_project" btree (project)
+    "idx_traces_session_id" btree (session_id)
+    "uq_traces_session_id" UNIQUE CONSTRAINT, btree (session_id)
+
+$ $PSQL -At -F'|' -c "select id,session_id,run_id,turn_id,environment,release,project,total_input_tokens,total_output_tokens,total_duration_ms,reported_at,created_at from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';"
+ca0b5494-ae1b-47db-8e00-c9e7abbb6779|thread_ref_v1_e9b4ec395c96d8913c106ef8|run_83c1879e338d442f953a5dd4b8d1646a|turn_5dd7639f928549dfb86d96cbe6cbf33a|development|dev|job_copilot|36612|1368|120272|2026-10-23 11:29:20.002+00|2026-10-23 11:29:20.029042+00
+```
+
+> 用途：`§0-F4` 的「无 `run_id` 索引」实证；S11 的 `reported_at` vs `created_at`（+27ms）。
+
+---
+
+## RCP-02 · 详情接口字段清单（A1–A7）
+
+```bash
+$ curl -s -H "x-admin-token: $ADMIN" "$URL/$ID" -o /tmp/diag_trace.json
+$ jq -c 'keys' /tmp/diag_trace.json
+["created_at","environment","eval_status","id","payload","project","release","reported_at","run_id","session_id","total_duration_ms","total_input_tokens","total_output_tokens","turn_id","updated_at"]
+
+### A2 payload 顶层键
+$ jq -c '.payload|keys' /tmp/diag_trace.json
+["environment","eval_status","extra","project","release","reported_at_ms","run_id","session_id","tags","thread_id","total_duration_ms","total_input_tokens","total_output_tokens","turn_id","turns"]
+
+### A3 turns[0] 键（注意：无任何 error* / 时间戳 / llm_calls）
+$ jq -c '.payload.turns[0]|keys' /tmp/diag_trace.json
+["attempt_index","cache_hit_tokens","degraded","duration_ms","input_tokens","model","output_tokens","run_id","status","step","tool_calls","turn_id"]
+
+### A4 tool_calls 逐条
+$ jq -c '.payload.turns[0].tool_calls[] | {tool_name,status,error,duration_ms,out_len:(.output|length),args_len:(.arguments_summary|length)}' /tmp/diag_trace.json
+{"tool_name":"format_jd_to_json","status":"success","error":null,"duration_ms":39706,"out_len":244,"args_len":517}
+{"tool_name":"format_jd_to_json","status":"success","error":null,"duration_ms":39342,"out_len":244,"args_len":513}
+{"tool_name":"format_jd_to_json","status":"error","error":null,"duration_ms":19554,"out_len":0,"args_len":334}
+
+### A5 诊断必需字段存在性（false = 缺失）
+$ jq -c '{error_type:(.payload.turns[0]|has("error_type")), error_message:(.payload.turns[0]|has("error_message")), turn_started_at:(.payload.turns[0]|has("started_at_ms")), llm_calls:(.payload.turns[0]|has("llm_calls")), spans:(.payload|has("spans")), request_id:(.payload|has("request_id")), user_id:(.payload|has("user_id")), thread_id:(.payload|has("thread_id")), top_status:(.payload|has("status"))}' /tmp/diag_trace.json
+{"error_type":false,"error_message":false,"turn_started_at":false,"llm_calls":false,"spans":false,"request_id":false,"user_id":false,"thread_id":true,"top_status":false}
+
+### A6 turn 级统计口径
+$ jq -c '.payload | {total_input_tokens,total_output_tokens,total_duration_ms, reported_at_ms, turn:{input_tokens:.turns[0].input_tokens,output_tokens:.turns[0].output_tokens,cache_hit_tokens:.turns[0].cache_hit_tokens,duration_ms:.turns[0].duration_ms,status:.turns[0].status,attempt_index:.turns[0].attempt_index,degraded:.turns[0].degraded,step:.turns[0].step,model:.turns[0].model}}' /tmp/diag_trace.json
+{"total_input_tokens":36612,"total_output_tokens":1368,"total_duration_ms":120272,"reported_at_ms":1792754960002,"turn":{"input_tokens":36612,"output_tokens":1368,"cache_hit_tokens":23936,"duration_ms":120272,"status":"failed","attempt_index":1,"degraded":false,"step":"other","model":"workbuddy/deepseek-v4.1-flash"}}
+
+### A7 时间字段
+$ jq -r '"reported_at=\(.reported_at) created_at=\(.created_at) reported_at_ms=\(.payload.reported_at_ms)"' /tmp/diag_trace.json
+reported_at=2026-10-23T11:29:20.002Z created_at=2026-10-23T11:29:20.029042Z reported_at_ms=1792754960002
+
+### A8 tool 键集合
+$ $PSQL -At -c "select distinct jsonb_object_keys(t) from traces, jsonb_array_elements(payload->'turns') turns, jsonb_array_elements(turns->'tool_calls') t where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779' order by 1;"
+arguments_summary
+duration_ms
+error
+output
+status
+tool_call_id
+tool_name
+```
+
+---
+
+## RCP-03 · 机器断言（18 条，全部 `exit=0 / out=true`）
+
+```bash
+$ cat /tmp/rcp03.sh   # 逐条 jq -e；-e 使断言失败时返回非 0，可作 CI 门禁
+run () { desc="$1"; shift; out=$(jq -e "$@" /tmp/t3.json 2>&1); rc=$?; echo "[$desc] exit=$rc out=$out"; }
+$ bash /tmp/rcp03.sh
+[B1 turn 无 error_type] exit=0 out=true
+[B2 turn 无 error_message] exit=0 out=true
+[B3 turn 无 started_at_ms] exit=0 out=true
+[B4 turn 无 llm_calls] exit=0 out=true
+[B5 payload 无 request_id] exit=0 out=true
+[B6 payload 无 user_id] exit=0 out=true
+[B7 payload 无顶层 status] exit=0 out=true
+[B8 thread_id 键存在但值为 null] exit=0 out=true
+[B9 三条 tool_call 的 error 全为 null] exit=0 out=true
+[B10 前两条 status=success 且 output 含失败文案] exit=0 out=true
+[B11 第三条 status=error 且 error=null] exit=0 out=true
+[B12 step == other] exit=0 out=true
+[B13 attempt_index == 1] exit=0 out=true
+[B14 degraded == false] exit=0 out=true
+[B15 duration == total == 120272] exit=0 out=true
+[B16 cache_hit < input_tokens] exit=0 out=true
+[B17 session_id 形如 thread_ref_v1_*] exit=0 out=true
+[B18 payload 内不含业务 thread_id(efd84b9f…)] exit=0 out=true
+```
+
+断言原文（便于复刻）：B10 = `(.payload.turns[0].tool_calls[0:2] | map(.status) == ["success","success"]) and (.payload.turns[0].tool_calls[0].output | test("职位解析失败"))`。
+
+---
+
+## RCP-04 · 全库 tool_calls 统计（`error` 字段几乎不用）
+
+```bash
+$ $PSQL -At -F'|' -c "
+with tc as (select t.id, jsonb_array_elements(t.payload->'turns') turn from traces t where jsonb_typeof(t.payload->'turns')='array'),
+     c  as (select id, jsonb_array_elements(turn->'tool_calls') tool from tc where turn ? 'tool_calls')
+select count(*) total_tool_calls,
+       count(*) filter (where tool->>'error' is not null) error_nonnull,
+       count(*) filter (where tool->>'status'='success') status_success,
+       count(*) filter (where tool->>'status'='error') status_error,
+       count(*) filter (where tool->>'status'='success' and tool->>'output' like '%失败%') success_with_fail_text
+from c;"
+274|15|258|1|3
+```
+
+> 用途：S4（274 条里仅 15 条有 error，5.5%）、S2（3 条 success 却含「失败」文案）。
+
+---
+
+## RCP-05 · 分布与口径（step / status / token 镜像 / reported_at 漂移）
+
+```bash
+### turns[].step 分布
+$ $PSQL -At -F'|' -c "select coalesce(turn->>'step','<absent>') step, count(*) from traces, jsonb_array_elements(coalesce(payload->'turns','[]'::jsonb)) turn group by 1 order by 2 desc;"
+<absent>|19
+jd_analysis|15
+modification|15
+other|11
+resume_diagnosis|2
+interviewer|1
+
+### turns[].status 分布
+$ $PSQL -At -F'|' -c "select coalesce(turn->>'status','<absent>') st, count(*) from traces, jsonb_array_elements(coalesce(payload->'turns','[]'::jsonb)) turn group by 1 order by 2 desc;"
+succeeded|39
+completed|13
+failed|5
+interrupted|4
+unknown|1
+running|1
+
+### token 镜像与 reported_at-created_at 极值
+$ $PSQL -At -F'|' -c "select count(*) rows, count(*) filter (where payload->'turns'->0->>'input_tokens' = total_input_tokens::text) mirror_ok, count(*) filter (where (payload->'turns'->0->>'cache_hit_tokens')::int > 0) with_cache, min(reported_at-created_at) min_lag, max(reported_at-created_at) max_lag from traces where total_input_tokens is not null;"
+28|16|24|-00:19:28.557223|16:30:05.769373
+```
+
+> 用途：S8（`other` 已占 11/63 turn，是常见取值而非偶发）、S10（16/28 与 turn 镜像一致，其余受合并/多 turn 影响）、S11（-19min…+16.5h）。
+
+---
+
+## RCP-06 · 合并语义与 error 通道探针（实验行，已清理）
+
+> 依据 brief §9 约束：仅新增 `session_id` 前缀 `audit-probe-`，用完删除并附 `count(*)` 收据。
+
+```bash
+$ bash /tmp/diag_probe.sh
+## P0 写入前行数（audit-probe-* 必须为 0）
+0
+## P1 第一次上报（turn-audit-1，仅 status/step/duration）
+http_code=201
+{"id":"30760b60-c53e-42ee-9c24-1c49ebee844b","session_id":"audit-probe-diag-1","run_id":"run-audit-1","turns":[{"duration_ms":120272,"run_id":"run-audit-1","status":"failed","step":"other","turn_id":"turn-audit-1"}]}
+## P2 同 session + 同 turn_id 二次上报（试图补 error_type / tool_calls）
+http_code=201
+{"turns":[{"duration_ms":120272,"run_id":"run-audit-1","status":"failed","step":"other","turn_id":"turn-audit-1"}]}
+## P3 新 turn_id 上报（携带 error 文本 + 未知字段 llm_calls）
+http_code=201
+{"turns":[{"duration_ms":120272,"run_id":"run-audit-1","status":"failed","step":"other","turn_id":"turn-audit-1"},{"llm_calls":[{"duration_ms":13240,"model":"workbuddy/deepseek-v4.1-flash","status":"error"}],"run_id":"run-audit-1","status":"failed","tool_calls":[{"error":"ValueError: expected value at line 1 column 1","error_type":"ValueError","status":"error","tool_call_id":"call_x","tool_name":"format_jd_to_json"}],"turn_id":"turn-audit-2"}]}
+## P4 GET 该 probe trace（admin API）
+[{"duration_ms":120272,"run_id":"run-audit-1","status":"failed","step":"other","turn_id":"turn-audit-1"},{"llm_calls":[{"duration_ms":13240,"model":"workbuddy/deepseek-v4.1-flash","status":"error"}],"run_id":"run-audit-1","status":"failed","tool_calls":[{"error":"ValueError: expected value at line 1 column 1","error_type":"ValueError","status":"error","tool_call_id":"call_x","tool_name":"format_jd_to_json"}],"turn_id":"turn-audit-2"}]
+## P5 断言：同 turn_id 补写是否被丢弃（应为 true=被丢弃）
+true
+## P6 断言：error 文本与未知嵌套字段是否原样入库（应为 true）
+true
+## P7 清理 audit-probe-* 行
+DELETE 1
+## P8 清理后行数（必须 0）与全局行数、目标 trace 未受影响
+0
+37
+ca0b5494-ae1b-47db-8e00-c9e7abbb6779|thread_ref_v1_e9b4ec395c96d8913c106ef8|run_83c1879e338d442f953a5dd4b8d1646a|120272
+```
+
+> 结论：`P5=true` → 同 `turn_id` 补写被丢弃（消费者 old-wins，`trace_merge.rs:69-77`）；
+> `P6=true` → `error` / `error_type` / `llm_calls` 等 turn/tool 内新字段**消费者无需改造即可入库并回显**。
+> 清理前后全局行数均为 37（无残留）。
+
+---
+
+## RCP-07 · 检索能力与「顶层字段被丢弃」探针
+
+```bash
+### run_id 过滤被忽略（对照：project 过滤生效）
+$ curl -s -H "x-admin-token: $ADMIN" "$URL?limit=50" | jq 'length'
+37
+$ curl -s -H "x-admin-token: $ADMIN" "$URL?run_id=run_83c1879e338d442f953a5dd4b8d1646a&limit=50" | jq 'length'
+37
+$ curl -s -H "x-admin-token: $ADMIN" "$URL?run_id=__nope__&limit=50" | jq 'length'
+37
+$ curl -s -H "x-admin-token: $ADMIN" "$URL?project=__nope__&limit=50" | jq 'length'
+0
+$ curl -s -H "x-admin-token: $ADMIN" "$URL?session_id=thread_ref_v1_e9b4ec395c96d8913c106ef8&limit=50" | jq -c '[.[].id]'
+["ca0b5494-ae1b-47db-8e00-c9e7abbb6779"]
+
+### 顶层未知字段被丢弃 / turn 内未知字段保留（Q 系列，实验行已清理）
+$ bash /tmp/diag_probe2.sh
+## Q0 写入前 audit-probe-* 行数
+0
+## Q1 顶层未知字段 + turn 内未知字段 同时上报
+http_code=201
+## Q2 读取：顶层未知字段是否被丢弃 / turn 未知字段是否保留
+{"payload_keys":["environment","eval_status","extra","project","release","reported_at_ms","run_id","session_id","tags","thread_id","total_duration_ms","total_input_tokens","total_output_tokens","turn_id","turns"],"has_top_unknown":false,"has_top_error_type":false,"turn_unknown":"SURVIVES","llm_calls":[{"model":"m","status":"error"}]}
+## Q3 清理 + 收据
+DELETE 1
+0
+37
+```
+
+> 结论 1：`run_id` 不是可检索维度（`TraceQuery` 无该字段，`routes.rs:372-380`），生产者的 run_id 无法在控制台定位 trace。
+> 结论 2：payload 键集合恒为 `AgentTraceIngestRequest` 的 15 键（`routes.rs:351-369` + `:1196` 的反序列化重序列化）
+> → `thread_id/eval_status = null` 是**消费者归一化产物**，不是生产者写入；**顶层**新字段会被静默丢弃（F2），
+> **turn 内**新字段原样保留（F1）。
+
+---
+
+## RCP-08 · job_copilot 本地真值（span/event，同一 run）
+
+```bash
+$ kubectl exec -n dev job-copilot-postgres-0 -- psql -U job_copilot -d job_copilot -At -F'|' -c "
+select span_type||'|'||name||'|'||status||'|'||coalesce(duration_ms::text,'-')||'|'||coalesce(output_summary->>'prompt_tokens','NULL')
+     ||'|'||coalesce(output_summary->>'completion_tokens','NULL')||'|'||coalesce(output_summary->>'cached_input_tokens','NULL')
+     ||'|'||coalesce(error_type,'NULL')||'|'||to_char(started_at,'HH24:MI:SS.MS')
+from v2_agent_observability_span where run_id='run_83c1879e338d442f953a5dd4b8d1646a' order by started_at;"
+run|agent_run|error|120048|NULL|NULL|NULL|NULL|11:27:20.000
+llm|workbuddy/deepseek-v4.1-flash|completed|8480|11835|810|0|NULL|11:27:20.602
+step|other|error|119346|NULL|NULL|NULL|NULL|11:27:20.602
+tool|format_jd_to_json|completed|39706|NULL|NULL|NULL|NULL|11:27:29.200
+llm|workbuddy/deepseek-v4.1-flash|error|13240|NULL|NULL|NULL|NULL|11:27:38.822
+llm|workbuddy/deepseek-v4.1-flash|error|16766|NULL|NULL|NULL|NULL|11:27:52.027
+llm|workbuddy/deepseek-v4.1-flash|completed|6023|12205|309|11776|NULL|11:28:08.959
+tool|format_jd_to_json|completed|39342|NULL|NULL|NULL|NULL|11:28:15.119
+llm|workbuddy/deepseek-v4.1-flash|error|13870|NULL|NULL|NULL|NULL|11:28:26.572
+llm|workbuddy/deepseek-v4.1-flash|error|13897|NULL|NULL|NULL|NULL|11:28:40.479
+llm|workbuddy/deepseek-v4.1-flash|completed|5700|12572|249|12160|NULL|11:28:54.523
+tool|format_jd_to_json|cancelled|19554|NULL|NULL|NULL|CancelledError|11:29:00.395
+llm|workbuddy/deepseek-v4.1-flash|cancelled|11029|NULL|NULL|NULL|NULL|11:29:08.815
+
+$ kubectl exec -n dev job-copilot-postgres-0 -- psql -U job_copilot -d job_copilot -At -F'|' -c "
+select sequence_no, event_type, event_name, status, to_char(occurred_at,'HH24:MI:SS.MS')
+from v2_agent_observability_event where run_id='run_83c1879e338d442f953a5dd4b8d1646a' order by sequence_no;"
+1|run|run_started|running|11:27:20.000
+2|run|sse_started|running|11:27:20.213
+3|llm|workbuddy/deepseek-v4.1-flash|completed|11:27:29.082
+4|llm|workbuddy/deepseek-v4.1-flash|error|11:27:52.062
+5|llm|workbuddy/deepseek-v4.1-flash|error|11:28:08.793
+6|tool|format_jd_to_json|completed|11:28:08.906
+7|llm|workbuddy/deepseek-v4.1-flash|completed|11:28:14.982
+8|llm|workbuddy/deepseek-v4.1-flash|error|11:28:40.442
+9|llm|workbuddy/deepseek-v4.1-flash|error|11:28:54.376
+10|tool|format_jd_to_json|completed|11:28:54.461
+11|llm|workbuddy/deepseek-v4.1-flash|completed|11:29:00.223
+12|llm|workbuddy/deepseek-v4.1-flash|cancelled|11:29:19.844
+13|tool|format_jd_to_json|cancelled|11:29:19.949
+14|run|run_failed|failed|11:29:20.025
+15|run|sse_error|error|11:29:20.048
+```
+
+> 用途：S2/S3（tool 真值是 completed/completed/**cancelled**，trace 却写成 success/success/**error**）；
+> S9（8 次 LLM，仅 3 次有 token）；S5 附注（LLM error span 的 `error_type` 也是 NULL）；D7/D5 的对照真值。
+> 另：`run_started.current_step="profiling"`、`run_failed.current_step="other"` → 节点身份在生产侧即已丢失（S8）。
+
+---
+
+## RCP-09 · token 口径对账（trace ⇄ 本地 span）
+
+```bash
+$ kubectl exec -n dev job-copilot-postgres-0 -- psql -U job_copilot -d job_copilot -At -F'|' -c "
+select count(*) llm_spans, count(*) filter (where status='error') err,
+       sum((output_summary->>'prompt_tokens')::int) sum_prompt,
+       sum((output_summary->>'completion_tokens')::int) sum_completion,
+       sum((output_summary->>'cached_input_tokens')::int) sum_cached
+from v2_agent_observability_span where run_id='run_83c1879e338d442f953a5dd4b8d1646a' and span_type='llm';"
+8|4|36612|1368|23936
+```
+
+对账结论：
+- trace `total_input_tokens=36612` = Σprompt_tokens（**仅 3 条有 token 的成功调用**：11835+12205+12572）
+- trace `total_output_tokens=1368` = Σcompletion_tokens（810+309+249）
+- trace `cache_hit_tokens=23936` = Σcached_input_tokens（0+11776+12160）
+- 4 条 `error` + 1 条 `cancelled` 的 token 全 NULL → **未被计量**（S9）
+- `cache_hit` 是 `input` 的子集（11776<12205、12160<12572）→ `input+cache` 相加会重复计费
+
+---
+
+## RCP-10 · 错误签名在本地也未被捕获（LLM error span）
+
+```bash
+$ kubectl exec -n dev job-copilot-postgres-0 -- psql -U job_copilot -d job_copilot -At -F'|' -c "
+select span_type, name, status, coalesce(error_type,'NULL'), coalesce(left(error_message,40),'NULL')
+from v2_agent_observability_span where run_id='run_83c1879e338d442f953a5dd4b8d1646a' and span_type='llm';"
+llm|workbuddy/deepseek-v4.1-flash|completed|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|error|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|error|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|completed|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|error|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|error|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|completed|NULL|NULL
+llm|workbuddy/deepseek-v4.1-flash|cancelled|NULL|NULL
+```
+
+> 结论：`ValueError: expected value at line 1 column 1` 只存在于进程日志（`/var/log/job-copilot-dev/api-v2-dev.log:187617`），
+> **本地 span 层同样没有 error_type/error_message**。故「pony-sentry 看不到错误签名」是两段缺失的叠加：
+> ①生产者本地采集未落 error_type（llm 观测点）②trace 契约未提供 error_type 通道。
+
+---
+
+## RCP-11 · 代码引用（生产者 path:line，只读 grep）
+
+```bash
+$ sed -n '229,245p' api_v2/src/modules/agent/pony_sentry_trace/exporter.py
+   229
+   230         raw_status = str(status or "").lower()
+   231         normalized_status = (
+   232             "success"
+   233             if raw_status in {"success", "ok"}
+   234             else ("rejected" if raw_status in {"rejected", "gated"} else "error")
+   235         )
+   236
+   237         item: dict[str, Any] = {
+   238             "tool_name": str(tool_name).strip(),
+   239             "tool_call_id": str(tool_call_id).strip() if tool_call_id else None,
+   240             "status": normalized_status,
+   241             "duration_ms": duration_ms,
+   242             "arguments_summary": str(arguments_summary) if arguments_summary else None,
+   243             "output": str(output)[:5000] if output else None,
+   244             "error": str(error) if error else None,
+   245         }
+
+$ grep -n 'error=payload.get("error_message")' api_v2/src/job_copilot/middleware/tool_observability_middleware.py
+115:            error=payload.get("error_message"),
+
+$ grep -n '"error_message": None,' api_v2/src/job_copilot/middleware/tool_observability_middleware.py
+279:                        "error_message": None,
+
+$ grep -n 'error_type' api_v2/src/job_copilot/middleware/tool_observability_middleware.py | head -6
+119:            "tool_trace_pool_record_failed: error_type=%s tool_name=%s run_id=%s",
+166:                error_type=payload.get("error_type"),
+259:                            "error_type": _safe_exception_type(exc),
+278:                        "error_type": _safe_exception_type(exc),
+308:                            "error_type": "CancelledError",
+332:                        "error_type": "CancelledError",
+
+$ sed -n '517,521p' api_v2/src/modules/agent/trace_safety.py
+    if field_name in {"current_step", "stage", "node_name"}:
+        return (
+            normalized
+            if normalized in APPROVED_CURRENT_STEPS or normalized in {"streaming", "unknown", "other"}
+            else "other"
+        )
+
+$ sed -n '554,555p' api_v2/src/modules/agent/trace_safety.py
+    if field_name == "error_type":
+        return normalized if normalized in _SAFE_ERROR_TYPES else "Exception"
+
+$ sed -n '440,448p' api_v2/src/modules/agent/trace_safety.py
+def public_trace_thread_id(value: str | None, *, verify_reference_ownership: bool = False) -> str:
+    """将业务 thread_id 转换为 Trace 专用稳定公开引用。"""
+    normalized = value.strip() if type(value) is str else ""
+    if _PUBLIC_THREAD_REF_PATTERN.fullmatch(normalized):
+        if verify_reference_ownership:
+            # 外部显式要求防篡改校验时，非合法签名的 thread_ref 强制作为普通串加签重算
+            return _generate_thread_ref_digest(normalized)
+        return normalized
+    return public_trace_thread_id_candidates(normalized)[0]
+```
+
+---
+
+## RCP-12 · 消费者侧代码引用（pony-sentry path:line）
+
+```bash
+$ sed -n '351,369p' crates/server/src/routes.rs     # AgentTraceIngestRequest：turns 不透明、顶层字段封闭
+351:pub struct AgentTraceIngestRequest {
+... pub turns: Option<Vec<serde_json::Value>>,   # :362
+... pub extra: Option<serde_json::Value>,         # :364
+... pub reported_at_ms: Option<u64>,              # :368
+369:}
+
+$ sed -n '1196p;1220,1236p' crates/server/src/routes.rs
+    let raw_payload = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
+$ sed -n '1200p' crates/server/src/routes.rs
+    let sanitized_payload = SanitizationPipeline::sanitize_json_value(raw_payload, 0);
+$ sed -n '372,380p' crates/server/src/routes.rs    # TraceQuery：无 run_id
+372:pub struct TraceQuery {
+... session_id / eval_status / environment / release / project / limit / offset
+380:}
+
+$ sed -n '69,77p' crates/core/src/trace_merge.rs    # 重复轮次以旧为准
+fn merge_turns(old: &[Value], new: &[Value]) -> Vec<Value> {
+    ... for t in old { if seen.insert(turn_key(t)) { merged.push(t.clone()) } }   # 旧轮先占位
+    ... for t in new { if seen.insert(turn_key(t)) { merged.push(t.clone()) } }   # 同 key 新轮被跳过
+}
+
+$ grep -n "tool_calls" web/src/App.vue | head -3
+838:                  <div v-if="turn.tool_calls && turn.tool_calls.length" class="space-y-1 pt-1">
+$ grep -n "TOOL_CALL_FAILURE_STATUSES" web/src/App.vue
+1370:const TOOL_CALL_FAILURE_STATUSES = ['error', 'failed']
+```
+
+---
+
+## RCP-13 · 只读纪律自检（收据）
+
+```bash
+$ $PSQL -At -c "select count(*) from traces where session_id like 'audit-probe-%';"
+0
+$ $PSQL -At -c "select count(*) from traces;"
+37
+$ $PSQL -At -F'|' -c "select id,session_id,run_id,total_duration_ms from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779';"
+ca0b5494-ae1b-47db-8e00-c9e7abbb6779|thread_ref_v1_e9b4ec395c96d8913c106ef8|run_83c1879e338d442f953a5dd4b8d1646a|120272
+$ git -C /home/dm/pony-sentry status --porcelain .dev-team/audit-trace-cards/30-diagnostic | head
+?? .dev-team/audit-trace-cards/30-diagnostic/
+```
+
+- 实验行（`audit-probe-diag-1/2`）已全部删除，全局行数 37 未变；
+- 目标 `thread_ref_v1_*` 行未被修改（`total_duration_ms` 仍 120272）；
+- job_copilot 侧仅执行 `SELECT`（含 `v2_agent_observability_*`），无写入。
+
+---
+
+## 附：可重放脚本（参数化、自带清理）
+
+目录 `04-receipts-scripts/`（凭证从环境变量读取，**不写死 token**；用法见其中 `README.txt`）：
+
+| 脚本 | 对应收据 | 行为 |
+| :--- | :--- | :--- |
+| `rcp02-inventory.sh` | RCP-02 | 纯读：详情接口字段清单 |
+| `rcp03-assertions.sh` | RCP-03 | 纯读：18 条 `jq -e` 断言（失败即非零退出，可直接当门禁） |
+| `rcp06-merge-probe.sh` | RCP-06 | 写 `audit-probe-diag-1` → 断言 P5/P6 → 删除并 `count(*)` |
+| `rcp07-filter-probe.sh` | RCP-07 | 写 `audit-probe-diag-2` → 断言顶层丢弃/turn 保留 → 删除并 `count(*)` |
+| `rcp08-local-truth.sh` | RCP-08/09/10 | 只读 `kubectl exec … psql`：span / event / token 对账 |
+
+本次已实测全部脚本可重放（`rc03=0`，清理后全局 37 行、`audit-probe-%` 为 0）。

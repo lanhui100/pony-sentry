@@ -18,6 +18,7 @@ async fn test_ingest_and_agent_api_flow() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -130,6 +131,7 @@ async fn test_ingest_requires_client_token_when_configured() {
         webhook_url: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -174,6 +176,7 @@ async fn test_sql_injection_is_safely_parametrized() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -228,6 +231,7 @@ async fn test_project_path_is_surfaced_and_filterable() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -325,19 +329,22 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
     let server = TestServer::new(app).unwrap();
 
     // 1. LangGraph / LangChain 客户端使用 thread_id 发送 Trace
+    // `C2`（v2 语义）：`total_*` 是 turns 求和（单一真相），故 per-turn 需携带计量字段；
+    // 顶层直传值只作向后兼容占位、不再落库。
     let langgraph_payload = json!({
         "thread_id": "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a",
         "project": "job_copilot",
         "environment": "production",
         "release": "1.0.0",
         "turns": [
-            { "step": "agent_node", "input": "搜索最新招聘" }
+            { "step": "agent_node", "input": "搜索最新招聘", "input_tokens": 1000, "output_tokens": 200, "duration_ms": 1500 }
         ],
         "total_input_tokens": 1500,
         "total_output_tokens": 300,
@@ -359,8 +366,8 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         "environment": "production",
         "release": "1.0.0",
         "turns": [
-            { "step": "agent_node", "input": "搜索最新招聘" },
-            { "step": "tool_node", "tool": "search_jobs" }
+            { "step": "agent_node", "input": "搜索最新招聘", "input_tokens": 1000, "output_tokens": 200, "duration_ms": 1500 },
+            { "step": "tool_node", "tool": "search_jobs", "input_tokens": 2200, "output_tokens": 600, "duration_ms": 3500 }
         ],
         "total_input_tokens": 3200,
         "total_output_tokens": 800,
@@ -373,7 +380,7 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         .await
         .assert_status(StatusCode::CREATED);
 
-    // 3. 验证幂等性：同一 thread_id 仅存在 1 条记录，且累积数据已刷新
+    // 3. 验证幂等性：同一 thread_id 仅存在 1 条记录，且累积数据已刷新（= turns 求和）
     let list: Vec<serde_json::Value> = server
         .get("/api/v1/traces")
         .add_header("x-admin-token", "test-admin-token")
@@ -384,6 +391,7 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         list[0]["session_id"],
         "jc_018f6e2b-8c5d-7a2f-9a2f-1e8c9d0b3f4a"
     );
+    assert_eq!(list[0]["turns_count"], 2, "两轮 turn 必须去重合并为 2 条");
     assert_eq!(list[0]["total_input_tokens"], 3200);
     assert_eq!(list[0]["total_duration_ms"], 5000);
 }
@@ -424,6 +432,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
         webhook_url: Some(webhook_url),
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -527,6 +536,7 @@ async fn test_traces_api_project_filter_and_aggregation() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -606,6 +616,7 @@ async fn test_traces_server_side_sanitization() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -663,9 +674,14 @@ async fn test_traces_server_side_sanitization() {
         token_val, "[REDACTED_SECRET]",
         "敏感 token 字段必须被脱敏为 [REDACTED_SECRET]"
     );
+    // `C2`（v2 语义）：顶层 `total_*` 为 turns 求和（单一真相），客户端直传 1200 不再落库。
     assert_eq!(
-        stored_payload["total_input_tokens"], 1200,
-        "total_input_tokens 计量指标严禁被误杀"
+        stored_payload["total_input_tokens"], 800,
+        "total_input_tokens 计量指标严禁被误杀（须等于 turns 求和 800）"
+    );
+    assert_eq!(
+        list[0]["total_input_tokens"], 800,
+        "traces.total_input_tokens 列须与 turns 求和一致"
     );
     assert_eq!(
         turn["input_tokens"], 800,
@@ -699,6 +715,7 @@ async fn test_traces_large_payload_limit_2mb() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -738,6 +755,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         client_token: None,
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -876,6 +894,7 @@ async fn test_console_session_login_cookie_csrf_and_logout() {
         admin_token: Some("test-admin-token".into()),
         webhook_url: None,
         metrics: std::sync::Arc::default(),
+        metrics_token: None,
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -974,4 +993,831 @@ async fn test_console_session_login_cookie_csrf_and_logout() {
         .add_header("cookie", &cookie_pair)
         .await;
     after_logout.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `C5` / `C7` / `C9.4` / `C9.7` / `C9.9`：T4b HTTP 面与 trace 指标（服务端集成）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 构造带 trace 仓库的应用（`C5`/`C7` 用例共用）。
+async fn trace_test_server() -> TestServer {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
+        metrics_token: None,
+        sessions: Default::default(),
+    };
+    TestServer::new(create_app_with_state(state)).unwrap()
+}
+
+#[tokio::test]
+async fn test_trace_query_params_reject_invalid_without_db_leak() {
+    let server = trace_test_server().await;
+    // 1) 非法/负值参数必须 400，且响应体不得回显数据库原文
+    for query in [
+        "limit=-5",
+        "limit=abc",
+        "offset=-1",
+        "offset=xyz",
+        "from=not-a-time",
+        "to=2026-13-45",
+    ] {
+        let resp = server
+            .get(&format!("/api/v1/traces?{query}"))
+            .add_header("x-admin-token", "test-admin-token")
+            .await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        let body = resp.text();
+        for leak in [
+            "Database error",
+            "SQLITE",
+            "sqlx",
+            "syntax error",
+            "no such",
+        ] {
+            assert!(
+                !body.contains(leak),
+                "`{query}` 的 4xx 响应体不得回显数据库错误原文（命中 `{leak}`）：{body}"
+            );
+        }
+    }
+
+    // 2) limit 超上限必须 clamp 到 100（而非拒绝）：造 101 行后取回 100 行
+    for index in 0..101 {
+        server
+            .post("/api/v1/traces")
+            .json(&json!({
+                "session_id": format!("limit-clamp-{index}"),
+                "project": "clamp",
+                "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    let resp = server
+        .get("/api/v1/traces?limit=100000")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let rows: Vec<serde_json::Value> = resp.json();
+    assert_eq!(
+        rows.len(),
+        100,
+        "limit=100000 必须 clamp 到 100，实际 {} 行",
+        rows.len()
+    );
+
+    // 3) 合法 RFC3339 时间窗 → 200（端点语义由 core 用例覆盖）
+    let ok = server
+        .get("/api/v1/traces?from=2026-01-01T00:00:00Z&to=2099-01-01T00:00:00Z")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    ok.assert_status(StatusCode::OK);
+
+    // 4) 未知参数必须被忽略（保持向后兼容，不得 400）
+    let unknown = server
+        .get("/api/v1/traces?unknown_param=1&limit=5")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    unknown.assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_trace_metrics_expose_four_counters_and_grow() {
+    let server = trace_test_server().await;
+    let before = server.get("/metrics").await.text();
+    let sum_of = |body: &str, name: &str| -> f64 {
+        body.lines()
+            .filter(|line| {
+                line.starts_with(name)
+                    && matches!(line.as_bytes().get(name.len()), Some(b'{') | Some(b' '))
+            })
+            .filter_map(|line| line.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()))
+            .sum()
+    };
+    let before_traces = sum_of(&before, "pony_sentry_traces_total");
+
+    // 1) 一次「成功状态 + 失败文案」上报：traces_total / turns_total / status_conflicts 均应增长
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "metrics-conflict-1",
+            "project": "job_copilot",
+            "turns": [{
+                "turn_id": "t1",
+                "status": "failed",
+                "tool_calls": [{
+                    "tool_call_id": "c1",
+                    "tool_name": "format_jd_to_json",
+                    "status": "success",
+                    "output": "职位解析失败（原因: 模型返回空结果）"
+                }]
+            }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // 2) 缺失 session_id/thread_id → 400 且 ingest_rejected 增长
+    server
+        .post("/api/v1/traces")
+        .json(&json!({"environment": "development", "release": "dev"}))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+
+    let after = server.get("/metrics").await.text();
+    for name in [
+        "pony_sentry_traces_total",
+        "pony_sentry_trace_turns_total",
+        "pony_sentry_trace_status_conflicts_total",
+        "pony_sentry_trace_ingest_rejected_total",
+    ] {
+        assert!(
+            after.contains(name),
+            "`/metrics` 必须包含 `{name}`：\n{after}"
+        );
+        assert!(
+            sum_of(&after, name) >= 1.0,
+            "`{name}` 必须随上报增长（当前合计 {}）",
+            sum_of(&after, name)
+        );
+    }
+    assert!(
+        sum_of(&after, "pony_sentry_traces_total") > before_traces,
+        "traces_total 必须随成功上报递增"
+    );
+    assert!(
+        after.contains("pony_sentry_traces_total{project=\"job_copilot\""),
+        "traces_total 必须带 project/turn_status 维度：\n{after}"
+    );
+    assert!(
+        after.contains("pony_sentry_trace_turns_total{status=\"failed\"}"),
+        "trace_turns_total 必须带 status 维度：\n{after}"
+    );
+    assert!(
+        after.contains("pony_sentry_trace_ingest_rejected_total{reason=\"session_missing\"}"),
+        "ingest_rejected_total 必须带 reason 维度：\n{after}"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_note_patch_persists_and_survives_reingest() {
+    let server = trace_test_server().await;
+    let created = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "note-patch-1",
+            "project": "job_copilot",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let id = created.json::<serde_json::Value>()["id"]
+        .as_str()
+        .expect("POST 响应必须含字符串 id")
+        .to_string();
+
+    let patched = server
+        .patch(&format!("/api/v1/traces/{id}"))
+        .json(&json!({"eval_status": "triage_good", "note": "人工复核：失败原因已确认"}))
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    patched.assert_status(StatusCode::OK);
+    assert_eq!(
+        patched.json::<serde_json::Value>()["note"],
+        "人工复核：失败原因已确认",
+        "PATCH 响应必须回显落库后的 note"
+    );
+
+    let detail: serde_json::Value = server
+        .get(&format!("/api/v1/traces/{id}"))
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    assert_eq!(
+        detail["note"], "人工复核：失败原因已确认",
+        "note 必须从详情读回"
+    );
+    assert_eq!(detail["eval_status"], "triage_good", "eval_status 必须落库");
+
+    // 再次 ingest（同 session）不得覆盖已有 note
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "note-patch-1",
+            "project": "job_copilot",
+            "turns": [{ "turn_id": "t2", "status": "failed" }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=note-patch-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0]["note"], "人工复核：失败原因已确认",
+        "重复上报不得清空 note"
+    );
+    assert_eq!(listed[0]["turns_count"], 2, "turns_count 必须随写入推进");
+    assert_eq!(
+        listed[0]["turn_status"], "failed",
+        "turn_status 必须为最后一个 turn 的 status"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_ingest_response_matches_persisted_row() {
+    let server = trace_test_server().await;
+    let created = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "ingest-consistency-1",
+            "project": "job_copilot",
+            "environment": "development",
+            "release": "dev",
+            // 客户端直传的汇总值必须被忽略（`C2` 单一真相 = turns 求和）
+            "total_input_tokens": 99999,
+            "total_output_tokens": 99999,
+            "total_duration_ms": 99999,
+            "turns": [
+                { "turn_id": "t1", "status": "succeeded", "input_tokens": 10, "output_tokens": 5, "duration_ms": 100 },
+                { "turn_id": "t2", "status": "failed", "input_tokens": 20, "output_tokens": 7, "duration_ms": 200 }
+            ]
+        }))
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let created_json: serde_json::Value = created.json();
+    let id = created_json["id"]
+        .as_str()
+        .expect("POST 响应必须含 id")
+        .to_string();
+
+    let fetched: serde_json::Value = server
+        .get(&format!("/api/v1/traces/{id}"))
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    assert_eq!(fetched["id"], id, "POST 返回的 id 必须可直接 GET");
+
+    for (field, expected) in [
+        ("total_input_tokens", 30_i64),
+        ("total_output_tokens", 12),
+        ("total_duration_ms", 300),
+    ] {
+        assert_eq!(
+            created_json[field].as_i64(),
+            Some(expected),
+            "POST 响应 {field} 必须等于 turns 求和（拒绝客户端直传值）"
+        );
+        assert_eq!(
+            fetched[field].as_i64(),
+            Some(expected),
+            "GET 响应 {field} 必须等于 turns 求和"
+        );
+    }
+    assert_eq!(
+        created_json["turns_count"], 2,
+        "POST 响应必须回传播久化 turns_count"
+    );
+    assert_eq!(
+        created_json["turn_status"], "failed",
+        "POST 响应必须回传播久化 turn_status"
+    );
+    assert!(
+        fetched["payload"].get("eval_status").is_none(),
+        "payload.eval_status 必须移除（列是唯一真源）"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_ingest_malformed_body_is_400_without_db_leak() {
+    let server = trace_test_server().await;
+    let before = server.get("/metrics").await.text();
+    let rejected_before = before
+        .lines()
+        .find(|line| {
+            line.starts_with("pony_sentry_trace_ingest_rejected_total{reason=\"invalid_params\"}")
+        })
+        .and_then(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    // 非法 JSON 体：统一 400 `Bad request`，不得回显 serde/DB 原文
+    let resp = server
+        .post("/api/v1/traces")
+        .content_type("application/json")
+        .text("{not-json")
+        .await;
+    resp.assert_status(StatusCode::BAD_REQUEST);
+    let body = resp.text();
+    assert!(
+        body.contains("Bad request"),
+        "非法请求体响应须为 `Bad request`：{body}"
+    );
+    for leak in ["Database error", "SQLITE", "sqlx", "no such"] {
+        assert!(
+            !body.contains(leak),
+            "响应体不得回显数据库原文（命中 `{leak}`）：{body}"
+        );
+    }
+
+    let after = server.get("/metrics").await.text();
+    let rejected_after = after
+        .lines()
+        .find(|line| {
+            line.starts_with("pony_sentry_trace_ingest_rejected_total{reason=\"invalid_params\"}")
+        })
+        .and_then(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    assert!(
+        rejected_after > rejected_before,
+        "非法请求体必须计入 ingest_rejected_total{{reason=\"invalid_params\"}}：\n{after}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T6（L3-B 修复）：F1 错误原文泄漏 / F2 指标基数 / F6 PATCH rejection / F10 eval_status
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 文件型 SQLite 夹具：返回 server 与同一 pool（测试内可制造真实 DB 故障），Drop 时删库文件。
+struct FileDbServer {
+    server: TestServer,
+    pool: pony_sentry_core::DatabasePool,
+    path: std::path::PathBuf,
+}
+
+async fn file_db_server(tag: &str) -> FileDbServer {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "pony-sentry-{tag}-{}-{nanos}.db",
+        std::process::id()
+    ));
+    let pool = create_pool(&format!("sqlite:{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool.clone()));
+    repo.migrate().await.unwrap();
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
+        metrics_token: None,
+        sessions: Default::default(),
+    };
+    let server = TestServer::new(create_app_with_state(state)).unwrap();
+    FileDbServer { server, pool, path }
+}
+
+impl Drop for FileDbServer {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(self.path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(self.path.with_extension("db-shm"));
+    }
+}
+
+/// `F1`：断言错误响应体只含通用文案，绝不回显 DB/serde 原文。
+fn assert_no_internal_leak(raw: &str, context: &str) {
+    for leak in [
+        "Database error",
+        "SQLITE",
+        "sqlx",
+        "no such table",
+        "syntax error",
+        "UNIQUE constraint",
+        "expected value",
+        "unknown variant",
+    ] {
+        assert!(
+            !raw.contains(leak),
+            "`{context}` 的响应体不得回显内部原文（命中 `{leak}`）：{raw}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_issue_endpoints_hide_db_error_text() {
+    let fixture = file_db_server("f1-issue").await;
+    // 制造真实 DB 故障（比 mock 更接近 L3-B 的「DB 锁/故障」场景）：直接删表。
+    // `events` 与 `issues` 各自独立被查询，故两张表都要删，才能覆盖三条读路径。
+    sqlx::query("DROP TABLE issues")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE events")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let list = fixture
+        .server
+        .get("/api/v1/issues")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    list.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        list.text(),
+        "Internal error",
+        "F1：issue 列表 DB 故障必须只回 Internal error"
+    );
+    assert_no_internal_leak(&list.text(), "GET /api/v1/issues");
+
+    let detail = fixture
+        .server
+        .get("/api/v1/issues/whatever")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    detail.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_no_internal_leak(&detail.text(), "GET /api/v1/issues/:id");
+
+    let events = fixture
+        .server
+        .get("/api/v1/issues/whatever/events")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    events.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_no_internal_leak(&events.text(), "GET /api/v1/issues/:id/events");
+
+    let projects = fixture
+        .server
+        .get("/api/v1/projects")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    projects.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_no_internal_leak(&projects.text(), "GET /api/v1/projects");
+}
+
+#[tokio::test]
+async fn test_trace_endpoints_hide_db_error_text() {
+    let fixture = file_db_server("f1-trace").await;
+    sqlx::query("DROP TABLE trace_turns")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE traces")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let ingest = fixture
+        .server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f1-trace-1",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await;
+    ingest.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        ingest.text(),
+        "Internal error",
+        "F1：trace ingest DB 故障必须只回 Internal error"
+    );
+    assert_no_internal_leak(&ingest.text(), "POST /api/v1/traces");
+
+    let list = fixture
+        .server
+        .get("/api/v1/traces")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    list.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_no_internal_leak(&list.text(), "GET /api/v1/traces");
+
+    let detail = fixture
+        .server
+        .get("/api/v1/traces/whatever")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    detail.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_no_internal_leak(&detail.text(), "GET /api/v1/traces/:id");
+}
+
+#[tokio::test]
+async fn test_trace_metrics_labels_are_normalized_and_bounded() {
+    let server = trace_test_server().await;
+    // 1) 超长且含非法字符的 project：label 截断到 64 字符 + 字符集替换，/metrics 不被撑大
+    let huge_project = "A".repeat(100_000);
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f2-huge-1",
+            "project": huge_project,
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let metrics = server.get("/metrics").await.text();
+    assert!(
+        metrics.len() < 8 * 1024,
+        "F2：100KB project 不得撑大 /metrics（实际 {} 字节）",
+        metrics.len()
+    );
+    assert!(
+        metrics.contains(&format!("project=\"{}\"", "A".repeat(64))),
+        "F2：project label 必须截断到 64 字符：\n{metrics}"
+    );
+    assert!(
+        !metrics.contains(&"A".repeat(65)),
+        "F2：不得输出超过 64 字符的 project label"
+    );
+
+    // 2) 非法字符集与未受控 turn_status 归一
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f2-weird-1",
+            "project": "proj/<weird>#",
+            "turns": [{ "turn_id": "t1", "status": "Weird Status" }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let metrics = server.get("/metrics").await.text();
+    assert!(
+        metrics.contains("project=\"proj__weird__\""),
+        "F2：非法字符必须替换为 `_`：\n{metrics}"
+    );
+    assert!(
+        metrics
+            .contains("pony_sentry_traces_total{project=\"proj__weird__\",turn_status=\"other\"}"),
+        "F2：未受控 turn_status 必须归 `other`：\n{metrics}"
+    );
+    assert!(
+        metrics.contains("pony_sentry_trace_turns_total{status=\"other\"}"),
+        "F2：turn 维度未受控 status 必须归 `other`：\n{metrics}"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_metrics_series_are_capped_to_512_with_overflow() {
+    let server = trace_test_server().await;
+    // 512 series 上限：造 520 个不同 project，超出部分折叠进 overflow
+    for index in 0..520 {
+        server
+            .post("/api/v1/traces")
+            .json(&json!({
+                "session_id": format!("f2-cap-{index}"),
+                "project": format!("cap-{index}"),
+                "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    let metrics = server.get("/metrics").await.text();
+    let series = metrics
+        .lines()
+        .filter(|line| line.starts_with("pony_sentry_traces_total{"))
+        .count();
+    assert!(
+        series <= 513,
+        "F2：series 上限 512（含 overflow 行至多 513），实际 {series} 行"
+    );
+    assert!(
+        metrics.contains("pony_sentry_traces_total{project=\"overflow\",turn_status=\"overflow\"}"),
+        "F2：超出上限必须折叠进 overflow：\n{metrics}"
+    );
+}
+
+#[tokio::test]
+async fn test_patch_rejections_are_bad_request_without_enum_echo() {
+    let server = trace_test_server().await;
+    let created = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f6-patch-1",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await
+        .json::<serde_json::Value>();
+    let id = created["id"]
+        .as_str()
+        .expect("POST 必须返回 id")
+        .to_string();
+
+    // 1) 非法枚举值：400 Bad request，且不得回显合法枚举全集
+    let invalid_enum = server
+        .patch(&format!("/api/v1/traces/{id}"))
+        .json(&json!({"eval_status": "bogus_status"}))
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    invalid_enum.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_enum.text(),
+        "Bad request",
+        "F6：PATCH 非法枚举必须只回 Bad request"
+    );
+    for leaked in [
+        "triage_good",
+        "eval_dataset",
+        "unreviewed",
+        "unknown variant",
+        "bogus_status",
+    ] {
+        assert!(
+            !invalid_enum.text().contains(leaked),
+            "F6：PATCH 响应不得回显枚举值/内部结构（命中 `{leaked}`）：{}",
+            invalid_enum.text()
+        );
+    }
+
+    // 2) 非法 JSON 体：400 Bad request，不回显 serde 原文
+    let malformed = server
+        .patch(&format!("/api/v1/traces/{id}"))
+        .content_type("application/json")
+        .text("{not-json")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    malformed.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(malformed.text(), "Bad request");
+    assert_no_internal_leak(&malformed.text(), "PATCH /api/v1/traces/:id");
+
+    // 3) issue PATCH 同样收口
+    let issue_malformed = server
+        .patch("/api/v1/issues/whatever")
+        .content_type("application/json")
+        .text("{not-json")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    issue_malformed.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(issue_malformed.text(), "Bad request");
+    assert_no_internal_leak(&issue_malformed.text(), "PATCH /api/v1/issues/:id");
+
+    // 4) 合法 PATCH 依然生效（note 落库）
+    let ok = server
+        .patch(&format!("/api/v1/traces/{id}"))
+        .json(&json!({"eval_status": "triage_good", "note": "ok"}))
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    ok.assert_status(StatusCode::OK);
+    assert_eq!(ok.json::<serde_json::Value>()["eval_status"], "triage_good");
+}
+
+#[tokio::test]
+async fn test_ingest_ignores_client_eval_status() {
+    let server = trace_test_server().await;
+    // F10（契约 v1.4-5）：客户端上报的 eval_status 一律忽略，落库为 unreviewed
+    let created = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f10-eval-1",
+            "eval_status": "triage_good",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    assert_eq!(
+        created.json::<serde_json::Value>()["eval_status"],
+        "unreviewed",
+        "F10：ingest 必须忽略客户端 eval_status（一律 unreviewed）"
+    );
+
+    let id = created.json::<serde_json::Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let detail: serde_json::Value = server
+        .get(&format!("/api/v1/traces/{id}"))
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    assert_eq!(
+        detail["eval_status"], "unreviewed",
+        "F10：库内 eval_status 必须为 unreviewed"
+    );
+
+    // 二次上报同样不得改写
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "f10-eval-1",
+            "eval_status": "eval_dataset",
+            "turns": [{ "turn_id": "t2", "status": "failed" }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=f10-eval-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    assert_eq!(
+        listed[0]["eval_status"], "unreviewed",
+        "F10：二次上报不得改写 eval_status"
+    );
+
+    // 评审只能走 admin PATCH
+    let patched = server
+        .patch(&format!("/api/v1/traces/{id}"))
+        .json(&json!({"eval_status": "triage_bad"}))
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    patched.assert_status(StatusCode::OK);
+    assert_eq!(
+        patched.json::<serde_json::Value>()["eval_status"],
+        "triage_bad"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L3B-F11：`/metrics` 可选鉴权（`METRICS_TOKEN`）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 带可选 `/metrics` 令牌的应用（`None` = 未配置，保持免鉴权）。
+async fn metrics_server(metrics_token: Option<&str>) -> TestServer {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
+        metrics_token: metrics_token.map(|token| token.to_string()),
+        sessions: Default::default(),
+    };
+    TestServer::new(create_app_with_state(state)).unwrap()
+}
+
+#[tokio::test]
+async fn test_metrics_stays_anonymous_when_token_not_configured() {
+    // 默认模式（README / 探针现状）：未配置 METRICS_TOKEN → 免鉴权 200
+    let server = metrics_server(None).await;
+    let resp = server.get("/metrics").await;
+    resp.assert_status(StatusCode::OK);
+    assert!(
+        resp.text().contains("pony_sentry_events_total"),
+        "未配置令牌时 /metrics 必须保持既有输出"
+    );
+    // 空串等价未配置
+    let server_empty = metrics_server(Some("")).await;
+    server_empty
+        .get("/metrics")
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_metrics_requires_bearer_or_metrics_token_when_configured() {
+    let server = metrics_server(Some("metrics-secret")).await;
+
+    // 1) 无凭证 → 401 纯文本 Unauthorized
+    let anonymous = server.get("/metrics").await;
+    anonymous.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        anonymous.text(),
+        "Unauthorized",
+        "F11：必须纯文本 `Unauthorized`"
+    );
+
+    // 2) 错误凭证 → 401（两种通道都覆盖）
+    for (name, value) in [
+        ("x-metrics-token", "wrong"),
+        ("authorization", "Bearer wrong"),
+        ("authorization", "metrics-secret"),
+    ] {
+        let denied = server.get("/metrics").add_header(name, value).await;
+        denied.assert_status(StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            denied.text(),
+            "Unauthorized",
+            "错误凭证 `{name}: {value}` 必须 401"
+        );
+    }
+
+    // 3) 两种合法通道 → 200
+    let via_header = server
+        .get("/metrics")
+        .add_header("x-metrics-token", "metrics-secret")
+        .await;
+    via_header.assert_status(StatusCode::OK);
+    assert!(via_header.text().contains("pony_sentry_events_total"));
+
+    let via_bearer = server
+        .get("/metrics")
+        .add_header("authorization", "Bearer metrics-secret")
+        .await;
+    via_bearer.assert_status(StatusCode::OK);
+    assert!(via_bearer.text().contains("pony_sentry_events_total"));
+
+    // 4) 鉴权仅作用于 /metrics，不影响其它端点
+    server.get("/healthz").await.assert_status(StatusCode::OK);
+    server
+        .get("/api/v1/traces")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .assert_status(StatusCode::OK);
 }

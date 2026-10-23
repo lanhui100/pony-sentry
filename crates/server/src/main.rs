@@ -175,6 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 管理侧令牌：读接口与 PATCH 需要；未配置时回退 CLIENT_TOKEN，两者皆无则 fail-closed 503。
     let admin_token = std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
     let webhook_url = std::env::var("WEBHOOK_URL").ok().filter(|t| !t.is_empty());
+    // 可选 `/metrics` 鉴权令牌（L3B-F11）：未配置时保持免鉴权（探针/README 现状）。
+    let metrics_token = std::env::var("METRICS_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
     if admin_token.is_none() && client_token.is_none() {
         warn!(
             "未配置 ADMIN_TOKEN / CLIENT_TOKEN：读接口与 PATCH 将按 fail-closed 返回 503 \
@@ -236,6 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_token,
         admin_token,
         webhook_url,
+        metrics_token,
         metrics: Arc::default(),
         sessions: Arc::new(SessionStore::new(
             Duration::from_secs(session_ttl_secs),

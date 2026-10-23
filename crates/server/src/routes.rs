@@ -5,13 +5,16 @@ use crate::session::{
 use crate::trust::{is_proxied, normalize_peer, TrustConfig, TrustDecision};
 use axum::{
     body::Body,
-    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State},
+    extract::{
+        rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State,
+    },
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use pony_sentry_core::{
     models::{EvalStatus, IssueStatus, TraceFilter, TraceRecord},
     repository::{IssueFilter, IssueRepository, NewEventRecord, TraceRepository},
@@ -22,12 +25,14 @@ use pony_sentry_ingest::{
     normalize_source_kind, normalize_stacktrace, normalize_tags, parse_timestamp, truncate_chars,
     validate_event_id, RawEvent, SanitizationPipeline, MESSAGE_MAX_CHARS,
 };
+use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -38,12 +43,128 @@ use uuid::Uuid;
 /// 单次 DB 探活的硬超时（契约 R11.2 / NFR `db_probe_timeout_ms`）。
 const DB_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 
+/// `F1`：通用错误响应文案（契约 v1.4-7：DB/serde 原文只进日志，绝不外发）。
+const BAD_REQUEST_BODY: &str = "Bad request";
+const INTERNAL_ERROR_BODY: &str = "Internal error";
+
+/// `F2`：指标 label 的最大字符数（`project` 截断，防无界基数）。
+const METRIC_LABEL_MAX_CHARS: usize = 64;
+/// `F2`：单个指标族的 series 上限，超出折叠进 `overflow`。
+const METRIC_SERIES_MAX: usize = 512;
+/// `F2`：series 溢出后的折叠 label。
+const METRIC_OVERFLOW_LABEL: &str = "overflow";
+/// `F2`：`turn_status` 受控集合（契约 v1.4-6）；集合外一律归 `other`。
+const CONTROLLED_TURN_STATUSES: [&str; 13] = [
+    "completed",
+    "succeeded",
+    "failed",
+    "error",
+    "cancelled",
+    "interrupted",
+    "timed_out",
+    "max_tokens",
+    "aborted",
+    "partial",
+    "running",
+    "unknown",
+    "other",
+];
+
+/// `F2`：指标 label 归一——按字符截断到 64，非 `[A-Za-z0-9_.:-]` 一律替换为 `_`。
+fn normalize_metric_label(value: &str) -> String {
+    let raw = value.trim();
+    let truncated: String = raw.chars().take(METRIC_LABEL_MAX_CHARS).collect();
+    let normalized: String = truncated
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if normalized.is_empty() {
+        "unknown".to_string()
+    } else {
+        normalized
+    }
+}
+
+/// `F2`：`turn_status` label 收敛到受控集合（大小写不敏感），集合外 → `other`。
+fn normalize_turn_status_label(status: &str) -> String {
+    let lowered = status.trim().to_ascii_lowercase();
+    CONTROLLED_TURN_STATUSES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == lowered)
+        .unwrap_or("other")
+        .to_string()
+}
+
+/// `F2`：带 series 上限的计数累加——满额后折叠进 `overflow`，且全进程只告警一次。
+fn increment_capped<K: Ord + Clone>(
+    map: &mut BTreeMap<K, u64>,
+    key: K,
+    overflow_key: K,
+    warned: &std::sync::atomic::AtomicBool,
+) {
+    if let Some(counter) = map.get_mut(&key) {
+        *counter += 1;
+        return;
+    }
+    if map.len() >= METRIC_SERIES_MAX {
+        *map.entry(overflow_key).or_insert(0) += 1;
+        if !warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                limit = METRIC_SERIES_MAX,
+                "trace metric series limit reached; folding further labels into `overflow`"
+            );
+        }
+        return;
+    }
+    map.insert(key, 1);
+}
+
+/// `F6`：请求体反序列化失败统一 `Bad request`（保留 413 的传输层语义）。
+fn json_rejection_response(rejection: JsonRejection) -> (StatusCode, String) {
+    let status = rejection.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return (status, "Payload too large".to_string());
+    }
+    (StatusCode::BAD_REQUEST, BAD_REQUEST_BODY.to_string())
+}
+
+/// `F1`：把仓库/序列化错误统一收口为 `Internal error`——原文只进日志，绝不进响应体。
+fn internal_error<E: std::fmt::Display>(context: &'static str, err: E) -> (StatusCode, String) {
+    error!(error = %err, context, "internal error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        INTERNAL_ERROR_BODY.to_string(),
+    )
+}
+
 /// ingest 结果计数器（`/metrics` 的 `pony_sentry_ingest_requests_total` 数据源）。
+///
+/// `C7`：同一结构顺带承载 trace 维度四个新计数器（进程内、`/metrics` 单点读取，
+/// 与既有 issue 计数同寿命）。label 组合用 `BTreeMap` 累加，渲染时天然按 key 升序，
+/// 保证 `/metrics` 输出稳定可比对（无 HashMap 随机序）。
+/// `F2`：label 归一 + series 上限，`/metrics` 渲染持锁迭代（不整表 clone）。
 #[derive(Debug, Default)]
 pub struct IngestMetrics {
     created: AtomicU64,
     duplicate: AtomicU64,
     degraded_level: AtomicU64,
+    /// `pony_sentry_traces_total{project,turn_status}`：trace 上报成功计数。
+    traces_total: Mutex<BTreeMap<(String, String), u64>>,
+    /// `pony_sentry_trace_turns_total{status}`：入 turn 计数（按归一 status）。
+    turns_total: Mutex<BTreeMap<String, u64>>,
+    /// `pony_sentry_trace_status_conflicts_total`：`C4` status_conflict 命中的上报次数。
+    status_conflicts: AtomicU64,
+    /// `pony_sentry_trace_ingest_rejected_total{reason}`：trace 上报被拒计数。
+    ingest_rejected: Mutex<BTreeMap<String, u64>>,
+    /// `F2`：series 溢出告警「只告警一次」的闸门（跨 map 共享）。
+    series_overflow_warned: std::sync::atomic::AtomicBool,
 }
 
 impl IngestMetrics {
@@ -56,6 +177,103 @@ impl IngestMetrics {
     /// 非法 level 降级计数（契约 R2：非法值降级为 `warning` 并 WARN 日志）。
     fn record_degraded_level(&self) {
         self.degraded_level.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `C7`：一次成功 trace 上报（聚合行 + 本次入 turn 的状态分布）。
+    ///
+    /// `F2`：`project` 归一（截断 64 + 字符集替换）、`turn_status` 收敛到受控集合；
+    /// series 超上限折叠 `overflow`（只告警一次）。
+    fn record_trace_ingested(&self, project: &str, turn_status: &str, turn_statuses: &[String]) {
+        let project_label = normalize_metric_label(project);
+        let status_label = normalize_turn_status_label(turn_status);
+        if let Ok(mut map) = self.traces_total.lock() {
+            increment_capped(
+                &mut map,
+                (project_label, status_label),
+                (
+                    METRIC_OVERFLOW_LABEL.to_string(),
+                    METRIC_OVERFLOW_LABEL.to_string(),
+                ),
+                &self.series_overflow_warned,
+            );
+        }
+        if let Ok(mut map) = self.turns_total.lock() {
+            for status in turn_statuses {
+                increment_capped(
+                    &mut map,
+                    normalize_turn_status_label(status),
+                    METRIC_OVERFLOW_LABEL.to_string(),
+                    &self.series_overflow_warned,
+                );
+            }
+        }
+    }
+    /// `C7`：本次上报命中 `C4` status_conflict（成功状态 + 失败文案）记一次。
+    fn record_trace_status_conflict(&self) {
+        self.status_conflicts.fetch_add(1, Ordering::Relaxed);
+    }
+    /// `C7`：trace 上报被拒（`session_missing` / `invalid_params`）。
+    fn record_trace_ingest_rejected(&self, reason: &str) {
+        if let Ok(mut map) = self.ingest_rejected.lock() {
+            increment_capped(
+                &mut map,
+                normalize_metric_label(reason),
+                METRIC_OVERFLOW_LABEL.to_string(),
+                &self.series_overflow_warned,
+            );
+        }
+    }
+    /// `C7` + `F2`：直接把 trace 指标写入 Prometheus 文本（持锁迭代，不整表 clone）。
+    ///
+    /// 锁序固定为 traces → turns → rejected，三段之间不嵌套，故与写入侧不会死锁。
+    fn render_trace_metrics(&self, body: &mut String) {
+        body.push_str(
+            "# HELP pony_sentry_traces_total trace 上报成功计数（按 project 与 turn_status 维度；每次 ingest 成功 +1）\n\
+             # TYPE pony_sentry_traces_total counter\n",
+        );
+        if let Ok(map) = self.traces_total.lock() {
+            for ((project, turn_status), count) in map.iter() {
+                body.push_str(&format!(
+                    "pony_sentry_traces_total{{project=\"{}\",turn_status=\"{}\"}} {}\n",
+                    escape_label(project),
+                    escape_label(turn_status),
+                    count
+                ));
+            }
+        }
+        body.push_str(
+            "# HELP pony_sentry_trace_turns_total 上报 turn 计数（按归一 status 维度；每次 ingest 按 payload.turns 逐条累加）\n\
+             # TYPE pony_sentry_trace_turns_total counter\n",
+        );
+        if let Ok(map) = self.turns_total.lock() {
+            for (status, count) in map.iter() {
+                body.push_str(&format!(
+                    "pony_sentry_trace_turns_total{{status=\"{}\"}} {}\n",
+                    escape_label(status),
+                    count
+                ));
+            }
+        }
+        body.push_str(
+            "# HELP pony_sentry_trace_status_conflicts_total 「成功状态 + 失败文案」矛盾上报次数（C4 status_conflict）\n\
+             # TYPE pony_sentry_trace_status_conflicts_total counter\n",
+        );
+        body.push_str(&format!(
+            "pony_sentry_trace_status_conflicts_total {}\n",
+            self.status_conflicts.load(Ordering::Relaxed)
+        ));
+        body.push_str(
+            "# HELP pony_sentry_trace_ingest_rejected_total trace 上报被拒计数（按 reason 维度）\n\
+             # TYPE pony_sentry_trace_ingest_rejected_total counter\n",
+        );
+        if let Ok(map) = self.ingest_rejected.lock() {
+            for (reason, count) in map.iter() {
+                body.push_str(&format!(
+                    "pony_sentry_trace_ingest_rejected_total{{reason=\"{}\"}} {}\n",
+                    escape_label(reason),
+                    count
+                ));
+            }
+        }
     }
     pub fn snapshot(&self) -> (u64, u64, u64) {
         (
@@ -74,6 +292,9 @@ pub struct AppState {
     /// 管理侧只读/PATCH 令牌（契约 R10）；未配置时回退 `client_token`，两者皆无则 fail-closed 503。
     pub admin_token: Option<String>,
     pub webhook_url: Option<String>,
+    /// `METRICS_TOKEN`（可选）：为空时 `/metrics` 保持免鉴权（探针/README 现状）；非空时要求
+    /// `Authorization: Bearer <token>` 或 `x-metrics-token: <token>`，否则 401。
+    pub metrics_token: Option<String>,
     pub metrics: Arc<IngestMetrics>,
     /// 控制台服务端会话（HttpOnly Cookie / 短期 Bearer 令牌）。
     pub sessions: Arc<SessionStore>,
@@ -87,6 +308,7 @@ impl AppState {
             client_token: None,
             admin_token: None,
             webhook_url: None,
+            metrics_token: None,
             metrics: Arc::new(IngestMetrics::default()),
             sessions: Arc::new(SessionStore::default()),
         }
@@ -94,6 +316,12 @@ impl AppState {
 
     pub fn with_trace_repo(mut self, trace_repo: Option<Arc<dyn TraceRepository>>) -> Self {
         self.trace_repo = trace_repo;
+        self
+    }
+
+    /// 可选 `/metrics` 鉴权令牌（`METRICS_TOKEN`）。`None`/空串保持免鉴权。
+    pub fn with_metrics_token(mut self, metrics_token: Option<String>) -> Self {
+        self.metrics_token = metrics_token.filter(|token| !token.is_empty());
         self
     }
 
@@ -375,8 +603,56 @@ pub struct TraceQuery {
     pub environment: Option<String>,
     pub release: Option<String>,
     pub project: Option<String>,
+    /// `C5`：按 run_id 精确过滤。
+    pub run_id: Option<String>,
+    /// `C5`：按会话级终态摘要过滤（`traces.turn_status`）。
+    pub turn_status: Option<String>,
+    /// `C5`：`reported_at` 时间窗下限（含），RFC3339；非法值 → 400。
+    #[serde(default, deserialize_with = "deserialize_rfc3339_param")]
+    pub from: Option<DateTime<Utc>>,
+    /// `C5`：`reported_at` 时间窗上限（含），RFC3339；非法值 → 400。
+    #[serde(default, deserialize_with = "deserialize_rfc3339_param")]
+    pub to: Option<DateTime<Utc>>,
+    /// `C5`：非数字 → 400（不静默丢弃）；负值在 handler 里 → 400；其余 clamp 到 `[1,100]`。
+    #[serde(default, deserialize_with = "deserialize_strict_i64_param")]
     pub limit: Option<i64>,
+    /// `C5`：非数字 → 400；负值 → 400。
+    #[serde(default, deserialize_with = "deserialize_strict_i64_param")]
     pub offset: Option<i64>,
+}
+
+/// `C5`：严格整数解析——空串视作缺省，非整数字面量返回反序列化错误（axum 统一 400），
+/// 绝不回显 DB 原文（错误文本由本函数生成）。
+fn deserialize_strict_i64_param<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    let trimmed = raw.unwrap_or_default();
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| D::Error::custom("Bad request: integer query parameter expected"))
+}
+
+/// `C5`：RFC3339 严格时间解析——非法值 → 400，错误文本不含任何数据库信息。
+fn deserialize_rfc3339_param<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    let trimmed = raw.unwrap_or_default();
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    DateTime::parse_from_rfc3339(trimmed)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|_| D::Error::custom("Bad request: RFC3339 timestamp expected"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -721,6 +997,34 @@ async fn handle_healthz(State(state): State<AppState>) -> Response {
     }
 }
 
+/// `/metrics` 可选鉴权判定（L3B-F11）：
+/// - 未配置令牌（`None`/空串）→ 放行（保持探针免鉴权现状，README 语义不变）；
+/// - 已配置 → 接受 `x-metrics-token` 或 `Authorization: Bearer <token>`，两者都不匹配则拒绝。
+fn metrics_authorized(configured: Option<&str>, headers: &HeaderMap) -> bool {
+    let expected = match configured.map(str::trim).filter(|token| !token.is_empty()) {
+        Some(token) => token,
+        None => return true,
+    };
+    if let Some(value) = headers
+        .get("x-metrics-token")
+        .and_then(|value| value.to_str().ok())
+    {
+        if token_matches(expected, value.trim()) {
+            return true;
+        }
+    }
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        let (scheme, token) = value.split_once(' ').unwrap_or((value, ""));
+        if scheme.eq_ignore_ascii_case("bearer") && token_matches(expected, token.trim()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Prometheus 文本格式的 label 值转义。
 fn escape_label(value: &str) -> String {
     value
@@ -730,17 +1034,33 @@ fn escape_label(value: &str) -> String {
 }
 
 /// `GET /metrics`：最小运维指标集（契约 R11.3）。
-async fn handle_metrics(State(state): State<AppState>) -> Result<Response, (StatusCode, String)> {
+async fn handle_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    // L3B-F11：可选鉴权。未配置 `METRICS_TOKEN` 时行为与既有完全一致（探针免鉴权）。
+    if !metrics_authorized(state.metrics_token.as_deref(), &headers) {
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
+    }
+
     let counts = state
         .repo
         .issue_counts_by_status_environment()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let events_total = state
-        .repo
-        .count_events()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|err| {
+            error!(error = %err, "metrics issue counts failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                INTERNAL_ERROR_BODY.to_string(),
+            )
+        })?;
+    let events_total = state.repo.count_events().await.map_err(|err| {
+        error!(error = %err, "metrics event count failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            INTERNAL_ERROR_BODY.to_string(),
+        )
+    })?;
 
     let mut body = String::from(
         "# HELP pony_sentry_issues_total Issue 总数（按 status 与 environment 维度）\n\
@@ -777,6 +1097,10 @@ async fn handle_metrics(State(state): State<AppState>) -> Result<Response, (Stat
     body.push_str(&format!(
         "pony_sentry_ingest_level_degraded_total {degraded_level}\n"
     ));
+
+    // `C7` + `F2`：trace 维度四个计数器（仅新增；label 已归一、series 有上限，
+    // 渲染持锁迭代、不整表 clone）。
+    state.metrics.render_trace_metrics(&mut body);
 
     Ok((
         StatusCode::OK,
@@ -1053,7 +1377,7 @@ async fn handle_list_issues(
         .repo
         .list_issues(filter)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|err| internal_error("list_issues", err))?;
 
     Ok(Json(issues))
 }
@@ -1065,14 +1389,14 @@ async fn handle_list_projects(
         .repo
         .list_projects()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|err| internal_error("list_projects", err))?;
 
     // 聚合 trace 维度的 project（issue 之外的 Agent trace 项目也能进筛选下拉）
     if let Some(trace_repo) = &state.trace_repo {
         let trace_projects = trace_repo
             .list_projects()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|err| internal_error("trace_list_projects", err))?;
         projects.extend(trace_projects);
     }
 
@@ -1104,16 +1428,16 @@ async fn handle_get_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let issue = state.repo.get_issue(&id).await.map_err(|e| match e {
+    let issue = state.repo.get_issue(&id).await.map_err(|err| match err {
         pony_sentry_core::RepositoryError::NotFound(_) => {
             (StatusCode::NOT_FOUND, "Issue not found".into())
         }
-        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        other => internal_error("get_issue", other),
     })?;
 
     // 派生视图字段 `error_type`（事件级属性）：取该 issue 最近一条事件的载荷。
-    let mut value = serde_json::to_value(&issue)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut value =
+        serde_json::to_value(&issue).map_err(|err| internal_error("serialize_issue", err))?;
     if let Ok(events) = state.repo.get_events_for_issue(&id, 1).await {
         if let Some(latest) = events.first() {
             if let Some(error_type) = derived_error_type(&latest.payload) {
@@ -1130,18 +1454,24 @@ async fn handle_get_issue(
 async fn handle_update_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<UpdateIssueRequest>,
+    payload: Result<Json<UpdateIssueRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // `F6`：PATCH 非法体统一 400 `Bad request`（不回显 serde 内部结构与合法枚举值）。
+    let Json(body) = payload.map_err(json_rejection_response)?;
     let status = match body.status {
-        Some(s) => s
-            .parse::<IssueStatus>()
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+        Some(s) => s.parse::<IssueStatus>().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("{BAD_REQUEST_BODY}: invalid `status`"),
+            )
+        })?,
         None => {
-            let current = state
-                .repo
-                .get_issue(&id)
-                .await
-                .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+            let current = state.repo.get_issue(&id).await.map_err(|err| match err {
+                pony_sentry_core::RepositoryError::NotFound(_) => {
+                    (StatusCode::NOT_FOUND, "Issue not found".to_string())
+                }
+                other => internal_error("get_issue_for_update", other),
+            })?;
             current.status
         }
     };
@@ -1150,7 +1480,12 @@ async fn handle_update_issue(
         .repo
         .update_issue_status(&id, status, body.assigned_to)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|err| match err {
+            pony_sentry_core::RepositoryError::NotFound(_) => {
+                (StatusCode::NOT_FOUND, "Issue not found".to_string())
+            }
+            other => internal_error("update_issue_status", other),
+        })?;
 
     Ok(Json(updated))
 }
@@ -1163,7 +1498,7 @@ async fn handle_get_issue_events(
         .repo
         .get_events_for_issue(&id, 20)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|err| internal_error("get_events_for_issue", err))?;
 
     Ok(Json(events))
 }
@@ -1171,7 +1506,7 @@ async fn handle_get_issue_events(
 async fn handle_ingest_trace(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<AgentTraceIngestRequest>,
+    payload: Result<Json<AgentTraceIngestRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     if state.check_write_auth(&headers) == AuthOutcome::Unauthorized {
         return Err((
@@ -1179,6 +1514,16 @@ async fn handle_ingest_trace(
             "Invalid or missing client token".into(),
         ));
     }
+
+    // `C5`：请求体不合法统一 400 `Bad request`（不回显 serde/DB 原文）；
+    // 仅请求体超限保留 413（传输层限制，非上报语义错误）。
+    let Json(payload) = payload.map_err(|rejection| {
+        let response = json_rejection_response(rejection);
+        if response.0 == StatusCode::BAD_REQUEST {
+            state.metrics.record_trace_ingest_rejected("invalid_params");
+        }
+        response
+    })?;
 
     let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
         (
@@ -1199,23 +1544,35 @@ async fn handle_ingest_trace(
     // 防止绕过客户端的敏感字段（token/secret/password 等）落库。
     let sanitized_payload = SanitizationPipeline::sanitize_json_value(raw_payload, 0);
 
-    let session_id = payload
-        .session_id
-        .clone()
-        .or_else(|| payload.thread_id.clone())
-        .ok_or_else(|| {
-            (
+    // `C5`：`session_id` 优先，缺失/空白时回退 `thread_id`；两者皆空 → 400（纯文本，不含 DB 信息）。
+    let session_id = match (
+        payload.session_id.as_deref().map(str::trim),
+        payload.thread_id.as_deref().map(str::trim),
+    ) {
+        (Some(value), _) if !value.is_empty() => value.to_string(),
+        (_, Some(value)) if !value.is_empty() => value.to_string(),
+        _ => {
+            state
+                .metrics
+                .record_trace_ingest_rejected("session_missing");
+            return Err((
                 StatusCode::BAD_REQUEST,
                 "Missing session_id or thread_id".to_string(),
-            )
-        })?;
+            ));
+        }
+    };
 
-    if session_id.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "session_id cannot be empty".to_string(),
-        ));
-    }
+    // `C7`：本次上报的 turn 状态分布 + `C4` status_conflict 探测（只读副本，不改入参）。
+    let incoming_turns: Vec<serde_json::Value> = payload.turns.clone().unwrap_or_default();
+    let turn_statuses: Vec<String> = incoming_turns
+        .iter()
+        .map(pony_sentry_core::trace_v2::turn_status_of)
+        .collect();
+    let status_conflict = incoming_turns.iter().any(|turn| {
+        let mut probe = turn.clone();
+        pony_sentry_core::trace_v2::annotate_turn(&mut probe)
+            .is_some_and(|diagnostics| diagnostics.status_conflict)
+    });
 
     let trace = TraceRecord {
         id: Uuid::new_v4().to_string(),
@@ -1225,20 +1582,38 @@ async fn handle_ingest_trace(
         environment: payload.environment.unwrap_or_else(|| "default".to_string()),
         release: payload.release.unwrap_or_else(|| "unknown".to_string()),
         project: payload.project,
-        eval_status: payload.eval_status.unwrap_or(EvalStatus::Unreviewed),
+        // `F10`（契约 v1.4-5）：忽略客户端 `eval_status`，一律 `unreviewed`；评审只能走 admin PATCH。
+        eval_status: EvalStatus::Unreviewed,
         payload: sanitized_payload,
         total_input_tokens: payload.total_input_tokens,
         total_output_tokens: payload.total_output_tokens,
         total_duration_ms: payload.total_duration_ms,
+        // `C1.2`：聚合列由 core 依据 turns 重算，入参占位为默认值；`note` 由 PATCH 写入。
+        turn_status: "unknown".to_string(),
+        turns_count: 0,
+        note: None,
         reported_at,
         created_at: now,
         updated_at: now,
     };
 
-    let saved = trace_repo
-        .record_trace(trace)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // `C5`：返回 core 同事务回查的库内持久化行（响应 id 可直接 GET，响应 total_* 与库一致）。
+    let saved = trace_repo.record_trace(trace).await.map_err(|err| {
+        error!(error = %err, "trace ingest failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            INTERNAL_ERROR_BODY.to_string(),
+        )
+    })?;
+
+    state.metrics.record_trace_ingested(
+        saved.project.as_deref().unwrap_or("unknown"),
+        &saved.turn_status,
+        &turn_statuses,
+    );
+    if status_conflict {
+        state.metrics.record_trace_status_conflict();
+    }
 
     Ok((StatusCode::CREATED, Json(saved)))
 }
@@ -1255,11 +1630,34 @@ async fn handle_list_traces(
     })?;
 
     let eval_status = match query.eval_status {
-        Some(s) => Some(
-            s.parse::<EvalStatus>()
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-        ),
+        Some(s) => Some(s.parse::<EvalStatus>().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Bad request: invalid `eval_status` parameter".to_string(),
+            )
+        })?),
         None => None,
+    };
+
+    // `C5` / `C9.4`：负值与非数字一律 400（不得静默降级）；上限 100 由 clamp 保证。
+    let limit = match query.limit {
+        Some(value) if value < 0 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Bad request: `limit` must not be negative".to_string(),
+            ));
+        }
+        Some(value) => Some(value.clamp(1, 100)),
+        None => None,
+    };
+    let offset = match query.offset {
+        Some(value) if value < 0 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Bad request: `offset` must not be negative".to_string(),
+            ));
+        }
+        other => other,
     };
 
     let filter = TraceFilter {
@@ -1268,14 +1666,21 @@ async fn handle_list_traces(
         environment: query.environment,
         release: query.release,
         project: query.project,
-        limit: query.limit,
-        offset: query.offset,
+        run_id: query.run_id,
+        turn_status: query.turn_status,
+        from: query.from,
+        to: query.to,
+        limit,
+        offset,
     };
 
-    let traces = trace_repo
-        .list_traces(filter)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let traces = trace_repo.list_traces(filter).await.map_err(|err| {
+        error!(error = %err, "trace list failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            INTERNAL_ERROR_BODY.to_string(),
+        )
+    })?;
 
     Ok(Json(traces))
 }
@@ -1291,12 +1696,18 @@ async fn handle_get_trace(
         )
     })?;
 
-    let trace = trace_repo.get_trace(&id).await.map_err(|e| match e {
+    let trace = trace_repo.get_trace(&id).await.map_err(|err| match err {
         pony_sentry_core::RepositoryError::TraceNotFound(_)
         | pony_sentry_core::RepositoryError::NotFound(_) => {
             (StatusCode::NOT_FOUND, "Trace not found".into())
         }
-        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+        other => {
+            error!(error = %other, "trace get failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                INTERNAL_ERROR_BODY.to_string(),
+            )
+        }
     })?;
 
     Ok(Json(trace))
@@ -1305,8 +1716,11 @@ async fn handle_get_trace(
 async fn handle_update_trace(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<UpdateTraceRequest>,
+    payload: Result<Json<UpdateTraceRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // `F6`：PATCH 非法体统一 400 `Bad request`（不回显 serde 内部结构与合法枚举值）。
+    let Json(body) = payload.map_err(json_rejection_response)?;
+
     let trace_repo = state.trace_repo.as_ref().ok_or_else(|| {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -1314,15 +1728,22 @@ async fn handle_update_trace(
         )
     })?;
 
+    // `C1.2` / `C9.7`：`note` 必须落库（`update_trace_review`，None 时保留库内旧值）。
     let updated = trace_repo
-        .update_trace_eval_status(&id, body.eval_status)
+        .update_trace_review(&id, body.eval_status, body.note.as_deref())
         .await
-        .map_err(|e| match e {
+        .map_err(|err| match err {
             pony_sentry_core::RepositoryError::TraceNotFound(_)
             | pony_sentry_core::RepositoryError::NotFound(_) => {
                 (StatusCode::NOT_FOUND, "Trace not found".into())
             }
-            other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
+            other => {
+                error!(error = %other, "trace review update failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    INTERNAL_ERROR_BODY.to_string(),
+                )
+            }
         })?;
 
     Ok(Json(updated))

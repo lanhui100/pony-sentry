@@ -1,0 +1,43 @@
+{
+  "verdict": "PASS",
+  "closed": {
+    "L3A-F1": "CLOSED|§1.1 改「5821 bytes / 3405 chars」、§9 表回填 59 CONFIRMED/0 REFUTED、W-02 写「18–19/20（verifier 独立复现 18/20）」；「待 verifier」「待回填」全文 0 命中",
+    "L3A-F2": "CLOSED|§1.1 字节/字符双口径并列（5821 bytes / 3405 chars），单位混用消除",
+    "L3A-F3": "CLOSED|新增 W-07 幻影 id（pg_repository.rs:659-678 不更新 id vs :698-701 返回新 UUID + POST2→404 收据）",
+    "L3A-F4": "CLOSED|新增 W-08 响应 total_* 与 effective_* 入库双真值（:636-657 vs :698）",
+    "L3A-F5": "CLOSED|新增 M-04 五种写法实测（单引号 repr/裸 token= 原样入库）；§1.4 明确绕过面不因设计豁免",
+    "L3A-F6": "PARTIAL|§9.2 已声明重排依据并补 27 条映射，但自订 P0 定义无阈值且与自身行冲突：§4.1 判 D2/D5「不能」、§4.2 承认补 M-02 可救 D5/D7，M2 仍列 P1",
+    "L3A-F7": "CLOSED|新增 Wave 0（立即）承载唯一 P0（M-01）+ W-07/W-08/I-10，先于 Wave A；§4.2 把「零改动」限定为「入库并原样返回」，展示改动移入 Wave C",
+    "L3A-F8": "PARTIAL|§9.2 已给 27 条判据全映射（W1-W8/M1-M8/I1-I11 无缺席、无整条丢弃），但 39 行逐字段矩阵仍「不在正文复述」，只指向 10-contract/01-field-matrix.md，brief:69 的「入报告」未落地",
+    "L3A-F9": "CLOSED|W-02 建议改为「SELECT … FOR UPDATE 对首次上报无效（行不存在→0 行无锁）」→ pg_advisory_xact_lock / 单语句 upsert+serializable 重试",
+    "L3A-F10": "CLOSED|§6 跨波次前置约束双写：trace_turns/turn_status/run_id 索引标为越出「不改 schema」非目标的待裁决项（未授权改 advisory lock + payload #>/GIN）；改控制台须重走 contract-console-timeout 冻结并复核 API_TIMEOUT_MS 不变式",
+    "L3A-F11": "CLOSED|I-09 已列全 stats_incomplete / turn.phase / turn.sequence / turn.node 四组死契约字段",
+    "L3A-F12": "CLOSED|M-01 改为只要求受控 error_type，并明令「不要求也不允许 error_message」，不再要求 error 变对象；§7 用并列 error_type 键",
+    "L3A-F13": "CLOSED|§0 根因①改「R1 只禁 error_message 自由文本，error_type 受控通道压根没接」；§7 注「tool 侧已拿到、只是被硬编码丢弃」",
+    "L3A-F14": "CLOSED|W-01 测试锚点改 trace_repository_test.rs:323；§2/§4.3 均写「无 output 键（不是 null）」",
+    "L3B-F1": "CLOSED|撤回「user_id 仅 dev/preprod 外发」：§6/§7/§8.2 一律不新增 user_id/明文 thread_id，M-06 补 input_text 前须隐私裁决且仅发长度+摘要哈希+首 200 字符；字段级分类/读侧矩阵在 §9.1 记为 Wave D 前置（超审核范围）",
+    "L3B-F2": "CLOSED|M-01 现只要求受控 error_type 且显式禁 error_message（与 R1 及 sanitize_error_message 恒 [REDACTED] 一致），二选一冲突消解",
+    "L3B-F3": "CLOSED|§5 容量补充：2MB 仅为单次 POST body（routes.rs:422），列 2.4MB 合并行 / 2.4MB GET / 4.4MB List 实测，并入 I-04/I-06",
+    "L3B-F4": "CLOSED|新增 W-09（extra 被整体置 null：trace_merge.rs:13 + routes.rs:352-368），并在 §6/§7/M-05/I-07 规定不用 extra、诊断字段进 turns[]",
+    "L3B-F5": "CLOSED|I-07 改为「不要取消自由文本密钥扫描」、保留相对路径须消费者二次脱敏同步放行、redaction 计数只进聚合指标（顶层键被 I-01 丢弃 / extra 被 W-09 清空）",
+    "L3B-F6": "CLOSED|M-03 建议改为 metrics+待评审队列+日报先行，webhook/issue 延后到 W-01/W-02 修复且复用 events「仅 new/regression 通知」去重；§8.4 复述风暴风险",
+    "L3B-F7": "CLOSED|D8 降为部分 0.5 且只认明文 run_id；§4.2 明示回链天花板「不可达」（经 L3B F7 裁决修正）；§6/§7 禁明文 thread_id，§8.2 注明消费者 thread_id 无 HMAC 兜底，W-10 记 session_id 兜底路径",
+    "L3B-F8": "CLOSED|新增 I-11（DELETE … WHERE created_at，ON CONFLICT 不前移删除线；建议按 updated_at 或最新 turn 续期）",
+    "L3B-F9": "CLOSED|W-04 引 INV-2 原文并写明须同步修订，§8.3 列「改列语义须修订 INV-2 并说明 run_id 检索缺口」",
+    "L3B-F10": "CLOSED|M-04 独立立项 P1（五种形态收据）+ §1.4 改写为「该挡没挡住属缺陷、不因设计行为豁免」",
+    "L3B-F11": "CLOSED|I-10 升 P1，定性为信息泄露 + 把参数错误伪装 5xx（污染错误预算/触发无效告警），建议 clamp/参数绑定/5xx 不回显 DB 文案",
+    "L3B-F12": "CLOSED|G-01/G-02/G-03/G-04 已成独立 finding（W-07/W-08/I-10/M-04），G-05/G-07 修正落文，D8 回链按 G-01 改为不可达；§9 的「G-01..G-08」措辞偏宽（G-06 无落点、G-08 仅 L2 一行）",
+    "L3B-F13": "CLOSED|W-02 建议补 lock_timeout/statement_timeout、连接池上限、热点 session 写放大（MB 级 jsonb）、trace_turns 行数估算/回填/retention，并写「无锁预算的止血本身会成为新故障源」",
+    "L3B-F14": "CLOSED|§7 字段约束：turns ≤64、单 turn ≤256KB、合并 ≤2MB、超限截断打 truncated:true，llm_calls ≤50/512B"
+  },
+  "open": [
+    {
+      "id": "L3A-F6",
+      "reason": "PARTIAL — §9.2 已声明重排依据（P0=直接阻断本次诊断）并补 27 条映射，但该定义无阈值，且 M2/M-02 行与之矛盾：§4.1 判 D2、D5「不能」，§4.2 承认补 M-02 可把 D5→满分、D7→满分，却仍定 P1（依据仅「显著削弱」）。建议：§9.2 增可复核阈值（如「使任一必答题判不能且无替代证据 = P0」）并据此复核 M-02/W-06，否则「P0 仅 1 条」不可复核。"
+    },
+    {
+      "id": "L3A-F8",
+      "reason": "PARTIAL — 27 条判据映射已补齐（W1-W8/M1-M8/I1-I11 无缺席，W7/M4 不再整条丢失），但 brief:69 要求的 39 行逐字段对照矩阵仍「不在报告正文复述」，仅指向 10-contract/01-field-matrix.md。建议：作附录 A 收入 39 行摘要，或在 §9.2 明写「偏离 brief:69、已获 Lead 裁决」，使其成为已声明的偏离而非遗漏。"
+    }
+  ]
+}

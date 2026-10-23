@@ -54,5 +54,9 @@
       ]
     },
     "fail_closed": true
-  }
+  },
+  "trace_write_tx_timeout_ms": 3000,
+  "trace_lock_timeout_ms": 2000,
+  "trace_list_limit_max": 100,
+  "trace_retention_use_updated_at": true
 }

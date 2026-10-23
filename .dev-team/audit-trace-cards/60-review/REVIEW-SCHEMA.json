@@ -1,0 +1,6 @@
+{
+  "verdict": "PASS",
+  "findings": [
+    {"id": "L3A-F1", "file": "50-report/report-draft.md", "line": 0, "rule": "string", "counterexample": "string", "severity": "BLOCKER|MAJOR|MINOR"}
+  ]
+}

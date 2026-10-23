@@ -1,0 +1,68 @@
+# L3-B 实验收据（只读审查 + audit-probe-l3b-* 临时行）
+# 2026-10-23 20:00 CST / 本机 http://127.0.0.1:3000 / DB 10.43.206.170 ponysentry
+# 凭证以 $ADMIN / $CLIENT 表示，不落明文。
+
+## 0. 前置与清理基线
+select count(*) from traces where session_id like 'audit-probe-l3b-%';  --> 0
+
+## 1. E1: extra 字段跨次上报是否持久 + 顶层 _redactions 是否被丢弃
+POST /api/v1/traces  (session_id=audit-probe-l3b-extra)
+  body1: extra={request_id,user_id:"510",failover_policy}, _redactions=2, turns=[turn_l3b_1]
+  body2: turns=[turn_l3b_2]（不带 extra）
+--> post1 201 / post2 201
+POST1 响应：{"extra":{"failover_policy":"disabled","request_id":"legacy_request_id_abc",
+             "user_id":"510"},"session_id":"audit-probe-l3b-extra"}
+GET /api/v1/traces/{id} | jq '{extra, keys, turns, redactions}'
+--> {"extra":null,
+     "keys":["environment","eval_status","extra","project","release","reported_at_ms",
+             "run_id","session_id","tags","thread_id","total_duration_ms",
+             "total_input_tokens","total_output_tokens","turn_id","turns"],
+     "turns":["turn_l3b_1","turn_l3b_2"],
+     "redactions":null}
+结论：extra 被第二次上报整体置 null；顶层 `_redactions` 因 typed struct 重序列化被静默丢弃。
+代码锚点：crates/core/src/trace_merge.rs:13 (`let mut merged = new.clone()`),
+          crates/server/src/routes.rs:1199-1200, crates/core/src/pg_repository.rs:665-677。
+
+## 2. E2: 合并后单行是否可能超过 2MB（2MB 只是 POST body 限制）
+POST 两次同 session（audit-probe-l3b-cap），每次 turns=[{blob:"A"*1,200,000}]
+--> post1 201 / post2 201
+select pg_column_size(payload), octet_length(payload::text)
+  from traces where session_id='audit-probe-l3b-cap';
+--> 27913 | 2400513        （JSONB 压缩后 27,913B，但 wire 文本 2,400,513B）
+GET /api/v1/traces/{id}
+--> 200 / size_download=2400913
+GET /api/v1/traces?project=job_copilot&limit=100000
+--> 200 / size_download=4414470
+结论：body limit 只约束单次 POST；session 单行合并后可 >2MB，读接口无投影/无 clamp。
+代码锚点：crates/server/src/routes.rs:422 (DefaultBodyLimit), pg_repository.rs:717-758。
+
+## 3. E3: thread_id 回退是否把原始业务 thread_id 写入唯一键
+POST 仅带 thread_id=thread_business_secret_2026（不带 session_id）
+--> 201；库内 session_id=thread_business_secret_2026，
+    payload.thread_id=thread_business_secret_2026，payload.session_id=null
+注：该行因 session_id 取原始 thread_id，未命中 `audit-probe-l3b-` 前缀；
+    按精确 session_id 删除（DELETE 1），不是按 LIKE。
+代码锚点：crates/server/src/routes.rs:1202-1211（session_id 缺失时回落 thread_id）。
+
+## 4. 清理（精确 session_id，未用 LIKE）
+delete from traces where session_id in ('audit-probe-l3b-extra','audit-probe-l3b-cap');
+--> DELETE 2
+delete from traces where session_id='thread_business_secret_2026';
+--> DELETE 1
+select count(*) from traces where session_id like 'audit-probe-l3b-%';  --> 0
+select count(*) from traces where project='job_copilot';                --> 37
+select count(*) from traces where id='ca0b5494-ae1b-47db-8e00-c9e7abbb6779'; --> 1
+
+## 5. 只读代码锚点（未改动任何业务文件）
+- 生产者错误正文恒脱敏：/home/dm/job_copilot/api_v2/src/modules/agent/trace_safety.py:344-349
+- 生产者 request_id/failover_policy 走 HMAC alias：同文件 :431-437, :507-508, :568-576
+- 生产类环境判定（preprod 属生产类）：同文件 :982-1000
+- 生产者 input_text/output_text 上限 10k/20k：pony_sentry_trace/payload.py:82-83, :244-252
+- 消费者二次脱敏（路径改写）：crates/server/src/routes.rs:1200; crates/ingest/src/sanitizer.rs:167-176
+- 保留按 created_at 且 upsert 不更新 created_at：crates/core/src/pg_repository.rs:665-677, :815
+- 读侧边界=整个 tailnet：docs/decisions/004-console-tailnet-trust.md:65-66
+
+## 6. 只读补充探针（无写入）
+GET /api/v1/traces?limit=-5&offset=-3
+--> 500 / body="Database error: error returned from database: OFFSET must not be negative"
+    （routes.rs:1276-1278 回显 e.to_string()；pg_repository.rs:753-755 未 clamp/未参数化 LIMIT/OFFSET）

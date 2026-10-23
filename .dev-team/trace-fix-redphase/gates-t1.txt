@@ -1,0 +1,154 @@
+# T1 门禁收据 · trace v2 类型空桩 + NFR 基线
+# 任务：task-5（契约 .dev-team/trace-fix-contract.md FROZEN v1，C1–C10）
+# 执行：protocol-scribe ｜ 2026-10-23 ｜ 仓库 /home/dm/pony-sentry
+# 结论：Gate 1/2/3 全部 Exit 0；另发现 Gate 2（dev-stub-lint）对 .rs **恒真**，已附补充门禁 Gate 2b。
+
+===============================================================================
+## Gate 1 · cargo check -p pony-sentry-core
+# 先 touch 源文件，确保本条收据包含真实 recompile（而非缓存命中）
+$ touch crates/core/src/trace_v2.rs && cargo check -p pony-sentry-core
+-------------------------------------------------------------------------------
+    Checking pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.58s
+-------------------------------------------------------------------------------
+Exit Code: 0        # 0 warning / 0 error
+
+### Gate 1b · cargo check --workspace（补充：确认新增 module 未破坏依赖方）
+$ cargo check --workspace
+-------------------------------------------------------------------------------
+    Checking pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+    Checking pony-sentry-fingerprint v0.1.0 (/home/dm/pony-sentry/crates/fingerprint)
+    Checking pony-sentry-ingest v0.1.0 (/home/dm/pony-sentry/crates/ingest)
+    Checking pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.35s
+-------------------------------------------------------------------------------
+Exit Code: 0
+
+===============================================================================
+## Gate 2 · dev-stub-lint（契约指定门禁）
+$ python3 /home/dm/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/core/src/trace_v2.rs
+-------------------------------------------------------------------------------
+[PASS] dev-stub-lint 校验通过 (共检查 1 个文件)
+-------------------------------------------------------------------------------
+Exit Code: 0
+
+⚠ GATE HOLE（实测，非推断）：dev-stub-lint.py 只对 .py/.ts/.js 施加规则；传入 .rs 时
+  main() 仍把该文件计入 checked_files 并直接 PASS（脚本分派逻辑：
+  `if f.suffix == ".py" ... elif f.suffix in (".ts",".js") ... else: errs = []`）。
+  因此 **该门禁对 Rust 空桩恒真，无法失败**。负样本实测（本桩副本，把 is_terminal_status
+  换成 let/matches! 真实逻辑）：
+
+$ python3 /home/dm/.agents/skills/dev-team/scripts/dev-stub-lint.py /tmp/evil_stub.rs
+-------------------------------------------------------------------------------
+[PASS] dev-stub-lint 校验通过 (共检查 1 个文件)
+Exit Code: 0        # 期望非 0，实得 0 → 恒真
+
+  对照（同一份"带逻辑"的 .py 会被判失败，证明规则只覆盖 py/ts/js）：
+$ printf 'def f(x):\n    y = x + 1\n    return y\n' > /tmp/evil_stub.py
+$ python3 /home/dm/.agents/skills/dev-team/scripts/dev-stub-lint.py /tmp/evil_stub.py
+  [FAIL] dev-stub-lint 发现 2 处纯度违规:
+    - /tmp/evil_stub.py:2: 空桩函数体内仅允许 raise NotImplementedError，禁止包含业务逻辑/返回值/分支/赋值 (Assign)
+    - /tmp/evil_stub.py:3: 空桩函数体内仅允许 raise NotImplementedError，禁止包含业务逻辑/返回值/分支/赋值 (Return)
+  Exit Code: 1
+
+  建议（不实施，交 Lead 裁决）：给 dev-stub-lint.py 补 .rs 分支，或把 Gate 2b 升为契约门禁。
+
+===============================================================================
+## Gate 2b · rust-stub-purity（T1 自建补充门禁，堵 Gate 2 的恒真洞）
+# 断言：每个 pub fn 体恰为单条 todo!()、有效行 <=3、体内无 let/if/match/for/while/return/? 逻辑；
+#       两个结构体字段与五个冻结签名齐备。脚本全文见本节末尾（可原样重放）。
+$ python3 /tmp/rust_purity.py crates/core/src/trace_v2.rs
+-------------------------------------------------------------------------------
+[PASS] rust-stub-purity: 5 个函数体均为单条 todo!()，2 个结构体字段与 5 个签名齐备
+-------------------------------------------------------------------------------
+Exit Code: 0
+
+# 负样本（同一检查器对 /tmp/evil_stub.rs）—— 证明具备失败能力：
+$ python3 /tmp/rust_purity.py /tmp/evil_stub.rs
+-------------------------------------------------------------------------------
+[FAIL] rust-stub-purity: 2 处违规
+  - is_terminal_status: 函数体语句必须恰为 todo!()，实得 ['let s = status.trim().to_lowercase();', 'matches!(s.as_str(), "completed" | "failed" | "error")']
+  - is_terminal_status: 空桩体内出现逻辑关键字 `let `
+-------------------------------------------------------------------------------
+Exit Code: 1        # 非 0 = 检查器有效
+
+# Gate 2b 脚本全文（保存为任意路径后 python3 <script> crates/core/src/trace_v2.rs 即可重放）：
+  import re, sys
+  p = sys.argv[1]
+  src = open(p, encoding="utf-8").read()
+  decls = re.findall(r'pub fn\s+([A-Za-z0-9_]+)', src)
+  body_re = re.compile(r'pub fn\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*->\s*[^{]+\{(.*?)\n\}', re.S)
+  bodies = {m.group(1): m.group(2) for m in body_re.finditer(src)}
+  errs = []
+  if len(decls) != len(bodies):
+      errs.append(f"函数体解析不完整: decls={len(decls)} parsed={len(bodies)}")
+  for name, body in bodies.items():
+      stmts = [l.strip() for l in body.splitlines() if l.strip() and not l.strip().startswith("//")]
+      if stmts != ["todo!()"]:
+          errs.append(f"{name}: 函数体语句必须恰为 todo!()，实得 {stmts}")
+      if len(stmts) > 3:
+          errs.append(f"{name}: 有效行数 {len(stmts)} > 3")
+      for kw in ("let ", "if ", "match ", "for ", "while ", "return ", "?"):
+          if kw in body:
+              errs.append(f"{name}: 空桩体内出现逻辑关键字 `{kw}`")
+  TURN_DIAG = ["pub error_contract: Option<String>", "pub status_conflict: bool", "pub error_missing: bool"]
+  MERGED = ["pub turn_id: String", "pub seq: i64", "pub status: String", "pub payload: Value"]
+  for struct, fields in (("TurnDiagnostics", TURN_DIAG), ("MergedTurn", MERGED)):
+      m = re.search(rf'pub struct {struct}\s*\{{(.*?)\n\}}', src, re.S)
+      if not m:
+          errs.append(f"缺少 `pub struct {struct}`")
+          continue
+      for f in fields:
+          if f not in m.group(1):
+              errs.append(f"{struct} 缺少字段 `{f}`")
+  required_fns = ["annotate_turn", "merge_turn", "aggregate_session", "turn_status_of", "is_terminal_status"]
+  for fn in required_fns:
+      if fn not in bodies:
+          errs.append(f"缺少签名 `pub fn {fn}`")
+  if errs:
+      print(f"[FAIL] rust-stub-purity: {len(errs)} 处违规")
+      for e in errs:
+          print(f"  - {e}")
+      sys.exit(1)
+  print(f"[PASS] rust-stub-purity: {len(bodies)} 个函数体均为单条 todo!()，2 个结构体字段与 5 个签名齐备")
+
+===============================================================================
+## Gate 3 · dev-nfr-lint
+$ python3 /home/dm/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline.json
+-------------------------------------------------------------------------------
+[PASS] dev-nfr-lint 校验通过: .dev-team/nfr-baseline.json
+-------------------------------------------------------------------------------
+Exit Code: 0
+
+# 新增 4 键（既有 schema 未改：external_call_timeout_ms / retry / concurrency_lock / logging /
+# resource_release 五个 lint REQUIRED_FIELDS 原样保留）：
+#   trace_write_tx_timeout_ms      = 3000  （C3 写入事务硬超时上限 ≤3000）
+#   trace_lock_timeout_ms          = 2000  （C3 advisory-lock / BEGIN IMMEDIATE 等待上限 ≤2000）
+#   trace_list_limit_max           = 100   （C5 limit clamp 上界；C9.4 断言 limit=100000 返回 ≤100 行）
+#   trace_retention_use_updated_at = true  （C6：删除条件 COALESCE(updated_at, created_at) < cutoff）
+# 机器复核：
+$ jq -c '{trace_write_tx_timeout_ms,trace_lock_timeout_ms,trace_list_limit_max,trace_retention_use_updated_at}' .dev-team/nfr-baseline.json
+{"trace_write_tx_timeout_ms":3000,"trace_lock_timeout_ms":2000,"trace_list_limit_max":100,"trace_retention_use_updated_at":true}
+Exit Code: 0
+
+===============================================================================
+## 收据汇总
+| Gate | 命令 | Exit | 判定 |
+| :--- | :--- | :--- | :--- |
+| 1 | cargo check -p pony-sentry-core | 0 | PASS（0 warning，空桩可编译） |
+| 1b | cargo check --workspace | 0 | PASS（4 crates 全绿，module 新增未破坏依赖方） |
+| 2 | dev-stub-lint.py crates/core/src/trace_v2.rs | 0 | PASS（但**对 .rs 恒真**，见 GATE HOLE） |
+| 2b | rust-stub-purity crates/core/src/trace_v2.rs | 0 | PASS（负样本 Exit 1，具备失败能力） |
+| 3 | dev-nfr-lint.py .dev-team/nfr-baseline.json | 0 | PASS |
+
+## 本卡改动文件（写域）
+- 新增 crates/core/src/trace_v2.rs（空桩，80 行；5 个 pub fn 全为 todo!()）
+- 修改 crates/core/src/lib.rs（仅 +1 行 `pub mod trace_v2;`）
+- 修改 .dev-team/nfr-baseline.json（仅 +4 键，JSON 结构合法）
+- 新增本收据 .dev-team/trace-fix-redphase/gates-t1.txt
+- 未触碰 crates/server、web、tests、migrations、README、docs、crates/core/src 其他文件
+
+## 待 Lead 裁决的 2 项
+1. Gate 2 对 Rust 恒真（负样本实测 Exit 0）→ 是否给 dev-stub-lint.py 加 .rs 分支，或把 Gate 2b 纳入契约门禁。
+2. 写域冲突：task-5 写域禁止 `crates/core/src/` 其他文件，与 Lead 指令「lib.rs 加 pub mod trace_v2;」冲突；
+   已按 Lead 指令执行——否则 cargo check 不会编译该文件，Gate 1 亦将恒真（与 Gate 2 同型缺陷）。

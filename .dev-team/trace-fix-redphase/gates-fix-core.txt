@@ -1,0 +1,82 @@
+T5 存储层修复门禁收据（executor-db / task-11）
+================================================================================
+契约依据：`.dev-team/trace-fix-contract.md` FROZEN v1.4（§1–§8）
+写域：`migrations/**`、`crates/core/src/**`、`crates/core/tests/**`（未改 `crates/server/**`、`web/**`、仓库根 `tests/**`、`docs/**`）
+时间：2026-10-23 21:5x–22:0x (Asia/Shanghai)；原始日志：`.dev-team/trace-fix-redphase/gates-fix-core.raw.log`
+
+## Gate 1 · cargo test -p pony-sentry-core --offline（PG 真实执行）
+$ PONY_TEST_PG_URL='postgresql://job_copilot:***@10.43.206.170:5432/ponysentry_test' \
+    cargo test -p pony-sentry-core --offline
+     unittests src/lib.rs                  running 41 tests  → ok. 41 passed
+     tests/pg_repository_test.rs           running 4 tests   → ok. 4 passed     # PG 真实执行
+     tests/storage_test.rs                 running 2 tests   → ok. 2 passed
+     tests/trace_repository_test.rs        running 8 tests   → ok. 8 passed
+     tests/trace_v2_repository_test.rs     running 20 tests  → ok. 20 passed    # 含 4 条 PG 真实执行
+     Doc-tests                             0 tests
+  合计 75 passed / 0 failed；`grep -c SKIP` = 0（无 SKIP 行）
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CLIPPY_EXIT=0
+（附加自检：`cargo check -p pony-sentry-core --offline` Exit 0）
+
+## 逐项关闭（task-11 八项 / amend v1.4 八条）
+1) ✅ BLOCKER 回填键不一致（v1.4-1 / L3A-F1·F2、L3B-F3）
+   - `migrations/{,postgres/}0005_trace_turns.sql` 现在**只建 schema**（CREATE/ALTER/INDEX），回填 SQL
+     （原 `hex()`/`md5()` 兜底）已删除；
+   - 回填迁到 `migrate()` 之后的 `backfill_trace_turns()`（PG/SQLite 各一），逐行读 `payload.turns`，
+     用运行时同一函数 `trace_v2::turn_keys_for`（= `turn_key_of` 的批量版，sha256）生成 turn_id，
+     `INSERT … ON CONFLICT DO NOTHING`（已存在键跳过），再 `refresh_trace_turn_aggregates` 写回
+     `turns_count`/`turn_status`；
+   - 同名内容碰撞（两条 legacy turn 内容完全相同）追加确定后缀 `_2`/`_3`，**不塌成一行**；
+   - 证据：`v2_backfill_missing_turn_ids_use_runtime_sha256_keys`（SQLite，断言回填键 ==
+     `trace_v2::turn_key_of(&原 turn)` 且两行不同）、`v2_backfill_does_not_collapse_identical_legacy_turns`、
+     `pg::v2_pg_backfill_generates_runtime_keys_for_missing_turn_ids`（PG 真跑，`turn_srv_*` 两行）。
+2) ✅ hydration 覆盖度（v1.4-1 / L3A-F3）
+   - `hydrate_trace_turns` 判据改为「已入库行数 < `payload.turns` 条数」→ 只补缺失键（写路径 + 回填路径共用）；
+   - 证据：`v2_hydration_fills_when_coverage_is_partial`（1/2 覆盖 → 补齐 c2，聚合 [c1,c2,c3]）。
+3) ✅ retention 竞态（v1.4-3 / L3A-F4）
+   - PG：单事务 + `SELECT … FOR UPDATE SKIP LOCKED` 固定 `(id, session_id)` 集合 → 先按该集合删
+     `trace_turns`（`session_id = ANY($1)`）→ 再 `DELETE FROM traces WHERE id = ANY($1)` → COMMIT；
+   - SQLite：`BEGIN IMMEDIATE` 单事务 + 固定 id 集 + 同序 DELETE；
+   - 证据：`v2_retention_never_deletes_turns_of_surviving_sessions`（SQLite，batch_size=1 两批）与
+     `pg::v2_pg_retention_never_deletes_turns_of_surviving_sessions`（PG 真跑）：每批只删 1 行、
+     存活会话 2 条 turn 完好、删完 0 孤儿。
+4) ✅ 无 `tool_call_id` 的 tool_calls 无界增长（v1.4-3 / L3A-F5）
+   - `trace_v2::merge_tool_calls` 合并键：`tool_call_id` → `id:<id>`；否则 `sig:<tool_name>|<arguments 规范化 JSON>`
+     （兼容 `arguments_summary`）。同键字段合并、不同键才追加；
+   - 证据：`c2_3_tool_calls_without_id_merge_by_name_and_arguments`（5 轮重复上报条数恒为 2；arguments 不同才追加）。
+5) ✅ 终态互覆残留 error（v1.4-4 / L3A-F10）
+   - `merge_turn`：旧 status 为终态、新 status 为 success 类（`completed`/`succeeded`）时，清除
+     `error`/`error_type`/`diagnostics`（tool_calls 事实字段不动）；
+   - 证据：`c2_1_terminal_to_success_clears_legacy_error_residue`（含反向：running→failed 仍保留 error；
+     failed→failed 不清空）。
+6) ✅ `turn_auto_` → `turn_srv_`（v1.4-2 / L3B-F7）
+   - `trace_v2::SERVER_TURN_PREFIX = "turn_srv_"`；`grep -rn turn_auto crates migrations` = 0 命中；
+   - 证据：`turn_key_prefers_explicit_id_and_hashes_missing_id_deterministically`（形态 `turn_srv_<16 hex>`）、
+     回填用例断言 `turn_srv_*` 前缀。
+7) ✅ down 迁移（v1.4-8 / L3B-F5）
+   - 新增 `migrations/postgres/0005_trace_turns.down.sql`（DROP 索引/TABLE、DROP COLUMN ×3，全部 IF EXISTS）；
+   - SQLite 边界写在 `migrations/0005_trace_turns.sql` 头注释（不支持 DROP COLUMN → 回滚需重建表）。
+   - 实测（ponysentry_test 临时 schema `t11_down`，用完 DROP）：
+     0005 up   → traces 新列 3 个 / trace_turns 表存在
+     0005 down → 新列 0 个 / trace_turns 0 个
+     down 重放 → exit 0（幂等）；再次 up → exit 0，表恢复
+8) ✅ 单测覆盖（本任务新增 6 条）：回填缺 turn_id 两行不塌陷（SQLite+PG）、内容碰撞加后缀、
+   hydration 覆盖度、无 tool_call_id 不增长、终态→success 清 error、retention 不误删存活 turn（SQLite+PG）。
+   另更新既有 1 条（`turn_auto_` → `turn_srv_` 断言）。
+
+## 与 task-7 收据（gates-t3b.txt）的口径差异
+- 回填位置：SQL（迁移文件内 `json_each`/`jsonb_array_elements`）→ **Rust（`backfill_trace_turns`）**；
+  因此 gates-t3b.txt §2 里「0005 执行时 INSERT 57 / UPDATE 37」不再适用；回填结果由
+  `v2_migration_backfills_trace_turns_from_legacy_payload`、`pg::v2_pg_migration_backfills_legacy_payload`
+  等用例背书（真实 37 行快照的 schema/口径测量结论不变：turns_count 与 payload.turns 长度一致）。
+- retention：由「删 traces + 孤儿清扫（两条独立语句）」→「单事务固定 id 集精确删轮次」。
+
+## 需 Lead 指派/授权的残留（不在本任务写域）
+1. `docs/trace-contract.md` §5（SQLite 不支持 down 的边界）与 ADR 更新：任务书写明禁止改 `docs/**`，
+   故由文档 owner 在 same-commit 落地（amend v1.4-2「契约同 commit 更新」）。
+2. 契约 amend v1.4 已由 Lead 写入 `.dev-team/trace-fix-contract.md`；本次**无需追加 amend**——实现与
+   v1.4 §1–§8 逐条一致；唯一解释性选择是「同名内容碰撞加 `_N` 后缀」（v1.4-1 要求"不得塌成一行"，
+   由 `turn_keys_for` 实现，未改变键生成算法）。

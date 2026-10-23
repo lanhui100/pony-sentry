@@ -5,6 +5,7 @@ pub mod reindex;
 pub mod repository;
 pub mod sqlite_repository;
 pub mod trace_merge;
+pub mod trace_v2;
 
 pub use db::{create_pool, DatabasePool};
 pub use models::{

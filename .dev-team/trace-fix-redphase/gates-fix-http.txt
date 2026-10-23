@@ -1,0 +1,163 @@
+T6 HTTP 面修复门禁收据（executor-http / task-12，L3-B F1/F2/F6/F10）
+================================================================================
+契约：`.dev-team/trace-fix-contract.md` FROZEN v1.4（C5 / C7 + amend v1.4-5/6/7）
+写域：`crates/server/src/routes.rs`、`crates/server/tests/api_test.rs`（core / migrations / web / tests / docs 未触碰）
+时间：2026-10-23 21:52–22:03 (Asia/Shanghai)
+前置：核心侧（turn_srv_ 前缀 / 迁移回填）由 task-11 负责，本轮不涉；实施期间 core 存在对端在飞编辑（一度 E0716），未干预。
+
+## Gate 1 · cargo test --workspace --offline
+$ cargo test --workspace --offline
+      Running unittests src/lib.rs (pony-sentry-core)                      => 41 passed
+      Running tests/pg_repository_test.rs                                  =>  4 passed
+      Running tests/storage_test.rs                                        =>  2 passed
+      Running tests/trace_repository_test.rs                               =>  8 passed
+      Running tests/trace_v2_repository_test.rs                            => 20 passed
+      Running unittests src/lib.rs (pony-sentry-fingerprint)               => 12 passed
+      Running tests/hasher_test.rs                                         =>  1 passed
+      Running unittests src/lib.rs (pony-sentry-ingest)                    => 31 passed
+      Running tests/sanitizer_test.rs                                      =>  2 passed
+      Running unittests src/lib.rs (pony-sentry-server)                    => 16 passed
+      Running tests/adversarial_tailnet_trust.rs                           =>  3 passed
+      Running tests/api_test.rs                                            => 22 passed   # 上轮 16 + 本任务新增 6
+      Running tests/pg_api_duplicate_test.rs                               =>  1 passed
+      Running tests/reindex_test.rs                                        =>  1 passed
+      Running tests/trust_unit.rs                                          => 11 passed
+      （其余 doc-tests / main.rs：0 passed）
+   合计：175 passed / 0 failed / 0 ignored      EXIT=0
+
+## Gate 2 · cargo clippy --workspace --all-targets -- -D warnings
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Checking pony-sentry-core … pony-sentry-server v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+    CLIPPY_EXIT=0
+
+## Gate 3 · cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline
+test c9_1_terminal_status_overrides_and_never_regresses ... ok
+test c9_1_tool_calls_merged_by_id_and_new_turn_appended ... ok
+test c9_2_concurrent_ingest_loses_no_turn ... ok
+test c9_3_post_id_gettable_and_totals_match_turns_sum ... ok
+test c9_4_invalid_query_params_rejected_without_db_leak ... ok
+test c9_5_diagnostics_three_flags ... ok
+test c9_6_extra_retained_eval_status_absent_session_id_source ... ok     # Lead 已按 v1.4 重冻结为 unreviewed
+test c9_7_note_patch_and_aggregates_advance ... ok
+test c9_8_retention_judges_by_updated_at ... ok
+test c9_9_metrics_expose_four_trace_counters ... ok
+test c9_10_migration_backfills_trace_turns_from_legacy_payload ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 84.73s
+    ACCEPT_EXIT=0
+（冻结测试文件零改动：`git status --porcelain tests/` 为空；C9.6 的 amend 由 Lead 提交。）
+
+================================================================================
+## F1 关闭：所有 RepositoryError/serde 响应统一文案，DB 原文只进日志
+
+代码（`crates/server/src/routes.rs`）：
+- 新增 `const BAD_REQUEST_BODY="Bad request"` / `const INTERNAL_ERROR_BODY="Internal error"`；
+  新增 `fn internal_error(context, err)`（`error!(error=%, context)` 记原文 → 返回 500 + 通用文案）。
+- 逐点替换（共 9 处，原均为 `e.to_string()` 直出）：
+  1. `GET /api/v1/issues`（list_issues）              2. `GET /api/v1/projects`（issues 侧 list_projects）
+  3. `GET /api/v1/projects`（trace 侧 list_projects）  4. `GET /api/v1/issues/:id`（get_issue 的 other 分支）
+  5. `GET /api/v1/issues/:id`（`serde_json::to_value` 失败，serde 原文同样不再外发）
+  6. `PATCH /api/v1/issues/:id`（原 `get_issue` 的**任意错误被当 404 且回显原文** → 现 NotFound=404 / 其余=500）
+  7. `PATCH /api/v1/issues/:id`（update_issue_status，NotFound=404 / 其余=500）
+  8. `GET /api/v1/issues/:id/events`（get_events_for_issue）
+  9. `PATCH /api/v1/issues/:id` 的 `status` 解析错误（原回显 `Unknown issue status: <用户输入>` →
+     `Bad request: invalid \`status\``，不枚举合法值、不回显输入）
+- traces 面（上轮已收口）本次统一改用常量与 `internal_error` 助手：ingest / list / get / PATCH。
+
+集成用例（真实 DB 故障，非 mock）：`test_issue_endpoints_hide_db_error_text`、`test_trace_endpoints_hide_db_error_text`
+- 手法：文件型 SQLite 夹具，运行中 `DROP TABLE issues`+`events` / `traces`+`trace_turns` → 真实 `RepositoryError::Database`。
+- 断言：状态 500 且响应体**逐字符等于** `Internal error`；并反查 `Database error`/`SQLITE`/`sqlx`/`no such table`/
+  `syntax error`/`UNIQUE constraint`/`expected value`/`unknown variant` 全不命中。
+
+物理收据（真实进程 18201 + 运行中删表）：
+  GET  /api/v1/traces            -> Internal error [http_code=500]
+  GET  /api/v1/traces/{id}       -> Internal error [http_code=500]
+  POST /api/v1/traces            -> Internal error [http_code=500]
+  GET  /api/v1/issues            -> Internal error [http_code=500]
+  GET  /api/v1/issues/{id}       -> Internal error [http_code=500]
+  GET  /api/v1/issues/{id}/events-> Internal error [http_code=500]
+  GET  /api/v1/projects          -> Internal error [http_code=500]
+  响应体泄漏串计数（Database error / SQLITE / sqlx / no such）：0 0 0 0
+
+## F2 关闭：指标 label 归一 + series 上限 512 + 渲染不整表 clone
+
+代码：
+- `const METRIC_LABEL_MAX_CHARS=64`、`METRIC_SERIES_MAX=512`、`METRIC_OVERFLOW_LABEL="overflow"`；
+- `normalize_metric_label()`：按**字符**截断 64，非 `[A-Za-z0-9_.:-]` → `_`，全空 → `unknown`；
+- `normalize_turn_status_label()`：受控集合（13 值：completed/succeeded/failed/error/cancelled/interrupted/
+  timed_out/max_tokens/aborted/partial/running/unknown/other）大小写不敏感匹配，集合外 → `other`；
+- `increment_capped()`：满 512 series 后新 key 折叠进 `overflow`，`AtomicBool::swap(true)` 保证**全进程只 WARN 一次**；
+- 渲染改 `IngestMetrics::render_trace_metrics(&mut body)`：**持锁迭代直接写文本**（不再 `trace_snapshot()` 整表 clone），
+  锁序 traces→turns→rejected 三段不嵌套。
+
+集成用例：
+- `test_trace_metrics_labels_are_normalized_and_bounded`：100KB project → `/metrics` 总长 < 8KB、label 恰为 64×`A`、
+  不存在 65+ 字符 label；`proj/<weird>#` → `proj__weird__`；`status="Weird Status"` → `turn_status="other"` /
+  `trace_turns_total{status="other"}`。
+- `test_trace_metrics_series_are_capped_to_512_with_overflow`：520 个不同 project → series 行数 ≤ 513 且含
+  `pony_sentry_traces_total{project="overflow",turn_status="overflow"}`。
+
+物理收据（真实进程 18201，HTTP 上报）：
+  POST(100KB project) http_code=201
+  /metrics 体积 = 1730 字节；traces_total series = 3 行
+    pony_sentry_traces_total{project="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",turn_status="succeeded"} 1
+    pony_sentry_traces_total{project="proj__weird__",turn_status="other"} 1
+    pony_sentry_traces_total{project="unknown",turn_status="succeeded"} 1
+  超 64 字符 label 出现次数 = 0
+  —— 520 个不同 project 后 ——
+  traces_total series 行数 = 513（上限 512 + overflow）
+  pony_sentry_traces_total{project="overflow",turn_status="overflow"} 11
+  物理收据（真实进程 18202，RUST_LOG=warn）：series-overflow WARN 次数 = **1**
+  2026-10-23T14:02:12.824650Z  WARN pony_sentry_server::routes: trace metric series limit reached; folding further labels into `overflow` limit=512
+
+## F6 关闭：PATCH 非法体统一 400 `Bad request`
+
+代码：
+- 新增 `fn json_rejection_response(JsonRejection)`：413 保留 `Payload too large`（传输层语义），其余 → 400 `Bad request`；
+- `handle_update_trace` / `handle_update_issue` 形参改 `Result<Json<T>, JsonRejection>`（鉴权/路由顺序不变）；
+- ingest 复用同一映射（并保留 `invalid_params` 计数）。
+
+用例 `test_patch_rejections_are_bad_request_without_enum_echo`：
+- 非法枚举 `{"eval_status":"bogus_status"}` → 400，体**逐字符等于** `Bad request`，不含 `triage_good`/`eval_dataset`/
+  `unreviewed`/`unknown variant`/`bogus_status`；
+- 非法 JSON 体（trace 与 issue 两面）→ 400 `Bad request`，无 serde 原文；
+- 合法 PATCH 仍 200 且 note/eval_status 生效（防「一律拒绝」假绿）。
+
+物理收据：
+  非法枚举            -> Bad request [http_code=400]
+  非法 JSON（trace）  -> Bad request [http_code=400]
+  issue PATCH 非法 JSON -> Bad request [http_code=400]
+
+## F10 关闭：ingest 忽略客户端 eval_status（一律 unreviewed）
+
+代码：`handle_ingest_trace` 的 `eval_status` 由 `payload.eval_status.unwrap_or(Unreviewed)` 改为
+`EvalStatus::Unreviewed`（字段保留以兼容 wire 格式，注释标明「忽略」）。
+用例 `test_ingest_ignores_client_eval_status`：上报 `triage_good` → 响应/详情/list 均为 `unreviewed`；
+二次上报 `eval_dataset` 不得改写；`PATCH` 仍是唯一评审通道（`triage_bad` 生效）。
+物理收据：
+  POST(eval_status=triage_good) -> 201 {"eval_status":"unreviewed","turns_count":1,"turn_status":"succeeded"}
+  GET 详情 -> {"eval_status":"unreviewed","note":null}
+  PATCH(review=triage_bad) -> 200 {"eval_status":"triage_bad","note":"人工复核"}
+冻结验收 C9.6 已由 Lead 按 v1.4 重冻结为 `unreviewed`（`test(wave-7-trace-v2): amend C9.6 per contract v1.4`），Gate 3 = 11/11。
+
+================================================================================
+## 偏离与说明（须知会 Lead）
+
+1. **413 未并入 400**：请求体超限沿用 413 `Payload too large`（传输层限制，非上报语义错误）；如需「一律 400」改一行，
+   但与 2MB 上限语义相悖，默认保留。
+2. **F1 顺手修了 2 个非 `e.to_string()` 的同类泄漏**：①`PATCH /api/v1/issues/:id` 原把任意仓库错误映射为 404 并回显原文
+   （现 NotFound=404 / 其余=500）；②`serde_json::to_value` 失败曾直出 serde 原文（v1.4-7 明确 serde 原文同样不外发）。
+3. **`turn_status` 受控集合取 13 值**（含 C2 terminal 集合 + `partial`/`running`/`unknown`/`other`）；如契约要更严/更宽，
+   改 `CONTROLLED_TURN_STATUSES` 一处即可。
+4. **`overflow` 语义**：满额后**新** label 折叠进 `overflow`（已存在 label 继续自增、不折叠），故 513 行上限成立
+   （512 普通 + 1 overflow）。overflow 计数 = 溢出上报次数（本例 11）。
+5. **F10 需同 commit 文档**：`docs/trace-contract.md` §1/§4 由 Lead 同步（任务书已明确我只改代码）；本文件即代码侧口径。
+6. **DB 故障用例用「删表」而非「持锁」**：断言点相同（`RepositoryError::Database` → 500 通用文案）但更快更稳（无 busy_timeout
+   等待/抖动）；「DB 锁」路径等价，若需显式锁用例可再加（预计 5s 等待）。
+
+## 剩余缺口 / 交接
+1. `crates/server/src/routes.rs` 仍有 1 处**刻意**保留具体文案的非仓库错误：`501 Trace repository not configured`
+   （配置缺失，非 DB 泄漏）与 `400 Missing session_id or thread_id`（C5 明确要求纯文本）。如需一律统一需契约 amend。
+2. `/metrics` 的 `pony_sentry_issues_total` / `pony_sentry_events_total` 仍为全表聚合（按 status/environment 分组），
+   基数受 issues 表实际取值约束，本轮未加 series 上限（不在 F2 指名的两个指标内）。
+3. 前端 C9.11（徽标/失败原因区）不在本任务；`web/` 为他人写域。

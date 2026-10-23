@@ -1,0 +1,12 @@
+# Lead 最终门禁 v2（补修后，PG 启用）— 2026-10-23T22:15:32+08:00
+
+WORKSPACE_TEST_EXIT=0
+passed=183 failed=0
+SKIP=0
+CLIPPY_EXIT=0
+ACCEPT_EXIT=0
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.38s
+WEB_TEST_EXIT=0
+# pass 40
+# fail 0
+WEB_BUILD_EXIT=0

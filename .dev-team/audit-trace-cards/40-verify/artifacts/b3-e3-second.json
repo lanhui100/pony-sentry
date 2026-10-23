@@ -1,0 +1,3 @@
+{"session_id":"audit-probe-verify-9691a9-e3","project":"audit_probe","run_id":"run_9691a9_e3_B","turn_id":"turn_9691a9_e3_1","environment":"development","release":"dev",
+ "turns":[{"turn_id":"turn_9691a9_e3_1","status":"succeeded","error":null,"duration_ms":500,"input_tokens":999,"output_tokens":99,"attempt_index":2}],
+ "total_input_tokens":999,"total_output_tokens":99,"total_duration_ms":500,"reported_at_ms":1792755000002}

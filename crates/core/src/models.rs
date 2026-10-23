@@ -172,9 +172,23 @@ pub struct TraceRecord {
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_duration_ms: Option<i64>,
+    /// 会话级终态摘要：该 session 最后一个 turn 的 status（`C1.2`）；缺失默认 `unknown`。
+    #[serde(default = "default_turn_status")]
+    pub turn_status: String,
+    /// 该 session 已入库的 turn 数（`C1.2`）。
+    #[serde(default)]
+    pub turns_count: i64,
+    /// 评审备注（PATCH 落库，`C1.2` / `C9.7`）。
+    #[serde(default)]
+    pub note: Option<String>,
     pub reported_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// `C1.2`：`turn_status` 非空默认 `unknown`。
+fn default_turn_status() -> String {
+    "unknown".to_string()
 }
 
 /// 环境维度的状态分布（`/metrics` 的 `pony_sentry_issues_total{status,environment}` 数据源）。
@@ -192,6 +206,65 @@ pub struct TraceFilter {
     pub environment: Option<String>,
     pub release: Option<String>,
     pub project: Option<String>,
+    /// `C5`：按 run_id 过滤。
+    pub run_id: Option<String>,
+    /// `C5`：按会话级终态摘要过滤。
+    pub turn_status: Option<String>,
+    /// `C5`：按 `reported_at` 时间窗下限（含）过滤。
+    pub from: Option<DateTime<Utc>>,
+    /// `C5`：按 `reported_at` 时间窗上限（含）过滤。
+    pub to: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_trace_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "trc-1",
+            "session_id": "sess-1",
+            "run_id": null,
+            "turn_id": null,
+            "environment": "production",
+            "release": "dev",
+            "eval_status": "unreviewed",
+            "payload": {"turns": [{"turn_id": "t1", "status": "succeeded"}]},
+            "total_input_tokens": 10,
+            "total_output_tokens": 5,
+            "total_duration_ms": 100,
+            "reported_at": "2026-10-01T00:00:00Z",
+            "created_at": "2026-10-01T00:00:00Z",
+            "updated_at": "2026-10-01T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn trace_record_serde_defaults_keep_legacy_rows_decodable() {
+        let record: TraceRecord =
+            serde_json::from_value(legacy_trace_json()).expect("旧形态 JSON 必须仍可反序列化");
+        assert_eq!(record.turn_status, "unknown", "C1.2：缺省 turn_status 必须是 unknown");
+        assert_eq!(record.turns_count, 0);
+        assert!(record.note.is_none());
+    }
+
+    #[test]
+    fn trace_record_serializes_new_columns() {
+        let record: TraceRecord = serde_json::from_value(legacy_trace_json()).expect("反序列化");
+        let encoded = serde_json::to_value(&record).expect("序列化");
+        assert_eq!(encoded["turn_status"], "unknown");
+        assert_eq!(encoded["turns_count"], 0);
+        assert!(encoded["note"].is_null());
+    }
+
+    #[test]
+    fn trace_filter_new_dimensions_default_to_none() {
+        let filter = TraceFilter::default();
+        assert!(filter.run_id.is_none());
+        assert!(filter.turn_status.is_none());
+        assert!(filter.from.is_none());
+        assert!(filter.to.is_none());
+    }
 }

@@ -1,0 +1,117 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "id": "L3B-F1",
+      "file": "50-report/report-draft.md",
+      "line": 255,
+      "rule": "隐私控制被简化为『user_id 仅 dev/preprod 外发』，缺少字段级分类、服务端剥离与读侧权限边界；该建议不成立",
+      "counterexample": "user_id 写入后消费者不做任何校验（routes.rs:1199-1220 只跑脱敏，sanitizer.rs 的 SENSITIVE_KEYS 不含 user_id），environment 由客户端自报；ADR 004 明确开启 tailnet 信任后读侧边界是『整个 tailnet 只读免 token』（docs/decisions/004-console-tailnet-trust.md:65-66），且 trace 被报告自己定位为 90 天 eval 语料。job_copilot 的 is_production_like 反而把 preprod 归为生产类（trace_safety.py:982-1000），所以 dev/preprod 不是同一隐私档。报告还在 line 103 把 input_text 缺失记为诊断缺陷；生产者 input_text/output_text 上限 10k/20k（payload.py:82-83,244-252），其 redact_text 只掩手机/身份证/邮箱/bearer/云 key，姓名、地址、简历正文仍会进入同一张表。",
+      "severity": "BLOCKER"
+    },
+    {
+      "id": "L3B-F2",
+      "file": "50-report/report-draft.md",
+      "line": 178,
+      "rule": "M-01 要求 error 必含 {type,message}，与报告 §6/R1 及生产者隐私红线冲突",
+      "counterexample": "trace_safety.py:344-349 的 sanitize_error_message 对所有环境恒返回 [REDACTED]（注释：自由文本无法证明不含姓名、简历片段），报告 line 222 也写『不建议做 error_message 原文』；两条建议只能二选一。若按 M-01 实施，错误正文会把简历/JD 片段带入 trace；若不实施，M-01 声称的诊断增益为空。",
+      "severity": "BLOCKER"
+    },
+    {
+      "id": "L3B-F3",
+      "file": "50-report/report-draft.md",
+      "line": 255,
+      "rule": "把 2MB 当成行级容量上限；实际只是单次 POST body 限制，合并行与 List 响应均无上限",
+      "counterexample": "L3B E2：同 session 两次各 1.2MB turn 均 201；合并后 octet_length(payload::text)=2,400,513B，GET /traces/:id 返回 2,400,913B，GET /traces?project=job_copilot&limit=100000 返回 4,414,470B。DefaultBodyLimit 只在 routes.rs:422 的 ingest 路由上；读路径 pg_repository.rs:717-758 取全量 payload 且 limit 不 clamp，报告 I-04 只把 2,012,669B 记为观测上限，低估了单行增长与列表放大。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F4",
+      "file": "50-report/report-draft.md",
+      "line": 217,
+      "rule": "Wave A 称 extra 内 request_id/user_id 零消费者改动即可持久；实际后续上报会把 extra 整体置 null",
+      "counterexample": "L3B E1：POST1 写 extra.user_id=510/request_id/failover_policy，POST2 同 session 新 turn 不带 extra；GET payload.extra=null，turns 两条仍在。trace_merge.rs:13 以 new.clone() 为基底，只覆盖 turns/total_*；AgentTraceIngestRequest.extra 缺省序列化为 null（routes.rs:352-368）。D8 的一键回链字段在多报会话中会消失。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F5",
+      "file": "50-report/report-draft.md",
+      "line": 207,
+      "rule": "I-07『只对显式 secret 键脱敏』会取消自由文本密钥扫描；『保留仓库相对路径』被消费者二次脱敏抵消；_redactions/stats_incomplete 顶层键被丢弃",
+      "counterexample": "sanitizer.rs:31-45 的 SECRET_PATTERNS 负责扫描 tool output/prompt 里的 bearer/api key/私钥；只按 key 名脱敏会漏掉这些自由文本。routes.rs:1200 在入库前再次调用 sanitize_json_value，生产者保留的相对路径仍会被改成 [USER_HOME]。L3B E1 证明顶层 _redactions 入库后不存在；即使改放 extra 也会被 E1 的 extra=null 清掉。按 trace 记录 redaction 计数还会把『是否命中/命中几次 secret』暴露给整个 tailnet 与 eval 语料，应只做聚合指标。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F6",
+      "file": "50-report/report-draft.md",
+      "line": 192,
+      "rule": "M-03 在 turn.status 语义未修复前建 issue/webhook，缺少指纹去重、冷却与限流；events 侧的去重机制不适用于 trace",
+      "counterexample": "W-02 实测 20 轮并发丢 19 轮（报告 line 122），失败 turn 可能根本不入库→漏报；W-01 旧值优先会把 failed 钉成 running；同一失败 run 的 SSE 多次上报会每次触发 trace.failed webhook。events 侧仅在 new/regression 时通知（routes.rs:962-964），trace 路径无指纹/issue/通知状态机，直接照搬会产生风暴。更保守替代：先上 metrics + 待评审队列 + 日报摘要，webhook 延后到 W-01/W-02 修复且指纹稳定后。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F7",
+      "file": "50-report/report-draft.md",
+      "line": 167,
+      "rule": "D8 把 request_id/thread_id 当可回链字段并给满分；request_id 被 HMAC alias 化，thread_id 回传则明文落库",
+      "counterexample": "L3B E3：POST 仅带 thread_id=thread_business_secret_2026 且不带 session_id → 201，库列 session_id 与 payload.thread_id 均为原始 thread_id（thread_ref HMAC 被完全绕过，routes.rs:1202-1211）。E1 还显示 request_id 被变成 legacy_request_id_<hmac24>（trace_safety.py:507-508），failover_policy 同样走 alias（:568-576），报告 §7 示例 \"disabled\" 不成立。消费者对 thread_id 无 HMAC/白名单（routes.rs:355），若按 D8 补齐会把业务 thread_id 明文写入唯一键；报告 §1.4 又称 HMAC 是已知设计、不计缺陷，D8 扣分口径自相矛盾。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F8",
+      "file": "50-report/report-draft.md",
+      "line": 206,
+      "rule": "I-06 只记录『retention 全局固定 90d』，未发现删除按 created_at 而非 updated_at，单行/会话下活跃线程会被整行删除；也无按项目/行大小上限",
+      "counterexample": "pg_repository.rs:815 为 DELETE ... WHERE created_at < $1；ON CONFLICT（:665-677）不更新 created_at。一个第 0 天创建、第 89 天仍在上报的 session，第 90 天会被整行删除，最新证据一并丢失。报告把 retention 归为 P2 体验项，未评估证据丢失与容量增长。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F9",
+      "file": "50-report/report-draft.md",
+      "line": 137,
+      "rule": "W-04 建议把 run_id/turn_id 列语义写成『最近一次』，与既有 INV-2（列应表达该行包含哪些 run/turn）冲突，且未列入 §8 契约风险",
+      "counterexample": "同 session 先报 run_A/A1(failed) 再报 run_B/B1(succeeded)：列 run_id=run_B，payload turns=[A1(failed),B1]（报告 line 135）。按『最近一次』文档化后，按 run_id 仍无法检索失败 run A，审计链断裂；INV-2 定义见 10-contract/01-field-matrix.md:150，报告全文未引用该不变式。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-F10",
+      "file": "50-report/report-draft.md",
+      "line": 70,
+      "rule": "安全方向须双向覆盖：既评『脱敏过度』也评『该挡没挡住』；不得用 §1.4 声明边界把已证绕过豁免",
+      "counterexample": "§1.4 把脱敏写成『已知设计，不计为缺陷』，全文 0 次提及 G-04。生产者 payload.py:296 对 tool_call.error 只做 [:500] 截断、不经 redact_text；服务端 SECRET_PATTERNS（sanitizer.rs:30-41）只容双引号、词表无裸 token。G-04 实测 `'password': 'hunter2'`、`token=abc123def456` 原样入库，而本次样本 tool 参数恰为 Python repr 单引号形态——最易泄露的文本正是绕过的那类，且控制台 App.vue:875 会渲染。",
+      "severity": "BLOCKER"
+    },
+    {
+      "id": "L3B-F11",
+      "file": "50-report/report-draft.md",
+      "line": 204,
+      "rule": "服务端错误回显属信息泄露与 4xx/5xx 语义错误，须独立定性，不能并入『无 clamp』",
+      "counterexample": "I-04 只写『无 clamp』。实际 `?limit=-5&offset=-3` → HTTP 500，body=`Database error: error returned from database: OFFSET must not be negative`（routes.rs:1276-1278 用 e.to_string()）。泄露 DB 引擎/查询形态/参数名；把参数错误伪装成服务端故障，污染 5xx 预算并触发无效告警；LIMIT/OFFSET 经 format! 拼接（pg_repository.rs:753-755），当前仅靠 i64 类型挡住注入。G-03 定 P2、报告定 P1，但口径仍停在『参数校验』。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F12",
+      "file": "50-report/report-draft.md",
+      "line": 167,
+      "rule": "终稿必须吸收已裁决的独立验证缺口（G-01..G-08），尤其与自身建议直接冲突者",
+      "counterexample": "全文对 G-01..G-08 命中 0 次，§9.3 仍是『待回填』占位。D8/Wave A 主推 request_id 跨项目回链，但 G-01 已证 POST 响应 id 是幻影 id（二次上报后 GET 404）——生产者照建议把响应 id 存为深链，回链恰好永久失效；G-02 的『响应 total_* 与库内不一致』又使生产者按响应自检失真。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F13",
+      "file": "50-report/report-draft.md",
+      "line": 124,
+      "rule": "并发止血方案必须给出锁等待/连接池/写放大的量化风险，否则止血自身成为事故源",
+      "counterexample": "W-02 建议 `SELECT … FOR UPDATE`+事务，但无 lock_timeout/statement_timeout，也未评估热点 session：R11 场景（20 并发同 session）变为 20 个事务在同一行串行、每个事务重写一份可达 MB 级 jsonb（见 F3 实测 2.4MB），连接池耗尽后 POST 超时、生产者重试再叠加；拆 trace_turns 表的建议同样无行数估算与回填/retention 方案，报告只给『成本 M』。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-F14",
+      "file": "50-report/report-draft.md",
+      "line": 246,
+      "rule": "体积预算必须对无上限维度定量，不能只对单条上限给乐观估值",
+      "counterexample": "报告称『8 次 llm_calls ≈1.5–2KB，2MB 上限内』，但约束只有 `llm_calls ≤ 50`，turns[] 无条数上限；每调用含 model/provider/error_type/started_at，叠加 merge 跨请求累加（F3 已证单行 2.4MB）与 2MB 仅限单请求，行体积仍无界。缺 turns 上限、单 turn 字节上限、超限截断与 truncated 落标。",
+      "severity": "MINOR"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# Lead 独立门禁（显式 Exit Code）— 2026-10-23T21:46:11+08:00
+
+$ cargo test --workspace --offline
+EXIT=0
+passed=160 failed=0
+
+$ cargo clippy --workspace --all-targets -- -D warnings
+EXIT=0
+    Checking pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.01s
+
+$ (cd web && pnpm test)
+EXIT=0
+# pass 40
+# fail 0
+
+$ (cd web && pnpm build)
+EXIT=0
+
+✓ built in 921ms

@@ -1,0 +1,1 @@
+{"session_id":"audit-probe-e6-total-rule","project":"audit_probe","run_id":"run_probe_e6","turn_id":"turn_probe_e6_1","turns":[{"turn_id":"turn_probe_e6_1","status":"failed","duration_ms":5,"input_tokens":3,"output_tokens":4}],"total_input_tokens":999999,"total_output_tokens":1,"total_duration_ms":7,"reported_at_ms":1792754960002}

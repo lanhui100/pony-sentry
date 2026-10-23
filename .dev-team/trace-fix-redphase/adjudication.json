@@ -1,0 +1,38 @@
+{
+  "verdict": "FAIL",
+  "reviewer": "final-adjudicator (read-only)",
+  "counts": { "total": 21, "closed": 13, "partial": 5, "open": 3, "open_major": 0, "partial_major": 2 },
+  "closed": {
+    "L3A-F1": "CLOSED — 迁移已无回填 SQL（grep -rniE 'hex\\(|md5\\(|INSERT INTO trace_turns|UPDATE traces' migrations/ = 0）；Rust backfill→hydrate→turn_keys_for（crates/core/src/sqlite_repository.rs:128-143,1003）；v2_backfill_missing_turn_ids_use_runtime_sha256_keys 断言 2 行、键互异且 == turn_key_of（crates/core/tests/trace_v2_repository_test.rs:733-752）",
+    "L3A-F2": "CLOSED — 回填键由运行时 turn_key_of（sha256，trace_v2.rs:244-256）生成，测试逐条 assert_eq 回填键与 turn_key_of（trace_v2_repository_test.rs:748-751）；SQL 侧无第二套口径",
+    "L3A-F3": "CLOSED — hydrate 判据改为 existing.len() >= payload.turns.len() 才跳过（sqlite_repository.rs:997 / pg_repository.rs:973），不足即按 turn_keys_for 补齐；v2_hydration_fills_when_coverage_is_partial 断言 [c1,c2,c3] 且 turns_count=3（trace_v2_repository_test.rs:825-857）",
+    "L3A-F4": "PARTIAL — 单事务 + 固定 (id,session_id) 集已实现（pg_repository.rs:797-826；sqlite_repository.rs:824-861），但 retention 未取 pg_advisory_xact_lock（全仓仅 ingest 在 pg_repository.rs:649 持锁），并发同会话 ingest 仍可先读旧轮次、再被 retention 删除该会话行，payload.turns/trace_turns 漂移；PG 用例只覆盖串行两批（trace_v2_repository_test.rs:1063-1108）",
+    "L3A-F5": "CLOSED — merge_tool_calls 无 tool_call_id 时按 sig:<tool_name>|<arguments JSON> 归并（trace_v2.rs:403-465）；c2_3_tool_calls_without_id_merge_by_name_and_arguments 5 轮重报后仍 2 条（trace_v2.rs:975-995）",
+    "L3A-F6": "PARTIAL — 测试确已二次调用 migrate 并断言键不变（trace_v2_repository_test.rs:808-820），但第二次 backfill 扫描被 json_array_length > turns_count 短路（sqlite_repository.rs:133-136），INSERT/ON CONFLICT 插入路径仍未重放",
+    "L3A-F7": "PARTIAL — Lead 末轮门禁已带 PONY_TEST_PG_URL 且 SKIP lines=0（gates-lead-final2.txt），PG 20 并发 40 turn 有断言（trace_v2_repository_test.rs:961-1008）；但默认 cargo test --workspace 仍在缺变量时打印 SKIP 后 return（:932），冻结 C9.2 仍只用 SQLite harness（tests/acceptance_trace_v2.rs:228）",
+    "L3A-F8": "OPEN — pg_advisory_xact_lock(hashtext($1)) 32 位键空间未变（pg_repository.rs:649），仍无碰撞取舍注释/监控",
+    "L3A-F9": "OPEN — sum_turn_field 仍用裸 total + value（trace_v2.rs:472），无 checked_add/上限，debug 溢出仍会 panic",
+    "L3A-F10": "CLOSED — 旧终态→success 类新终态时清除 error/error_type/diagnostics（trace_v2.rs:132,160-164）；c2_1_terminal_to_success_clears_legacy_error_residue 覆盖正反例（trace_v2.rs:936）",
+    "L3B-F1": "CLOSED — 9 处 issue/trace 路径改用 internal_error（routes.rs:1334,1346,1353,1389,1394,1427,1441,1455）与 Bad request（:1419）；test_issue_endpoints_hide_db_error_text / test_trace_endpoints_hide_db_error_text 逐字符断言；物理收据 7 端点均 'Internal error'、泄漏串 4×0",
+    "L3B-F2": "CLOSED — project 归一/截断 64、turn_status 受控 13 值、512 series + overflow 且只 WARN 一次（routes.rs:57-124）；收据 /metrics 1730B、513 series、WARN 次数=1",
+    "L3B-F3": "CLOSED — 与 L3A-F1 同一改动：0005 仅建 schema，回填走 Rust turn_keys_for；v2_backfill_missing_turn_ids_use_runtime_sha256_keys 以真实 SQLite 实测两键互异并等于运行时键",
+    "L3B-F4": "PARTIAL — 大表全量 UPDATE/回填已移出迁移（migrations/postgres/0005_trace_turns.sql:12-33 仅 DDL），但 DDL 仍由一条 multi-statement raw_sql 隐式单事务执行（pg_repository.rs:55-58），CREATE INDEX 非 CONCURRENTLY（0005:23-24,31-33），ADD COLUMN IF NOT EXISTS 每次启动重放仍取 ACCESS EXCLUSIVE",
+    "L3B-F5": "CLOSED — migrations/postgres/0005_trace_turns.down.sql 存在，DROP INDEX/TABLE/COLUMN 全 IF EXISTS；core 收据 §7：down 后新列 0、trace_turns 0，重放 exit 0；SQLite 不支持 down 已在 0005:13-14 与 down:13 记录",
+    "L3B-F6": "CLOSED — json_rejection_response（routes.rs:130-136）统一 400，trace/issue PATCH 均改 Result<Json<T>, JsonRejection>（:1414,:1676）；test_patch_rejections_are_bad_request_without_enum_echo + 物理收据 400 'Bad request'",
+    "L3B-F7": "CLOSED — SERVER_TURN_PREFIX='turn_srv_'（trace_v2.rs:239），grep -rn turn_auto crates migrations = 0；回填/运行时测试断言 turn_srv_<16hex>",
+    "L3B-F8": "PARTIAL — trace payload 预览已限 20KB 并按对象身份缓存（web/src/App.vue:1488-1509）；但同一 finding 指出的面包屑 JSON.stringify(ev.payload)（App.vue:508）仍无长度上限",
+    "L3B-F9": "CLOSED — TURN_STATUS_FAILURE 已含 timed_out/max_tokens/aborted（App.vue:1438），badge→danger；web 收据 F9 13/13",
+    "L3B-F10": "CLOSED — ingest 忽略客户端 eval_status、固定 Unreviewed（routes.rs:1540）；test_ingest_ignores_client_eval_status；C9.6 已重冻结断言 unreviewed（tests/acceptance_trace_v2.rs:327）",
+    "L3B-F11": "OPEN — /metrics 仍挂在顶层 Router（routes.rs:732），未并入 admin_routes（:704,:735），无凭证仍可读客户端可控 project 标签"
+  },
+  "open": [
+    { "id": "L3A-F4", "severity": "MAJOR", "reason": "retention 缺 ingest 共用的 hashtext(session_id) advisory lock；固定 id 集只消除误删他会话，未消除同会话 ingest/retention 交错的 payload 漂移" },
+    { "id": "L3B-F4", "severity": "MAJOR", "reason": "PG 0005 仍单条 multi-statement raw_sql 隐式事务 + 非 CONCURRENTLY 索引，启动重放仍取 ACCESS EXCLUSIVE；仅移除全表 UPDATE" },
+    { "id": "L3A-F6", "severity": "MINOR", "reason": "幂等用例仍靠扫描条件短路，回填插入/ON CONFLICT 路径未真正重放" },
+    { "id": "L3A-F7", "severity": "MINOR", "reason": "默认门禁仍 SKIP 即通过，冻结 C9.2 仍 SQLite；PG 覆盖依赖一次性环境变量收据" },
+    { "id": "L3B-F8", "severity": "MINOR", "reason": "事件面包屑 ev.payload 全量 stringify 未加预览上限" },
+    { "id": "L3A-F8", "severity": "MINOR", "reason": "32 位 advisory 锁键碰撞风险未记录/未监控" },
+    { "id": "L3A-F9", "severity": "MINOR", "reason": "token 求和缺 checked_add，溢出仍可 panic/回绕" },
+    { "id": "L3B-F11", "severity": "MINOR", "reason": "/metrics 仍未鉴权" }
+  ]
+}

@@ -100,6 +100,49 @@ impl SqliteIssueRepository {
             tx.commit().await?;
         }
 
+        // 0005（C1.1–C1.3）：`trace_turns` 轮次表 + `traces` 聚合列 + 存量回填。
+        // SQLite 无 `ADD COLUMN IF NOT EXISTS`，按列探测守卫整份迁移（范式同 0004）；
+        // 整批在单事务内执行，任一句失败整体回滚，故不会留下"半套列"的不可重跑状态。
+        let has_trace_aggregates: bool = sqlx::query("SELECT turns_count FROM traces LIMIT 0")
+            .fetch_all(&self.pool)
+            .await
+            .is_ok();
+        if !has_trace_aggregates {
+            let mut tx = self.pool.begin().await?;
+            sqlx::raw_sql(include_str!("../../../migrations/0005_trace_turns.sql"))
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
+        // C1.3 / amend v1.4-1：回填在 Rust 侧执行——turn_id 必须与运行时
+        // `trace_v2::turn_key_of`（sha256）同构，SQL 方言无 sha256 故不写在迁移文件里。
+        self.backfill_trace_turns().await?;
+
+        Ok(())
+    }
+
+    /// 存量回填（幂等）：仅扫描「`trace_turns` 行数 < `payload.turns` 条数」的聚合行。
+    ///
+    /// 正常情况下启动扫描为 0 行；对命中的行按 turn_id 补齐缺失轮次并刷新聚合列。
+    async fn backfill_trace_turns(&self) -> Result<(), sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT session_id, payload FROM traces
+             WHERE json_type(payload, '$.turns') = 'array'
+               AND json_array_length(payload, '$.turns') > turns_count",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for row in rows {
+            let session_id: String = row.get("session_id");
+            let payload_str: String = row.get("payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+            let mut tx = self.pool.begin().await?;
+            hydrate_trace_turns(&mut tx, &session_id, &payload).await?;
+            refresh_trace_turn_aggregates(&mut tx, &session_id).await?;
+            tx.commit().await?;
+        }
         Ok(())
     }
 
@@ -652,111 +695,26 @@ impl IssueRepository for SqliteIssueRepository {
 #[async_trait]
 impl TraceRepository for SqliteIssueRepository {
     async fn record_trace(&self, trace: TraceRecord) -> Result<TraceRecord, RepositoryError> {
-        // 同 session_id 增量上报：先取旧 payload，按 turns 轮次去重合并（旧轮保留、新轮按序追加）。
-        let existing_payload: Option<String> =
-            sqlx::query("SELECT payload FROM traces WHERE session_id = ?")
-                .bind(&trace.session_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .map(|row| row.get("payload"));
-
-        let existing_json = existing_payload
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-        let merged_payload = match existing_json {
-            Some(old) => crate::trace_merge::merge_trace_payloads(&old, &trace.payload),
-            None => trace.payload.clone(),
-        };
-        let payload_str =
-            serde_json::to_string(&merged_payload).unwrap_or_else(|_| "{}".to_string());
-
-        let mut effective_in_tokens = trace.total_input_tokens;
-        let mut effective_out_tokens = trace.total_output_tokens;
-        let mut effective_duration = trace.total_duration_ms;
-
-        if let Some(t) = merged_payload
-            .get("total_input_tokens")
-            .and_then(|v| v.as_i64())
-        {
-            effective_in_tokens = Some(t);
-        }
-        if let Some(t) = merged_payload
-            .get("total_output_tokens")
-            .and_then(|v| v.as_i64())
-        {
-            effective_out_tokens = Some(t);
-        }
-        if let Some(t) = merged_payload
-            .get("total_duration_ms")
-            .and_then(|v| v.as_i64())
-        {
-            effective_duration = Some(t);
-        }
-
-        sqlx::query(
-            "INSERT INTO traces (
-                id, session_id, run_id, turn_id, environment, release, project,
-                eval_status, payload, total_input_tokens, total_output_tokens,
-                total_duration_ms, reported_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (session_id) DO UPDATE SET
-                run_id = excluded.run_id,
-                turn_id = excluded.turn_id,
-                environment = excluded.environment,
-                release = excluded.release,
-                project = excluded.project,
-                eval_status = CASE WHEN traces.eval_status != 'unreviewed' THEN traces.eval_status ELSE excluded.eval_status END,
-                payload = excluded.payload,
-                total_input_tokens = excluded.total_input_tokens,
-                total_output_tokens = excluded.total_output_tokens,
-                total_duration_ms = excluded.total_duration_ms,
-                reported_at = excluded.reported_at,
-                updated_at = excluded.updated_at"
-        )
-        .bind(&trace.id)
-        .bind(&trace.session_id)
-        .bind(&trace.run_id)
-        .bind(&trace.turn_id)
-        .bind(&trace.environment)
-        .bind(&trace.release)
-        .bind(&trace.project)
-        .bind(trace.eval_status.to_string())
-        .bind(payload_str)
-        .bind(effective_in_tokens)
-        .bind(effective_out_tokens)
-        .bind(effective_duration)
-        .bind(trace.reported_at.to_rfc3339())
-        .bind(trace.created_at.to_rfc3339())
-        .bind(trace.updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-
-        let mut saved = trace;
-        saved.payload = merged_payload;
-        Ok(saved)
+        // C3：`BEGIN IMMEDIATE` 立即取写锁，杜绝并发 read-modify-write 丢轮次（修 W-02）。
+        // 用 `begin_with` 而非裸 BEGIN：事务对象 Drop 时自动回滚，连接不会带着未结束事务回池。
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let record = record_trace_locked(&mut tx, trace).await?;
+        tx.commit().await?;
+        Ok(record)
     }
 
     async fn get_trace(&self, id: &str) -> Result<TraceRecord, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT id, session_id, run_id, turn_id, environment, release, project,
-                    eval_status, payload, total_input_tokens, total_output_tokens,
-                    total_duration_ms, reported_at, created_at, updated_at
-             FROM traces WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| RepositoryError::TraceNotFound(id.to_string()))?;
+        let row = sqlx::query(&format!("SELECT {TRACE_COLUMNS} FROM traces WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| RepositoryError::TraceNotFound(id.to_string()))?;
 
         Ok(trace_from_row(&row))
     }
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
-        let mut query = "SELECT id, session_id, run_id, turn_id, environment, release, project,
-                                eval_status, payload, total_input_tokens, total_output_tokens,
-                                total_duration_ms, reported_at, created_at, updated_at
-                         FROM traces WHERE 1=1"
-            .to_string();
+        let mut query = format!("SELECT {TRACE_COLUMNS} FROM traces WHERE 1=1");
         let mut binds: Vec<String> = Vec::new();
 
         if let Some(session_id) = &filter.session_id {
@@ -779,11 +737,29 @@ impl TraceRepository for SqliteIssueRepository {
             query.push_str(" AND project = ?");
             binds.push(project.clone());
         }
+        // C5：新增 run_id / turn_status / 时间窗（按 reported_at，含端点）筛选。
+        if let Some(run_id) = &filter.run_id {
+            query.push_str(" AND run_id = ?");
+            binds.push(run_id.clone());
+        }
+        if let Some(turn_status) = &filter.turn_status {
+            query.push_str(" AND turn_status = ?");
+            binds.push(turn_status.clone());
+        }
+        if let Some(from) = &filter.from {
+            query.push_str(" AND reported_at >= ?");
+            binds.push(from.to_rfc3339());
+        }
+        if let Some(to) = &filter.to {
+            query.push_str(" AND reported_at <= ?");
+            binds.push(to.to_rfc3339());
+        }
 
         query.push_str(" ORDER BY created_at DESC");
 
-        let limit = filter.limit.unwrap_or(50);
-        let offset = filter.offset.unwrap_or(0);
+        // C5：limit clamp 到 [1,100]；offset 不得为负（HTTP 层负责 400，仓储层兜底防负值 SQL）。
+        let limit = filter.limit.unwrap_or(50).clamp(1, 100);
+        let offset = filter.offset.unwrap_or(0).max(0);
         query.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
 
         let mut q = sqlx::query(&query);
@@ -795,20 +771,24 @@ impl TraceRepository for SqliteIssueRepository {
         Ok(rows.iter().map(trace_from_row).collect())
     }
 
-    async fn update_trace_eval_status(
+    async fn update_trace_review(
         &self,
         id: &str,
         status: EvalStatus,
+        note: Option<&str>,
     ) -> Result<TraceRecord, RepositoryError> {
         let now = Utc::now();
-        let rows_affected =
-            sqlx::query("UPDATE traces SET eval_status = ?, updated_at = ? WHERE id = ?")
-                .bind(status.to_string())
-                .bind(now.to_rfc3339())
-                .bind(id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
+        // `note` 为 None 时保留库内旧值（COALESCE），Some("") 则显式清空。
+        let rows_affected = sqlx::query(
+            "UPDATE traces SET eval_status = ?, note = COALESCE(?, note), updated_at = ? WHERE id = ?",
+        )
+        .bind(status.to_string())
+        .bind(note)
+        .bind(now.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
 
         if rows_affected == 0 {
             return Err(RepositoryError::TraceNotFound(id.to_string()));
@@ -838,16 +818,379 @@ impl TraceRepository for SqliteIssueRepository {
         batch_size: i64,
     ) -> Result<u64, RepositoryError> {
         let batch_size = batch_size.max(1);
-        let deleted = sqlx::query(
-            "DELETE FROM traces WHERE id IN (SELECT id FROM traces WHERE created_at < ? LIMIT ?)",
+        // C6：保留期按 `COALESCE(updated_at, created_at)` 判定（新活跃行不因首写时间早被误删）。
+        // amend v1.4-3：固定 id 集后再删轮次——两条 DELETE 在同一事务内（BEGIN IMMEDIATE 取写锁），
+        // 先按**已选定的 id 集**删 `trace_turns`，再删 `traces`，禁止误删未过期会话的轮次。
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT id FROM traces
+             WHERE COALESCE(updated_at, created_at) < ?
+             ORDER BY COALESCE(updated_at, created_at) ASC
+             LIMIT ?",
         )
         .bind(cutoff.to_rfc3339())
         .bind(batch_size)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
+        .fetch_all(&mut *tx)
+        .await?;
+        let ids: Vec<String> = rows.iter().map(|row| row.get::<String, _>("id")).collect();
+        if ids.is_empty() {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let delete_turns_sql = format!(
+            "DELETE FROM trace_turns
+             WHERE session_id IN (SELECT session_id FROM traces WHERE id IN ({placeholders}))"
+        );
+        let mut delete_turns = sqlx::query(&delete_turns_sql);
+        for id in &ids {
+            delete_turns = delete_turns.bind(id);
+        }
+        delete_turns.execute(&mut *tx).await?;
+        let delete_traces_sql = format!("DELETE FROM traces WHERE id IN ({placeholders})");
+        let mut delete_traces = sqlx::query(&delete_traces_sql);
+        for id in &ids {
+            delete_traces = delete_traces.bind(id);
+        }
+        let deleted = delete_traces.execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
         Ok(deleted)
     }
+}
+
+/// `traces` 行读取列（对齐 0003 + 0005 新增的 `turn_status` / `turns_count` / `note`）。
+const TRACE_COLUMNS: &str = "id, session_id, run_id, turn_id, environment, release, project, \
+     eval_status, payload, total_input_tokens, total_output_tokens, total_duration_ms, \
+     turn_status, turns_count, note, reported_at, created_at, updated_at";
+
+/// 事务内完成一次上报写入（契约 `C2` / `C3` / `C4`）：
+///
+/// 1. 读旧聚合行（供 `extra`/`tags` 深合并与 `eval_status`/`note` 保留）；
+/// 2. 逐 turn `merge_turn`（终态优先）→ `annotate_turn`（诊断标注）→ upsert `trace_turns`；
+/// 3. 按 `seq` 读回全部 turn → `merge_top_level` + `aggregate_session`（token 单一真相）；
+/// 4. upsert `traces` 聚合行并**回查库内真实行**返回（响应与库一致，修 W-08）。
+async fn record_trace_locked(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    trace: TraceRecord,
+) -> Result<TraceRecord, RepositoryError> {
+    let now = Utc::now();
+    let session_id = trace.session_id.clone();
+    let incoming_top = trace.payload.clone();
+    let existing = fetch_trace_by_session(&mut *tx, &session_id).await?;
+    let old_payload = existing
+        .as_ref()
+        .map(|row| row.payload.clone())
+        .unwrap_or(serde_json::Value::Null);
+
+    // 覆盖度兜底（amend v1.4-1）：`trace_turns` 行数 < payload.turns 条数时按 turn_id 补齐，
+    // 否则本次聚合只看得见新 turn，会把缺失的历史轮次整体丢掉。
+    hydrate_trace_turns(&mut *tx, &session_id, &old_payload).await?;
+
+    let incoming_turns = incoming_top
+        .get("turns")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    for raw_turn in incoming_turns {
+        let incoming = crate::trace_v2::normalize_incoming_turn(&raw_turn);
+        let turn_id = crate::trace_v2::turn_key_of(&incoming);
+        let (seq, mut merged) = match fetch_trace_turn(&mut *tx, &session_id, &turn_id).await? {
+            Some((seq, stored)) => (seq, crate::trace_v2::merge_turn(&stored, &incoming)),
+            None => (next_turn_seq(&mut *tx, &session_id).await?, incoming),
+        };
+        if let Some(object) = merged.as_object_mut() {
+            object.insert(
+                "turn_id".to_string(),
+                serde_json::Value::String(turn_id.clone()),
+            );
+            object.insert("seq".to_string(), serde_json::Value::from(seq));
+        }
+        crate::trace_v2::annotate_turn(&mut merged);
+        let status = crate::trace_v2::turn_status_of(&merged);
+        store_trace_turn(&mut *tx, &session_id, &turn_id, seq, &status, &merged, now).await?;
+    }
+
+    let turns = list_turn_payloads(&mut *tx, &session_id).await?;
+    let mut incoming_top = incoming_top;
+    if let Some(object) = incoming_top.as_object_mut() {
+        object.insert(
+            "session_id_source".to_string(),
+            serde_json::Value::String(crate::trace_v2::session_id_source_of(&trace.payload)),
+        );
+    }
+    let top = crate::trace_v2::merge_top_level(&old_payload, &incoming_top);
+    let payload = crate::trace_v2::aggregate_session(&turns, &top);
+    let turn_status = turns
+        .last()
+        .map(crate::trace_v2::turn_status_of)
+        .or_else(|| existing.as_ref().map(|row| row.turn_status.clone()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let turns_count = turns.len() as i64;
+    let total_input_tokens = payload
+        .get("total_input_tokens")
+        .and_then(serde_json::Value::as_i64);
+    let total_output_tokens = payload
+        .get("total_output_tokens")
+        .and_then(serde_json::Value::as_i64);
+    let total_duration_ms = payload
+        .get("total_duration_ms")
+        .and_then(serde_json::Value::as_i64);
+
+    upsert_trace_row(
+        &mut *tx,
+        &trace,
+        &payload,
+        &turn_status,
+        turns_count,
+        total_input_tokens,
+        total_output_tokens,
+        total_duration_ms,
+        now,
+    )
+    .await?;
+
+    fetch_trace_by_session(&mut *tx, &session_id)
+        .await?
+        .ok_or_else(|| RepositoryError::TraceNotFound(session_id.clone()))
+}
+
+/// 事务内按 `session_id` 读聚合行（回写后回查用）。
+async fn fetch_trace_by_session(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+) -> Result<Option<TraceRecord>, sqlx::Error> {
+    let row = sqlx::query(&format!(
+        "SELECT {TRACE_COLUMNS} FROM traces WHERE session_id = ?"
+    ))
+    .bind(session_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.as_ref().map(trace_from_row))
+}
+
+/// 按覆盖度补齐 `trace_turns`（amend v1.4-1 / L3A-F3）：
+/// 仅当「已入库行数 < `payload.turns` 条数」时，用与运行时**同一套** `trace_v2::turn_keys_for`
+/// （显式 turn_id 优先，缺失时内容 sha256 生成 `turn_srv_*` 并对同批内容碰撞加序号后缀）逐条补齐；
+/// 已存在的键跳过（幂等，不覆盖库内更新的轮次）。
+async fn hydrate_trace_turns(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+    payload: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let legacy_turns = payload
+        .get("turns")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if legacy_turns.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query("SELECT turn_id, seq FROM trace_turns WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used_seqs: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for row in &rows {
+        existing.insert(row.get::<String, _>("turn_id"));
+        used_seqs.insert(row.get::<i64, _>("seq"));
+    }
+    // 覆盖度判据：行数达到 payload.turns 条数即视为完整（不再只判"有行"）。
+    if existing.len() >= legacy_turns.len() {
+        return Ok(());
+    }
+    let keys = crate::trace_v2::turn_keys_for(&legacy_turns);
+    let now = Utc::now();
+    for (index, (raw_turn, turn_id)) in legacy_turns.iter().zip(keys.iter()).enumerate() {
+        if existing.contains(turn_id) {
+            continue;
+        }
+        let mut turn = crate::trace_v2::normalize_incoming_turn(raw_turn);
+        let mut seq = index as i64;
+        while used_seqs.contains(&seq) {
+            seq += 1;
+        }
+        used_seqs.insert(seq);
+        existing.insert(turn_id.clone());
+        if let Some(object) = turn.as_object_mut() {
+            object.insert(
+                "turn_id".to_string(),
+                serde_json::Value::String(turn_id.clone()),
+            );
+            object.insert("seq".to_string(), serde_json::Value::from(seq));
+        }
+        let status = crate::trace_v2::turn_status_of(&turn);
+        store_trace_turn(conn, session_id, turn_id, seq, &status, &turn, now).await?;
+    }
+    Ok(())
+}
+
+/// 回填/补齐后刷新聚合列（`turns_count` = 行数、`turn_status` = 末轮 status），幂等。
+async fn refresh_trace_turn_aggregates(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE traces SET
+             turns_count = (SELECT COUNT(*) FROM trace_turns WHERE session_id = ?),
+             turn_status = COALESCE((
+                 SELECT status FROM trace_turns WHERE session_id = ?
+                 ORDER BY seq DESC LIMIT 1), 'unknown')
+         WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .bind(session_id)
+    .bind(session_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// 读某轮已入库的 `(seq, payload)`；不存在返回 `None`。
+async fn fetch_trace_turn(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<(i64, serde_json::Value)>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT seq, payload FROM trace_turns WHERE session_id = ? AND turn_id = ?",
+    )
+    .bind(session_id)
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let seq: i64 = row.get("seq");
+    let payload: String = row.get("payload");
+    let payload = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+    Ok(Some((seq, payload)))
+}
+
+/// `C2.5`：新 turn 的 `seq = MAX(seq) + 1`（会话内从 0 起单调）。
+async fn next_turn_seq(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM trace_turns WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(row.get("next_seq"))
+}
+
+/// 写入/合并单条 turn（`seq` 与 `created_at` 在冲突时保持不变，保证顺序稳定）。
+async fn store_trace_turn(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+    turn_id: &str,
+    seq: i64,
+    status: &str,
+    payload: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    sqlx::query(
+        "INSERT INTO trace_turns (session_id, turn_id, seq, status, payload, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (session_id, turn_id) DO UPDATE SET
+             status = excluded.status,
+             payload = excluded.payload,
+             updated_at = excluded.updated_at",
+    )
+    .bind(session_id)
+    .bind(turn_id)
+    .bind(seq)
+    .bind(status)
+    .bind(payload)
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// 按 `seq` 升序读回会话全部 turn（聚合的唯一数据源）。
+async fn list_turn_payloads(
+    conn: &mut sqlx::SqliteConnection,
+    session_id: &str,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT payload FROM trace_turns WHERE session_id = ? ORDER BY seq ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let payload: String = row.get("payload");
+            serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null)
+        })
+        .collect())
+}
+
+/// upsert `traces` 聚合行（`created_at` 与既有 `note`/`eval_status` 不被覆盖）。
+#[allow(clippy::too_many_arguments)]
+async fn upsert_trace_row(
+    conn: &mut sqlx::SqliteConnection,
+    trace: &TraceRecord,
+    payload: &serde_json::Value,
+    turn_status: &str,
+    turns_count: i64,
+    total_input_tokens: Option<i64>,
+    total_output_tokens: Option<i64>,
+    total_duration_ms: Option<i64>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    sqlx::query(
+        "INSERT INTO traces (
+            id, session_id, run_id, turn_id, environment, release, project, eval_status, payload,
+            total_input_tokens, total_output_tokens, total_duration_ms,
+            turn_status, turns_count, note, reported_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (session_id) DO UPDATE SET
+            run_id = excluded.run_id,
+            turn_id = excluded.turn_id,
+            environment = excluded.environment,
+            release = excluded.release,
+            project = COALESCE(excluded.project, traces.project),
+            eval_status = CASE WHEN traces.eval_status != 'unreviewed'
+                               THEN traces.eval_status ELSE excluded.eval_status END,
+            payload = excluded.payload,
+            total_input_tokens = excluded.total_input_tokens,
+            total_output_tokens = excluded.total_output_tokens,
+            total_duration_ms = excluded.total_duration_ms,
+            turn_status = excluded.turn_status,
+            turns_count = excluded.turns_count,
+            note = COALESCE(traces.note, excluded.note),
+            reported_at = excluded.reported_at,
+            updated_at = excluded.updated_at",
+    )
+    .bind(&trace.id)
+    .bind(&trace.session_id)
+    .bind(&trace.run_id)
+    .bind(&trace.turn_id)
+    .bind(&trace.environment)
+    .bind(&trace.release)
+    .bind(&trace.project)
+    .bind(trace.eval_status.to_string())
+    .bind(payload)
+    .bind(total_input_tokens)
+    .bind(total_output_tokens)
+    .bind(total_duration_ms)
+    .bind(turn_status)
+    .bind(turns_count)
+    .bind(&trace.note)
+    .bind(trace.reported_at.to_rfc3339())
+    .bind(trace.created_at.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 fn trace_from_row(row: &sqlx::sqlite::SqliteRow) -> TraceRecord {
@@ -875,6 +1218,12 @@ fn trace_from_row(row: &sqlx::sqlite::SqliteRow) -> TraceRecord {
         total_input_tokens: row.get("total_input_tokens"),
         total_output_tokens: row.get("total_output_tokens"),
         total_duration_ms: row.get("total_duration_ms"),
+        // C1.2 聚合列（0005 迁移新增）：`turn_status` 缺失时按 `unknown` 降级。
+        turn_status: row
+            .try_get("turn_status")
+            .unwrap_or_else(|_| "unknown".to_string()),
+        turns_count: row.try_get("turns_count").unwrap_or(0),
+        note: row.try_get("note").unwrap_or(None),
         reported_at: chrono::DateTime::parse_from_rfc3339(&reported_at_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
