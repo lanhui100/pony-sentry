@@ -26,7 +26,8 @@
   两例 `agent-browser errors` 为空。截图：`old-frontend-timeout.png` / `new-frontend-server-error.png`。
 - **生产部署**：`bash deploy/scripts/deploy-console.sh` exit 0；自检 healthz `db:up`、匿名读 401、
   tailnet 双门（loopback+伪造 Host 401 / tailnet IP+白名单 Host 200）、登录换 Cookie、CSRF 403、
-  产物无 ADMIN_TOKEN 全通过；线上产物含 `8e3`，三读接口 200（2.5/20.7/3.3ms）。
+  产物无 ADMIN_TOKEN 全通过；线上产物含 `8e3`，三读接口 200（2.5/20.7/3.3ms）；部署后浏览器登录实测横幅 0 处、`errors` 为空，
+  截图 `prod-console-20261023.png`。
 
 ## 审查记录
 
