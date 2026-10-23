@@ -1,0 +1,208 @@
+TAP version 13
+# Subtest: R7 解析器缺失 \#1：真实仓库解析结果非 null 且等于 3000（实测 A=3000）
+ok 1 - R7 解析器缺失 \#1：真实仓库解析结果非 null 且等于 3000（实测 A=3000）
+  ---
+  duration_ms: 3.841059
+  type: 'test'
+  ...
+# Subtest: R7 边界：5000（= A+2000，A=3000）判负
+ok 2 - R7 边界：5000（= A+2000，A=3000）判负
+  ---
+  duration_ms: 0.452631
+  type: 'test'
+  ...
+# Subtest: R7 边界：5001（= A+2001，A=3000）判正
+ok 3 - R7 边界：5001（= A+2001，A=3000）判正
+  ---
+  duration_ms: 0.188429
+  type: 'test'
+  ...
+# Subtest: R7 边界：15000 判正（R3 闭区间上界）
+ok 4 - R7 边界：15000 判正（R3 闭区间上界）
+  ---
+  duration_ms: 0.138012
+  type: 'test'
+  ...
+# Subtest: R7 边界：15001 判负（超 R3 上界）
+ok 5 - R7 边界：15001 判负（超 R3 上界）
+  ---
+  duration_ms: 0.132121
+  type: 'test'
+  ...
+# Subtest: R7 边界补充：事故原型 3000 与 0 / 非整数一律判负
+ok 6 - R7 边界补充：事故原型 3000 与 0 / 非整数一律判负
+  ---
+  duration_ms: 1.028658
+  type: 'test'
+  ...
+# Subtest: R7 畸形输入：非十进制参数必须解析为 null（调用方判负）
+ok 7 - R7 畸形输入：非十进制参数必须解析为 null（调用方判负）
+  ---
+  duration_ms: 0.517545
+  type: 'test'
+  ...
+# Subtest: R7 畸形输入：畸形调用必须被 inspect 标记为 malformed（不是静默无匹配）
+ok 8 - R7 畸形输入：畸形调用必须被 inspect 标记为 malformed（不是静默无匹配）
+  ---
+  duration_ms: 0.223696
+  type: 'test'
+  ...
+# Subtest: R7 畸形/缺失：裸片段与空文本解析结果均为 null
+ok 9 - R7 畸形/缺失：裸片段与空文本解析结果均为 null
+  ---
+  duration_ms: 0.42054
+  type: 'test'
+  ...
+# Subtest: R7 解析器缺失：main.rs 文本内无匹配 → null
+ok 10 - R7 解析器缺失：main.rs 文本内无匹配 → null
+  ---
+  duration_ms: 0.513457
+  type: 'test'
+  ...
+# Subtest: R7 解析器缺失 fail-closed：零候选 / 目录不可读时仓库扫描必须 throw
+ok 11 - R7 解析器缺失 fail-closed：零候选 / 目录不可读时仓库扫描必须 throw
+  ---
+  duration_ms: 85.688419
+  type: 'test'
+  ...
+# Subtest: R7 对抗纯度：web/tests/ 内零定时等待、零随机、零跳过
+ok 12 - R7 对抗纯度：web/tests/ 内零定时等待、零随机、零跳过
+  ---
+  duration_ms: 17.275162
+  type: 'test'
+  ...
+# Subtest: R7 边界闭包：真实 API_TIMEOUT_MS 落在 (A+2000, 15000] 内
+not ok 13 - R7 边界闭包：真实 API_TIMEOUT_MS 落在 (A+2000, 15000] 内
+  ---
+  duration_ms: 3.091442
+  type: 'test'
+  location: '/home/dm/pony-sentry/web/tests/api-timeout-adversarial.test.js:182:1'
+  failureType: 'testCodeFailure'
+  error: "无法加载 web/src/lib/apiTimeout.js：ERR_MODULE_NOT_FOUND Cannot find module '/home/dm/pony-sentry/web/src/lib/apiTimeout.js' imported from /home/dm/pony-sentry/web/tests/api-timeout-adversarial.test.js"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    TestContext.<anonymous> (file:///home/dm/pony-sentry/web/tests/api-timeout-adversarial.test.js:191:12)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R4 服务端真值：递归解析 crates/**/*.rs 的全部 acquire_timeout，取 max 为 A
+ok 14 - R4 服务端真值：递归解析 crates/**/*.rs 的全部 acquire_timeout，取 max 为 A
+  ---
+  duration_ms: 8.621515
+  type: 'test'
+  ...
+# Subtest: R4 fail-closed 自检：web/tests/ 内不存在任何 skip 放行
+ok 15 - R4 fail-closed 自检：web/tests/ 内不存在任何 skip 放行
+  ---
+  duration_ms: 13.014134
+  type: 'test'
+  ...
+# Subtest: R2/R3 下界与上界：API_TIMEOUT_MS > A + 2000（严格）且 <= 15000
+not ok 16 - R2/R3 下界与上界：API_TIMEOUT_MS > A + 2000（严格）且 <= 15000
+  ---
+  duration_ms: 6.231478
+  type: 'test'
+  location: '/home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:87:1'
+  failureType: 'testCodeFailure'
+  error: "无法加载 web/src/lib/apiTimeout.js（R1/R2/R3 依赖的单一来源）：ERR_MODULE_NOT_FOUND Cannot find module '/home/dm/pony-sentry/web/src/lib/apiTimeout.js' imported from /home/dm/pony-sentry/web/tests/api-timeout-contract.test.js"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'fail'
+  stack: |-
+    importApiTimeoutConstant (file:///home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:41:12)
+    async TestContext.<anonymous> (file:///home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:94:15)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R2/R3 基准表：nfr-baseline.json\#console_api_timeout_ms 取值与预算下限冻结
+ok 17 - R2/R3 基准表：nfr-baseline.json\#console_api_timeout_ms 取值与预算下限冻结
+  ---
+  duration_ms: 3.924207
+  type: 'test'
+  ...
+# Subtest: R1 单一来源：apiTimeout.js 恰有 1 处 export const API_TIMEOUT_MS
+not ok 18 - R1 单一来源：apiTimeout.js 恰有 1 处 export const API_TIMEOUT_MS
+  ---
+  duration_ms: 0.38337
+  type: 'test'
+  location: '/home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:136:1'
+  failureType: 'testCodeFailure'
+  error: "ENOENT: no such file or directory, open '/home/dm/pony-sentry/web/src/lib/apiTimeout.js'"
+  code: 'ENOENT'
+  stack: |-
+    readFileSync (node:fs:441:20)
+    readSource (file:///home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:32:10)
+    TestContext.<anonymous> (file:///home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:138:18)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R1 App.vue：无裸数字 3000、API_TIMEOUT_MS 恰 3 处用途、不再本地定义常量
+not ok 19 - R1 App.vue：无裸数字 3000、API_TIMEOUT_MS 恰 3 处用途、不再本地定义常量
+  ---
+  duration_ms: 2.316348
+  type: 'test'
+  location: '/home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:147:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    App.vue 内仍存在裸数字 3000：1 处（R1 要求零命中）
+    + actual - expected
+    
+    + [
+    +   '3000'
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0: '3000'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///home/dm/pony-sentry/web/tests/api-timeout-contract.test.js:157:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: R5 归因语义：DB 不可达（server 5xx）必须给出服务端错误文案
+ok 20 - R5 归因语义：DB 不可达（server 5xx）必须给出服务端错误文案
+  ---
+  duration_ms: 1.365749
+  type: 'test'
+  ...
+# Subtest: R5 既有测试语义冻结：load-error.test.js 相对 HEAD 无改动且自身通过
+ok 21 - R5 既有测试语义冻结：load-error.test.js 相对 HEAD 无改动且自身通过
+  ---
+  duration_ms: 57.216402
+  type: 'test'
+  ...
+# Subtest: classifyLoadFailure distinguishes auth / timeout / network / server
+ok 22 - classifyLoadFailure distinguishes auth / timeout / network / server
+  ---
+  duration_ms: 1.633539
+  type: 'test'
+  ...
+# Subtest: loadFailureDetail gives actionable copy and prioritizes auth
+ok 23 - loadFailureDetail gives actionable copy and prioritizes auth
+  ---
+  duration_ms: 0.476337
+  type: 'test'
+  ...
+1..23
+# tests 23
+# suites 0
+# pass 19
+# fail 4
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 213.400091
