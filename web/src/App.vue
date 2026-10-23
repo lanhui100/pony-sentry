@@ -914,8 +914,7 @@ import Select from '@/components/ui/Select.vue'
 import Tabs from '@/components/ui/Tabs.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import { classifyLoadFailure, loadFailureDetail } from '@/lib/loadError'
-
-const API_TIMEOUT_MS = 3000
+import { API_TIMEOUT_MS } from '@/lib/apiTimeout'
 
 const currentView = ref('issues')
 
