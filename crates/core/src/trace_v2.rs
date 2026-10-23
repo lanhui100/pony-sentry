@@ -17,6 +17,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `amend v1.5-8`（I-06）：单个 tool_call 的 `output` / `arguments_summary` 字符上限。
 pub const TOOL_CALL_TEXT_MAX_CHARS: usize = 20_000;
 
+/// `amend v1.6-6`（L3B-E8）：`turns[].llm_calls` 保留条数上限。
+pub const LLM_CALLS_MAX: usize = 50;
+
+/// `amend v1.6-6`：`llm_calls[]` 单条允许的键白名单（其余键一律丢弃）。
+const LLM_CALL_KEYS: [&str; 11] = [
+    "model",
+    "provider",
+    "status",
+    "duration_ms",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "attempt_index",
+    "error_type",
+    "started_at_ms",
+    "started_at_estimated",
+];
+
 /// 进程级计数器（供 `/metrics` 读取；不依赖仓储实例，HTTP 侧可直接读）。
 static MERGE_LOST_TURNS: AtomicU64 = AtomicU64::new(0);
 static TRUNCATED_TOOL_TEXT: AtomicU64 = AtomicU64::new(0);
@@ -102,6 +120,8 @@ pub struct MergedTurn {
 /// 实现要求：只读原始数据、不改写事实字段；标注结果写入 `turn["diagnostics"]`。
 /// 无问题时（含上一个版本留下的 `diagnostics`）会移除该字段，保证「仅在有问题时出现」。
 pub fn annotate_turn(turn: &mut Value) -> Option<TurnDiagnostics> {
+    // `amend v1.6-6`：合并后的 turn 同样做 llm_calls 归一（覆盖 legacy/合并路径）。
+    normalize_llm_calls(turn);
     let status = turn_status_of(turn);
     let tool_calls = turn.get("tool_calls").and_then(Value::as_array);
     let tool_calls: &[Value] = tool_calls.map_or(&[], Vec::as_slice);
@@ -370,53 +390,129 @@ pub fn normalize_incoming_turns(payload: &mut Value) -> Vec<Value> {
                 map.remove("tool_calls");
             }
         }
-        // 单 tool_call 文本截断（I-06）
-        if let Some(calls) = map.get_mut("tool_calls").and_then(Value::as_array_mut) {
-            for call in calls.iter_mut() {
-                truncate_tool_call_text(call);
-            }
-        }
-        kept.push(Value::Object(map));
+        let mut turn = Value::Object(map);
+        normalize_llm_calls(&mut turn);
+        kept.push(turn);
     }
     *turns = kept;
     warnings
 }
 
-/// 单个 tool_call 的文本字段截断（`output` / `arguments_summary`），返回是否发生截断。
-fn truncate_tool_call_text(call: &mut Value) -> bool {
-    let Some(object) = call.as_object_mut() else {
-        return false;
+/// 对 `payload.turns[].tool_calls[]` 的 `output` / `arguments_summary` 做长度截断
+/// （`amend v1.5-8` / `v1.6-4`）。
+///
+/// **必须在脱敏之后调用**（先脱敏、再截断）：否则截断会把密钥/路径切成两半，令正则漏检。
+/// 客户端预置的 `truncated` 一律先剥离，**仅当服务端实际截断字段时**才置 `truncated: true`；
+/// 返回值为**实际被截断的字段数**（与进程级计数语义一致：截断字段数，not 调用数）。
+pub fn truncate_turns_tool_text(payload: &mut Value) -> u64 {
+    let Some(turns) = payload.get_mut("turns").and_then(Value::as_array_mut) else {
+        return 0;
     };
-    let mut truncated = false;
-    for field in ["output", "arguments_summary"] {
-        let Some(Value::String(text)) = object.get(field) else {
+    let mut truncated_fields = 0u64;
+    for turn in turns.iter_mut() {
+        let Some(object) = turn.as_object_mut() else {
             continue;
         };
-        if text.chars().count() <= TOOL_CALL_TEXT_MAX_CHARS {
+        let Some(calls) = object.get_mut("tool_calls").and_then(Value::as_array_mut) else {
             continue;
+        };
+        for call in calls.iter_mut() {
+            let Some(call_object) = call.as_object_mut() else {
+                continue;
+            };
+            // 客户端预置值忽略：先剥离，按服务端实际截断重新判定。
+            call_object.remove("truncated");
+            let mut truncated = false;
+            for field in ["output", "arguments_summary"] {
+                let Some(Value::String(text)) = call_object.get(field) else {
+                    continue;
+                };
+                if text.chars().count() <= TOOL_CALL_TEXT_MAX_CHARS {
+                    continue;
+                }
+                let clipped: String = text.chars().take(TOOL_CALL_TEXT_MAX_CHARS).collect();
+                call_object.insert(field.to_string(), Value::String(clipped));
+                truncated = true;
+                truncated_fields += 1;
+                TRUNCATED_TOOL_TEXT.fetch_add(1, Ordering::Relaxed);
+            }
+            if truncated {
+                call_object.insert("truncated".to_string(), Value::Bool(true));
+            }
         }
-        let clipped: String = text.chars().take(TOOL_CALL_TEXT_MAX_CHARS).collect();
-        object.insert(field.to_string(), Value::String(clipped));
-        truncated = true;
-        TRUNCATED_TOOL_TEXT.fetch_add(1, Ordering::Relaxed);
     }
-    if truncated {
-        object.insert("truncated".to_string(), Value::Bool(true));
+    truncated_fields
+}
+
+/// `amend v1.6-6`（L3B-E8）消费者侧防御：归一 `turn.llm_calls`。
+///
+/// - 非数组 → 删除该字段；
+/// - 超过 [`LLM_CALLS_MAX`] 条 → 截断；
+/// - 键白名单过滤（[`LLM_CALL_KEYS`]）；
+/// - `error_type` 必须为字符串、≤64 字符、字符集 `[A-Za-z0-9_.:-]`，否则**丢弃该条**。
+fn normalize_llm_calls(turn: &mut Value) {
+    let Some(object) = turn.as_object_mut() else {
+        return;
+    };
+    match object.get("llm_calls") {
+        None => return,
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            object.remove("llm_calls");
+            return;
+        }
     }
-    truncated
+    let Some(calls) = object.get_mut("llm_calls").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut kept: Vec<Value> = Vec::with_capacity(calls.len().min(LLM_CALLS_MAX));
+    for call in calls.drain(..) {
+        let Some(call_object) = call.as_object() else {
+            continue;
+        };
+        if let Some(error_type) = call_object.get("error_type") {
+            let valid = error_type.as_str().is_some_and(is_valid_error_type);
+            if !valid {
+                continue;
+            }
+        }
+        let mut filtered = Map::new();
+        for key in LLM_CALL_KEYS {
+            if let Some(value) = call_object.get(key) {
+                filtered.insert(key.to_string(), value.clone());
+            }
+        }
+        kept.push(Value::Object(filtered));
+        if kept.len() >= LLM_CALLS_MAX {
+            break;
+        }
+    }
+    *calls = kept;
+}
+
+/// `error_type` 合法：非空、≤64 字符、仅 `[A-Za-z0-9_.:-]`。
+fn is_valid_error_type(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() <= 64
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
 }
 
 /// 把上报的 turn 归一为可入库的 JSON 对象（`C1.1`）：对象原样返回，非对象元素包一层 `value`
 /// 以免静默丢数据（服务端强校验由 ingest 层负责，仓储层只保证不丢）。
 pub fn normalize_incoming_turn(turn: &Value) -> Value {
-    match turn {
+    let mut normalized = match turn {
         Value::Object(_) => turn.clone(),
         other => {
             let mut object = Map::new();
             object.insert("value".to_string(), other.clone());
             Value::Object(object)
         }
-    }
+    };
+    normalize_llm_calls(&mut normalized);
+    normalized
 }
 
 /// `C5`：主键来源标注——`payload.session_id_source` 已由上报方给出时原样保留，
@@ -1090,6 +1186,8 @@ mod tests {
         }]}]});
         let before = trace_truncated_total();
         assert!(normalize_incoming_turns(&mut payload).is_empty());
+        // `amend v1.6-4`：截断是独立步骤（脱敏之后），返回值 = 实际截断的**字段数**。
+        assert_eq!(truncate_turns_tool_text(&mut payload), 2);
         let call = &payload["turns"][0]["tool_calls"][0];
         assert_eq!(
             call["output"].as_str().map(|text| text.chars().count()),
@@ -1106,6 +1204,59 @@ mod tests {
             "[I-06] 截断计数必须累加（before={before}, after={}）",
             trace_truncated_total()
         );
+    }
+
+    #[test]
+    fn e5_client_preset_truncated_is_ignored_and_recomputed() {
+        let mut payload = json!({"turns": [{"turn_id": "t1", "status": "failed", "tool_calls": [
+            {"tool_call_id": "c1", "output": "short", "truncated": true}
+        ]}]});
+        assert_eq!(truncate_turns_tool_text(&mut payload), 0);
+        assert!(
+            payload["turns"][0]["tool_calls"][0].get("truncated").is_none(),
+            "[v1.6-4] 客户端预置的 truncated 必须被忽略（未实际截断不得保留）"
+        );
+
+        let long_text = "z".repeat(TOOL_CALL_TEXT_MAX_CHARS + 1);
+        let mut payload = json!({"turns": [{"turn_id": "t1", "status": "failed", "tool_calls": [
+            {"tool_call_id": "c1", "output": long_text}
+        ]}]});
+        assert_eq!(truncate_turns_tool_text(&mut payload), 1);
+        assert_eq!(payload["turns"][0]["tool_calls"][0]["truncated"], true);
+    }
+
+    #[test]
+    fn e8_llm_calls_are_capped_and_whitelisted() {
+        let calls: Vec<Value> = (0..5000)
+            .map(|index| json!({"model": format!("m{index}"), "rogue": "x", "error_type": "ValueError"}))
+            .collect();
+        let mut payload = json!({"turns": [{"turn_id": "t1", "status": "failed", "llm_calls": calls}]});
+        let warnings = normalize_incoming_turns(&mut payload);
+        assert!(warnings.is_empty(), "llm_calls 归一不产生 turn 级 warnings");
+        let kept = payload["turns"][0]["llm_calls"].as_array().expect("llm_calls");
+        assert_eq!(kept.len(), LLM_CALLS_MAX, "[L3B-E8] 必须截断到 50 条");
+        assert_eq!(kept[0]["model"], "m0");
+        assert!(kept[0].get("rogue").is_none(), "[L3B-E8] 白名单外的键必须丢弃");
+
+        let mut payload = json!({"turns": [{"turn_id": "t1", "llm_calls": [
+            {"model": "bad-text", "error_type": "ValueError: expected value at line 1 column 1"},
+            {"model": "good", "error_type": "TimeoutError"},
+            {"model": "too-long", "error_type": "x".repeat(65)},
+            {"model": "not-string", "error_type": 42}
+        ]}]});
+        normalize_incoming_turns(&mut payload);
+        let kept = payload["turns"][0]["llm_calls"].as_array().expect("llm_calls");
+        assert_eq!(
+            kept.len(),
+            1,
+            "[L3B-E8] 自由文本/超长/非字符串 error_type 必须丢弃该条：{kept:?}"
+        );
+        assert_eq!(kept[0]["model"], "good");
+
+        // 非数组 llm_calls → 删除
+        let mut payload = json!({"turns": [{"turn_id": "t1", "llm_calls": "not-an-array"}]});
+        normalize_incoming_turns(&mut payload);
+        assert!(payload["turns"][0].get("llm_calls").is_none());
     }
 
     #[test]

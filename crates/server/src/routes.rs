@@ -48,6 +48,35 @@ const DB_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 const BAD_REQUEST_BODY: &str = "Bad request";
 const INTERNAL_ERROR_BODY: &str = "Internal error";
 
+/// `L3A-E2`（契约 v1.6-2）：服务端保留载荷键——仅这三个由服务端注入；
+/// 客户端传入一律先剥离（深层嵌套同剥），其余未知键（含 `_sdk` 等）全部保留到 `_unmapped`。
+const RESERVED_PAYLOAD_KEYS: [&str; 3] = ["_redactions", "_warnings", "_unmapped"];
+/// `L3A-E2`：递归剥离保留键的深度上限（防恶意深嵌套栈溢出）。
+const RESERVED_KEY_STRIP_MAX_DEPTH: usize = 32;
+
+/// 递归剥离任意层级中的服务端保留键（`_redactions`/`_warnings`/`_unmapped`）。
+fn strip_reserved_payload_keys(value: &mut serde_json::Value, depth: usize) {
+    if depth > RESERVED_KEY_STRIP_MAX_DEPTH {
+        return;
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in RESERVED_PAYLOAD_KEYS {
+                object.remove(key);
+            }
+            for (_, child) in object.iter_mut() {
+                strip_reserved_payload_keys(child, depth + 1);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_reserved_payload_keys(item, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `W-05`（契约 v1.5-2）：`reported_at_ms` 与服务器时间的允许偏差（超过即 400）。
 const REPORTED_AT_MAX_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -291,7 +320,7 @@ impl IngestMetrics {
         }
         // `I-06`（契约 v1.5-8）：payload 体积 / 截断 / 合并丢失三个计数器。
         body.push_str(
-            "# HELP pony_sentry_trace_payload_bytes_total trace 持久化 payload 累计字节数（每次 ingest 累加）\n\
+            "# HELP pony_sentry_trace_payload_bytes_total 上报体积（客户端内容序列化字节数，非存储体积；每次 ingest 累加）\n\
              # TYPE pony_sentry_trace_payload_bytes_total counter\n",
         );
         body.push_str(&format!(
@@ -307,7 +336,7 @@ impl IngestMetrics {
             pony_sentry_core::trace_v2::trace_merge_lost_total()
         ));
         body.push_str(
-            "# HELP pony_sentry_trace_truncated_total 被截断的 tool_call 数（output/arguments_summary 超限）\n\
+            "# HELP pony_sentry_trace_truncated_total 截断字段数（tool_call 的 output/arguments_summary 超限；v1.6-4 按字段累计）\n\
              # TYPE pony_sentry_trace_truncated_total counter\n",
         );
         body.push_str(&format!(
@@ -728,7 +757,7 @@ pub struct TraceSummary {
     pub eval_status: EvalStatus,
     pub turn_status: String,
     pub turns_count: i64,
-    pub note: Option<String>,
+    // `L3B-E6`（契约 v1.6-10）：summary 投影**不含** `note`（评审备注只走详情/PATCH 回显）。
     pub total_input_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
     pub total_duration_ms: Option<i64>,
@@ -750,7 +779,6 @@ impl From<TraceRecord> for TraceSummary {
             eval_status: record.eval_status,
             turn_status: record.turn_status,
             turns_count: record.turns_count,
-            note: record.note,
             total_input_tokens: record.total_input_tokens,
             total_output_tokens: record.total_output_tokens,
             total_duration_ms: record.total_duration_ms,
@@ -1658,38 +1686,41 @@ async fn handle_ingest_trace(
         .unwrap_or(now);
 
     let mut raw_payload = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
+    let ingest_bytes = serde_json::to_vec(&raw_payload)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(0);
 
-    // `I-01`（契约 v1.5-3）：`#[serde(flatten)]` 会把未知顶层字段平铺回顶层；这里摘出来改注入
-    // `payload._unmapped`（对象）。`_` 前缀属服务端保留命名空间，客户端传入一律丢弃（防伪造
-    // `_unmapped`/`_warnings`/`_redactions`）。注入发生在脱敏之前，故 `_unmapped` 内的敏感值同样被扫。
+    // `I-01`（v1.5-3）+ `L3A-E2`（v1.6-2）：`#[serde(flatten)]` 把未知顶层字段平铺回顶层，这里摘出来
+    // 改注入 `payload._unmapped`。策略：
+    // - **除三个服务端保留名外，所有未知键（含 `_sdk` 等 `_` 前缀）一律保留**；
+    // - 保留名若被客户端传入 → 丢弃（随后由服务端注入真实值，防伪造服务端派生事实）；
+    // - 任意深层的保留名同样剥离（递归，深度上限 32）；
+    // - `_unmapped` 注入发生在脱敏之前，故其中的敏感值同样被扫。
     if let Some(object) = raw_payload.as_object_mut() {
-        let mut unmapped = serde_json::Map::new();
         for key in payload.unknown.keys() {
-            if let Some(value) = object.remove(key) {
-                if !key.starts_with('_') {
-                    unmapped.insert(key.clone(), value);
-                }
-            }
-        }
-        if !unmapped.is_empty() {
-            object.insert("_unmapped".to_string(), serde_json::Value::Object(unmapped));
+            object.remove(key);
         }
     }
-
-    // `I-02`（契约 v1.5-4）：`turns[]` 归一——非对象丢弃、status 非字符串→unknown、
-    // tool_calls 非数组忽略、超长 tool 文本截断；warnings 回写 `payload._warnings`（不拒整条请求）。
-    let turn_warnings = pony_sentry_core::trace_v2::normalize_incoming_turns(&mut raw_payload);
-    if !turn_warnings.is_empty() {
+    let mut unmapped = serde_json::Map::new();
+    for (key, value) in payload.unknown.iter() {
+        if RESERVED_PAYLOAD_KEYS.contains(&key.as_str()) {
+            continue; // 保留名：丢弃客户端伪造值，等统一注入
+        }
+        let mut owned = value.clone();
+        strip_reserved_payload_keys(&mut owned, 0);
+        unmapped.insert(key.clone(), owned);
+    }
+    // 已知字段/深层嵌套里的保留名同样剥离（客户端不能借 turns/extra 等通道伪造服务端派生键）。
+    strip_reserved_payload_keys(&mut raw_payload, 0);
+    if !unmapped.is_empty() {
         if let Some(object) = raw_payload.as_object_mut() {
-            object.insert(
-                "_warnings".to_string(),
-                serde_json::Value::Array(turn_warnings),
-            );
+            object.insert("_unmapped".to_string(), serde_json::Value::Object(unmapped));
         }
     }
 
     // 服务端二次脱敏（`M-04` / 契约 v1.5-5）：客户端 SDK 已脱敏一次，入库前按同一管道再扫一遍，
     // 防止绕过客户端的敏感字段（token/secret/password 等）落库；同时取回命中计数。
+    // 顺序遵循 v1.6-4：**先脱敏、后截断**（先截断会把跨边界的密钥切成不匹配的碎片而漏扫）。
     let (mut sanitized_payload, redactions) =
         SanitizationPipeline::sanitize_trace_value(&raw_payload);
     if let Some(object) = sanitized_payload.as_object_mut() {
@@ -1697,6 +1728,19 @@ async fn handle_ingest_trace(
             "_redactions".to_string(),
             json!({"secrets": redactions.secrets, "paths": redactions.paths}),
         );
+    }
+
+    // `I-02`（契约 v1.5-4）：`turns[]` 归一——非对象丢弃、status 非字符串→unknown、
+    // tool_calls 非数组忽略、超长 tool 文本截断；warnings 回写 `payload._warnings`（不拒整条请求）。
+    let turn_warnings =
+        pony_sentry_core::trace_v2::normalize_incoming_turns(&mut sanitized_payload);
+    if !turn_warnings.is_empty() {
+        if let Some(object) = sanitized_payload.as_object_mut() {
+            object.insert(
+                "_warnings".to_string(),
+                serde_json::Value::Array(turn_warnings),
+            );
+        }
     }
 
     // `C5`：`session_id` 优先，缺失/空白时回退 `thread_id`；两者皆空 → 400（纯文本，不含 DB 信息）。
@@ -1774,17 +1818,16 @@ async fn handle_ingest_trace(
         state.metrics.record_trace_status_conflict();
     }
 
-    // `I-06`（契约 v1.5-8）：payload 体积取**持久化行**序列化长度；合并丢失/截断读 core 进程级计数。
-    let payload_bytes = serde_json::to_vec(&saved.payload)
-        .map(|bytes| bytes.len() as u64)
-        .unwrap_or(0);
-    state.metrics.record_trace_payload_bytes(payload_bytes);
+    // `I-06`（契约 v1.6-12）：payload_bytes 计**本次上报体积**（客户端请求序列化字节），
+    // 与 HELP「上报体积（非存储体积）」一致；合并丢失/截断读 core 进程级计数。
+    state.metrics.record_trace_payload_bytes(ingest_bytes);
 
     // `M-03`（契约 v1.5-10）：失败态 turn 触发可选异步 webhook（去重键 project|tool_name|turn_status）。
     if state.notifier.should_notify(&saved.turn_status) {
         let project = saved.project.as_deref().unwrap_or("unknown");
         let tool_name = first_tool_name(&saved.payload).unwrap_or_else(|| "unknown".to_string());
-        let dedupe_key = format!("{project}|{tool_name}|{}", saved.turn_status);
+        // `E4`（v1.6-9）：去重键各分量由 notifier 侧归一（截断 64 + 非 `[A-Za-z0-9_.:-]`→`_`）。
+        let dedupe_key = TraceNotifier::dedupe_key(project, &tool_name, &saved.turn_status);
         state.notifier.notify(
             dedupe_key,
             json!({

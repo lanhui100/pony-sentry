@@ -46,3 +46,10 @@ psql "$DATABASE_URL" -f migrations/postgres/0006_trace_turn_run_id.down.sql   # 
   - `turns_count <> trace_turns 实际行数` 的会话 **0**；
   - 索引 14 个（含 `idx_trace_turns_run_id/session_seq/status`、`idx_traces_run_id/turn_status/updated_at`）。
 - 旧二进制仍在 3000 端口运行，未受影响（忽略新表/列）；正式切换新二进制属部署动作，待排期。
+
+## 执行记录 2（0006，2026-10-23 23:43 CST）
+
+- 同一方式（新二进制随机端口启动一次）应用 `0006`：`trace_turns.run_id` + 索引。
+- 执行后核验：`trace_turns` 64 行，`run_id` 非空 64 行（迁移末尾按 `traces.run_id` 幂等回填）；
+  `idx_trace_turns_run_id` 存在。旧二进制（3000 端口）仍正常运行。
+- 回滚：`psql -f migrations/postgres/0006_trace_turn_run_id.down.sql`（幂等）。

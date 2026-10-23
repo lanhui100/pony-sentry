@@ -1,0 +1,339 @@
+==============================================================
+# gates-fix2-producer.txt — 补修 task-24（契约 v1.6）门禁收据
+# 执行者: verifier   时间: 2026-10-23T23:19:51+08:00
+# 仓库: /home/dm/job_copilot   git HEAD: 874dc9e95 2026-10-23 23:10:12 +0800 feat(pony-sentry-trace): llm_calls/input_summary/采样元数据（M-02/M-05/M-06）
+# 范围: 仅 trace 上报相关文件（payload.py / exporter.py / 测试），未 git commit
+# 三项: L3B-E1 input_summary 去 head（零原文） / L3B-E3 采样语义（0.0 不归一、sampled 取真实决策）
+#       / L3B-E8 started_at_estimated 显式布尔
+==============================================================
+
+## 0. 变更范围（本轮 diffstat）
+ .../modules/agent/pony_sentry_trace/exporter.py    |  78 +++++++++-----
+ .../src/modules/agent/pony_sentry_trace/payload.py |  51 +++------
+ .../test_pony_sentry_trace_contract.py             | 115 ++++++++++++++++++---
+ 3 files changed, 170 insertions(+), 74 deletions(-)
+[exit 0]
+
+## 1. L3B-E1：build_input_summary 删除 head（只留 chars + sha256_16）
+# 实现：payload.build_input_summary 返回 {chars, sha256_16}；_normalize_input_summary 改为白名单重建
+#       （历史调用方夹带 head 时直接丢弃）；exporter 侧不再产出任何原文片段。
+
+## 2. L3B-E3：采样语义单一真源
+# 实现：_configured_sample_rate() 唯一读取点（原值钳到[0,1]，0.0 不归一）；
+#       _sampling_decision(status) -> (是否保留, 实际采样率)，_is_status_sampled 委托它；
+#       enqueue 把真实决策随事件落队（sampled/sample_rate），_payload_kwargs 透传，不再恒 True。
+
+## 3. L3B-E8：started_at_estimated 显式布尔
+# 实现：exporter 有起点时恒写布尔（真实起点 False / 回推 True）；payload 在 started_at_ms 存在时恒写该键。
+
+## 4. 门禁 1：acceptance/pony_sentry_trace
+$ api_v2/.venv/bin/python -m pytest api_v2/tests/acceptance/pony_sentry_trace -q
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/dm/job_copilot/api_v2
+configfile: pyproject.toml
+plugins: langsmith-0.7.23, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 100 items
+
+api_v2/tests/acceptance/pony_sentry_trace/adversarial/test_at1_timeout_injection.py . [  1%]
+                                                                         [  1%]
+api_v2/tests/acceptance/pony_sentry_trace/adversarial/test_at2_malformed_payload.py . [  2%]
+                                                                         [  2%]
+api_v2/tests/acceptance/pony_sentry_trace/adversarial/test_at3_concurrent_race.py . [  3%]
+                                                                         [  3%]
+api_v2/tests/acceptance/pony_sentry_trace/test_middleware_rejection_trace.py . [  4%]
+.                                                                        [  5%]
+api_v2/tests/acceptance/pony_sentry_trace/test_pony_sentry_trace_contract.py . [  6%]
+...............................................                          [ 53%]
+api_v2/tests/acceptance/pony_sentry_trace/test_trace_feature_flag_gate.py . [ 54%]
+.......                                                                  [ 61%]
+api_v2/tests/acceptance/pony_sentry_trace/test_trace_payload_completeness.py . [ 62%]
+..............................                                           [ 92%]
+api_v2/tests/acceptance/pony_sentry_trace/test_trace_thread_mapping.py . [ 93%]
+.......                                                                  [100%]
+
+============================= 100 passed in 8.43s ==============================
+[acceptance exit=0]
+$ api_v2/.venv/bin/python -m pytest api_v2/tests/unit/test_agent_runtime_trace_contract.py -q
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/dm/job_copilot/api_v2
+configfile: pyproject.toml
+plugins: langsmith-0.7.23, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 26 items
+
+api_v2/tests/unit/test_agent_runtime_trace_contract.py ................. [ 65%]
+.........                                                                [100%]
+
+============================== 26 passed in 0.20s ==============================
+[unit exit=0]
+$ api_v2/.venv/bin/python -m pytest api_v2/tests/acceptance/fastmode_trace_merge api_v2/tests/acceptance/adversarial/fastmode_trace_merge -q
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/dm/job_copilot/api_v2
+configfile: pyproject.toml
+plugins: langsmith-0.7.23, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 118 items
+
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_early_terminal_suppressed.py . [  0%]
+                                                                         [  0%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_fast_resume_merge.py . [  1%]
+                                                                         [  1%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_multi_resume.py . [  2%]
+                                                                         [  2%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_non_fast_regression.py . [  3%]
+                                                                         [  3%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_r49_terminal_delivery.py . [  4%]
+..                                                                       [  5%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_service_r50_identity_target.py . [  6%]
+.                                                                        [  7%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_transfer_contract.py . [  8%]
+...................                                                      [ 24%]
+api_v2/tests/acceptance/fastmode_trace_merge/test_transfer_empty_merge.py . [ 25%]
+                                                                         [ 25%]
+api_v2/tests/acceptance/adversarial/fastmode_trace_merge/test_at1_concurrent_race.py . [ 26%]
+...                                                                      [ 28%]
+api_v2/tests/acceptance/adversarial/fastmode_trace_merge/test_at2_malformed_inputs.py . [ 29%]
+........................................................................ [ 90%]
+.......                                                                  [ 96%]
+api_v2/tests/acceptance/adversarial/fastmode_trace_merge/test_at3_non_blocking_resources.py . [ 97%]
+..                                                                       [ 99%]
+api_v2/tests/acceptance/adversarial/fastmode_trace_merge/test_at4_fast_resume_merge.py . [100%]
+
+=============================== warnings summary ===============================
+tests/acceptance/adversarial/fastmode_trace_merge/test_at1_concurrent_race.py::test_at1_record_and_transfer_interleaving_preserves_all_segments
+  <frozen abc>:117: RuntimeWarning: coroutine 'write_run_terminal_observability_sink' was never awaited
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 118 passed, 1 warning in 1.03s ========================
+[fastmode exit=0]
+$ api_v2/.venv/bin/python -m pytest api_v2/tests/unit -q -k 'observability or trace or session_log'
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/dm/job_copilot/api_v2
+configfile: pyproject.toml
+plugins: langsmith-0.7.23, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 3766 items / 3236 deselected / 530 selected
+
+api_v2/tests/unit/test_admin.py .....                                    [  0%]
+api_v2/tests/unit/test_admin_api_contracts.py ......                     [  2%]
+api_v2/tests/unit/test_admin_observability.py .......................... [  6%]
+....                                                                     [  7%]
+api_v2/tests/unit/test_admin_session_log_w5.py ......................... [ 12%]
+.......                                                                  [ 13%]
+api_v2/tests/unit/test_agent.py ...........                              [ 15%]
+api_v2/tests/unit/test_agent_observability_boundaries.py ............... [ 18%]
+......                                                                   [ 19%]
+api_v2/tests/unit/test_agent_observability_regression_v046.py .......... [ 21%]
+.                                                                        [ 21%]
+api_v2/tests/unit/test_agent_observability_true_source.py .............. [ 24%]
+...................                                                      [ 28%]
+api_v2/tests/unit/test_agent_observability_write_tiering.py ............ [ 30%]
+                                                                         [ 30%]
+api_v2/tests/unit/test_agent_run_identity.py .....                       [ 31%]
+api_v2/tests/unit/test_agent_runtime_trace_contract.py ................. [ 34%]
+.........                                                                [ 36%]
+api_v2/tests/unit/test_api_interfaces.py ..                              [ 36%]
+api_v2/tests/unit/test_cancelled_terminal_ux_backend.py .                [ 36%]
+api_v2/tests/unit/test_config_validators.py ..........                   [ 38%]
+api_v2/tests/unit/test_metrics_contract.py .                             [ 38%]
+api_v2/tests/unit/test_metrics_runtime.py ..                             [ 39%]
+api_v2/tests/unit/test_model_failover_middleware.py .                    [ 39%]
+api_v2/tests/unit/test_rollout_critical_capabilities.py .                [ 39%]
+api_v2/tests/unit/test_rollout_migration.py .                            [ 39%]
+api_v2/tests/unit/test_rollout_observability_readiness.py .............. [ 42%]
+                                                                         [ 42%]
+api_v2/tests/unit/test_run_rollout_observability_readiness_script.py ... [ 43%]
+                                                                         [ 43%]
+api_v2/tests/unit/test_session_log_contextvar.py .....                   [ 43%]
+api_v2/tests/unit/test_session_log_debug_capture.py .........            [ 45%]
+api_v2/tests/unit/test_session_log_downgrade_job.py .................    [ 48%]
+api_v2/tests/unit/test_session_log_e2e_run_coverage.py .........         [ 50%]
+api_v2/tests/unit/test_session_log_middleware_submit.py ......           [ 51%]
+api_v2/tests/unit/test_session_log_models.py ........................... [ 56%]
+                                                                         [ 56%]
+api_v2/tests/unit/test_session_log_observe_llm_call.py .............     [ 59%]
+api_v2/tests/unit/test_session_log_pii_scrub.py ....................     [ 63%]
+api_v2/tests/unit/test_session_log_projection_worker.py .......          [ 64%]
+api_v2/tests/unit/test_session_log_provider_errors.py .................. [ 67%]
+....                                                                     [ 68%]
+api_v2/tests/unit/test_session_log_read_assembly.py .................... [ 72%]
+..                                                                       [ 72%]
+api_v2/tests/unit/test_session_log_reconciliation.py ........            [ 74%]
+api_v2/tests/unit/test_session_log_retention_cleanup.py .............    [ 76%]
+api_v2/tests/unit/test_session_log_substep.py ....                       [ 77%]
+api_v2/tests/unit/test_session_log_tap_adapter.py ..................     [ 80%]
+api_v2/tests/unit/test_session_log_tiering.py ...............            [ 83%]
+api_v2/tests/unit/test_session_log_tool_scan.py .......                  [ 84%]
+api_v2/tests/unit/test_session_log_tool_substeps.py .....                [ 85%]
+api_v2/tests/unit/test_session_log_writer.py .........                   [ 87%]
+api_v2/tests/unit/test_trace_archive.py .......                          [ 88%]
+api_v2/tests/unit/test_trace_hmac_helm_contract.py ...                   [ 89%]
+api_v2/tests/unit/test_trace_integrity_migration.py ........             [ 90%]
+api_v2/tests/unit/test_trace_retention_helm_contract.py .......          [ 92%]
+api_v2/tests/unit/test_trace_retention_job.py .........                  [ 93%]
+api_v2/tests/unit/test_trace_safety_bounded_payload.py ............      [ 96%]
+api_v2/tests/unit/test_trace_storage_consistency.py ........             [ 97%]
+api_v2/tests/unit/test_trace_writer.py ...........                       [ 99%]
+api_v2/tests/unit/test_wave4_runtime_fixes.py .                          [100%]
+
+=============================== warnings summary ===============================
+tests/unit/test_admin_api_contracts.py: 4 warnings
+tests/unit/test_admin_session_log_w5.py: 4 warnings
+tests/unit/test_api_interfaces.py: 2 warnings
+tests/unit/test_rollout_critical_capabilities.py: 1 warning
+  /home/dm/job_copilot/api_v2/src/modules/admin/thread_explorer.py:323: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    if _database_dialect_name(db) != "postgresql":
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_admin_session_log_w5.py::TestFailClosedAudit::test_audit_success_returns_true
+  /home/dm/job_copilot/api_v2/src/modules/admin/service.py:8303: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    session.add(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_admin_session_log_w5.py::TestRawAccessVolumeGuard::test_threshold_breach_raises_suspension
+tests/unit/test_admin_session_log_w5.py::TestVolumeCounterTtlSelfHeal::test_suspension_resets_counter_key
+tests/unit/test_admin_session_log_w5.py::TestVolumeCounterTtlSelfHeal::test_counter_stays_reset_after_resumed_access
+  /home/dm/job_copilot/api_v2/src/modules/admin/service.py:8360: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    session.add(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_admin_session_log_w5.py::TestVolumeCounterTtlSelfHeal::test_counter_stays_reset_after_resumed_access
+  /home/dm/job_copilot/api_v2/src/modules/admin/service.py:8388: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    session.add(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_session_log_debug_capture.py::TestEnableDisable::test_enable_writes_redis_with_ttl_and_audit_row
+tests/unit/test_session_log_debug_capture.py::TestEnableDisable::test_disable_removes_key_and_writes_audit
+  /home/dm/job_copilot/api_v2/src/modules/agent/session_log/debug_capture.py:150: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    session.add(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/test_trace_writer.py::test_trace_writer_batches_observations_into_single_commit
+  /home/dm/job_copilot/api_v2/src/modules/agent/trace_writer.py:357: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    _schedule_integrity_marker(request, "error")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============== 530 passed, 3236 deselected, 19 warnings in 54.40s ==============
+[related-unit exit=0]
+$ cd api_v2 && .venv/bin/ruff check <3 files>
+All checks passed!
+[ruff check exit=0]
+$ cd api_v2 && .venv/bin/ruff format --check <3 files>
+3 files already formatted
+[ruff format exit=0]
+
+## 5. 采样语义矩阵收据（率原值 + 实际决策，脚本直出）
+$ cd api_v2 && PYTHONPATH=. .venv/bin/python /tmp/sampling_matrix.py
+rate=0.0 rnd=None -> completed(False, 0.0) failed(True, 0.0) effective=0.0 is_sampled(completed)=False
+rate=0.25 rnd=0.1 -> completed(True, 0.25) failed(True, 0.25) effective=0.25 is_sampled(completed)=True
+rate=0.25 rnd=0.9 -> completed(False, 0.25) failed(True, 0.25) effective=0.25 is_sampled(completed)=False
+rate=1.0 rnd=None -> completed(True, 1.0) failed(True, 1.0) effective=1.0 is_sampled(completed)=True
+[sampling-matrix exit=0]
+
+## 6. 端到端 payload 收据（v1.6：零原文 + 显式 estimated）
+$ cd api_v2 && PYTHONPATH=. .venv/bin/python /tmp/e2e_trace_payload.py
+== kwargs 键（exporter → payload） ==
+['assistant_id', 'attempt_index', 'current_step', 'duration_ms', 'environment', 'input_summary', 'input_tokens', 'llm_calls', 'model', 'output_text', 'output_tokens', 'release', 'run_id', 'sample_rate', 'sampled', 'status', 'thread_id', 'total_input_tokens', 'total_output_tokens', 'trace_id', 'turn_id']
+== turns[0] 键 ==
+['attempt_index', 'degraded', 'duration_ms', 'input_summary', 'input_tokens', 'llm_calls', 'model', 'output_text', 'output_tokens', 'run_id', 'sample_rate', 'sampled', 'status', 'step', 'turn_id']
+== llm_calls ==
+[
+  {
+    "model": "workbuddy/deepseek-v4.1-flash",
+    "provider": "ponyllm",
+    "status": "success",
+    "duration_ms": 13240,
+    "input_tokens": 11835,
+    "output_tokens": 810,
+    "attempt_index": 1,
+    "started_at_ms": 1792768936448,
+    "started_at_estimated": true
+  },
+  {
+    "model": "workbuddy/deepseek-v4.1-flash",
+    "provider": "ponyllm",
+    "status": "error",
+    "duration_ms": 13870,
+    "attempt_index": 1,
+    "started_at_ms": 1792768935818,
+    "started_at_estimated": true,
+    "error_type": "ValueError"
+  },
+  {
+    "model": "workbuddy/deepseek-v4.1-flash",
+    "provider": "ponyllm",
+    "status": "aborted",
+    "duration_ms": 11029,
+    "attempt_index": 1,
+    "started_at_ms": 1792768938659,
+    "started_at_estimated": true,
+    "error_type": "CancelledError"
+  }
+]
+== input_summary ==
+{
+  "chars": 412,
+  "sha256_16": "16221a4353fdd449"
+}
+== 采样透传 ==
+{'sampled': True, 'sample_rate': 1.0}
+== 原文/明文断言 ==
+has_input_text: False
+raw_token_present: False
+tail_marker_present: False
+head_fragment_present: False
+summary_keys: ['chars', 'sha256_16']
+started_at_estimated_matrix: [True, True, True]
+input_chars: 412
+llm_calls_count: 3 failed_count: 2
+[e2e exit=0]
+
+## 7. 断言变更清单（全部为新增测试 / 收紧既有新条款，未改任何冻结的 91 条旧断言）
+  [E1] test_payload_input_summary_omits_raw_text（R48 改）：键集合精确=chars/sha256_16，head 不得存在，
+       首部片段「健合集团」/尾部标记/裸 token 均不得出现在 payload；历史调用方夹带 head 时被白名单丢弃。
+  [E1] test_payload_kwargs_replaces_input_text_with_summary_and_passes_sampling：入队行摘要键集合=2，输入片段不外发。
+  [E3] test_sampling_decision_matrix_reports_configured_rate：rate=0→completed(False,0.0)/failed(True,0.0)；
+       rate=0.25 用 monkeypatch random 双向验证；rate=1→(True,1.0)；_effective_sample_rate()==0.0 不归一。
+  [E3] test_unsampled_run_is_not_retained_at_rate_zero：rate=0 普通 run 不入队且队列为空。
+  [E3] test_failed_run_retained_at_rate_zero_self_describes_sampled_true_rate_zero（async）：失败 run 保留，
+       队列事件与最终 payload 均自描述 sampled=true / sample_rate=0.0。
+  [E3] test_payload_self_description_matches_sampled_decision_at_partial_rate：rate=0.25 保留时自描述 0.25。
+  [E8] test_payload_llm_calls_structure_and_cap：显式起点→started_at_estimated=false；回推→true；无起点→两键均不出现。
+  [E8] test_exporter_counts_failed_llm_calls_in_llm_calls_pool：回推路径三条调用均 started_at_estimated=true。
+
+## 8. 计数
+  acceptance/pony_sentry_trace：91（修复前基线）→ 100 passed（+9：v1.5-11 五条 + v1.6 四条）
+  unit/test_agent_runtime_trace_contract.py：26 passed（未改动）
+  回归：fastmode 两套 118 passed；unit 相关 530 passed；ruff check/format Exit 0
+
+## 9. 已知边界 / 未做
+  - 本轮未改 observability_sink.py（上一轮已接入 LLM 观测透传，本轮只需 payload/exporter 收口）。
+  - M-06 仍按 Lead 裁决保留 build_trace_payload 的 input_text 入参（能力面）；运行时 exporter 路径只传 input_summary。
+  - sampled/sample_rate 仅在 exporter 透传时写键（保持冻结的「turn 键集合精确=7」断言）。
+  - 未 git commit；工作区其他 M 项为他人未提交改动，未触碰。
+  - 收据生成时间：2026-10-23T23:22:40+08:00
+
+## 10. 附注（收口后复跑）
+  修正 exporter 内一处残留注释（R48 文案去掉 head 字样，纯注释、无行为变化）后复跑：
+  acceptance 100 passed / Exit 0；unit trace contract 26 passed / Exit 0；ruff check Exit 0。
+  时间：2026-10-23T23:23:41+08:00
+[recheck acceptance exit=0]
+============================= 100 passed in 7.94s ==============================
+[recheck unit exit=0]
+============================== 26 passed in 0.12s ==============================
+All checks passed!
+[recheck ruff exit=0]

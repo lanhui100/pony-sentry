@@ -132,6 +132,23 @@ async fn i06_long_tool_call_text_is_truncated_persisted_with_flag() {
     );
     assert_eq!(call["truncated"], true, "[I-06] 必须置 truncated:true");
 
+    // `amend v1.6-4`：客户端预置的 truncated 不得保留（短文本 ⇒ 服务端不置位）
+    let saved = repo
+        .record_trace(trace(
+            "ext-preset",
+            json!({"turns": [{"turn_id": "t1", "status": "succeeded", "tool_calls": [{
+                "tool_call_id": "c1", "output": "short", "truncated": true
+            }]}]}),
+        ))
+        .await
+        .expect("写入失败");
+    assert!(
+        saved.payload["turns"][0]["tool_calls"][0]
+            .get("truncated")
+            .is_none(),
+        "[v1.6-4] 未实际截断时不得保留客户端预置的 truncated"
+    );
+
     // 轮次存储（trace_turns.payload）同样落截断值
     let stored: String = sqlx::query("SELECT payload FROM trace_turns WHERE session_id = 'ext-truncate'")
         .fetch_one(&pool)
@@ -284,6 +301,104 @@ async fn i04_count_traces_matches_filter_and_order_by_switches() {
     );
 }
 
+// ── amend v1.6-3（L3A-E3）：warnings 并集去重 ───────────────────────────────
+
+#[tokio::test]
+async fn e3_warnings_union_keeps_old_and_new_indices() {
+    let (repo, _db, _pool) = sqlite_repo("warn_union").await;
+    // 首报：第 1 个元素非法 → warnings [{turn_index:1}]
+    let first = repo
+        .record_trace(trace(
+            "ext-warn-union",
+            json!({"turns": [{"turn_id": "t1", "status": "succeeded"}, "garbage"]}),
+        ))
+        .await
+        .expect("首报失败");
+    assert_eq!(
+        first.payload["_warnings"],
+        json!([{"turn_index": 1, "reason": "invalid_turn"}])
+    );
+
+    // 二报：第 0 个元素非法 → 新 warnings [{turn_index:0}]，必须与旧值并集（不得覆盖）
+    let second = repo
+        .record_trace(trace(
+            "ext-warn-union",
+            json!({"turns": ["garbage", {"turn_id": "t2", "status": "failed"}]}),
+        ))
+        .await
+        .expect("二报失败");
+    let warnings = second.payload["_warnings"].as_array().expect("_warnings");
+    assert_eq!(warnings.len(), 2, "[L3A-E3] 旧+新 warnings 必须并集：{warnings:?}");
+    assert!(
+        warnings.contains(&json!({"turn_index": 1, "reason": "invalid_turn"})),
+        "旧 turn_index=1 必须保留"
+    );
+    assert!(
+        warnings.contains(&json!({"turn_index": 0, "reason": "invalid_turn"})),
+        "新 turn_index=0 必须保留"
+    );
+
+    // 重复上报同一警告不得重复累积（按 turn_index+reason 去重）
+    let third = repo
+        .record_trace(trace(
+            "ext-warn-union",
+            json!({"turns": ["garbage", {"turn_id": "t2", "status": "failed"}]}),
+        ))
+        .await
+        .expect("三报失败");
+    assert_eq!(
+        third.payload["_warnings"].as_array().map(Vec::len),
+        Some(2),
+        "[L3A-E3] 重复警告必须去重"
+    );
+}
+
+// ── amend v1.6-5（L3A-E6/E8）：SQLite 0006 列/索引分别自愈 + run_id 回填 ───────
+
+#[tokio::test]
+async fn e6_sqlite_0006_index_self_heals_and_run_id_backfills() {
+    let (repo, _db, pool) = sqlite_repo("mig0006").await;
+    let mut record = trace(
+        "ext-0006",
+        json!({"run_id": "run-0006", "turns": [{"turn_id": "t1", "status": "succeeded"}]}),
+    );
+    record.run_id = Some("run-0006".to_string());
+    repo.record_trace(record).await.expect("写入失败");
+
+    // 模拟"部分迁移"：索引丢失 → 再次 migrate 必须自愈（列/索引分别探测）
+    sqlx::query("DROP INDEX IF EXISTS idx_trace_turns_run_id")
+        .execute(&pool)
+        .await
+        .expect("删索引失败");
+    repo.migrate().await.expect("自愈迁移失败");
+    let index_count: i64 = sqlx::query(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_trace_turns_run_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map(|row| sqlx::Row::get::<i64, _>(&row, "n"))
+    .expect("查询索引失败");
+    assert_eq!(index_count, 1, "[L3A-E6] 索引缺失必须被单独补建");
+
+    // run_id 回填：把轮次 run_id 置空后重跑 migrate，应按 traces.run_id 回填（幂等）
+    sqlx::query("UPDATE trace_turns SET run_id = NULL WHERE session_id = 'ext-0006'")
+        .execute(&pool)
+        .await
+        .expect("清空 run_id 失败");
+    repo.migrate().await.expect("回填迁移失败");
+    let run_id: Option<String> =
+        sqlx::query("SELECT run_id FROM trace_turns WHERE session_id = 'ext-0006'")
+            .fetch_one(&pool)
+            .await
+            .map(|row| sqlx::Row::get::<Option<String>, _>(&row, "run_id"))
+            .expect("读取 run_id 失败");
+    assert_eq!(
+        run_id.as_deref(),
+        Some("run-0006"),
+        "[L3A-E8] 存量轮次 run_id 必须按 traces.run_id 回填"
+    );
+}
+
 // ── PG（PONY_TEST_PG_URL 门控）───────────────────────────────────────────────
 
 mod pg {
@@ -371,6 +486,50 @@ mod pg {
                 .expect("PG run_id 过滤失败");
             assert_eq!(rows.len(), 1, "[W-04] PG run_id={run_id} 必须命中");
         }
+    }
+
+    #[tokio::test]
+    async fn e7_pg_0006_down_migration_roundtrip() {
+        let Some(pool) = isolated_pool("ponysentry_ext_down").await else {
+            return;
+        };
+        let repo = PgIssueRepository::new(pool.clone());
+        repo.migrate().await.expect("PG 迁移失败");
+
+        // down：删索引 + 列
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/postgres/0006_trace_turn_run_id.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("[L3A-E7] 0006 down 脚本必须可执行");
+        let column: i64 = sqlx::query(
+            "SELECT COUNT(*) AS n FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'trace_turns'
+               AND column_name = 'run_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map(|row| sqlx::Row::get::<i64, _>(&row, "n"))
+        .expect("查询列失败");
+        assert_eq!(column, 0, "[L3A-E7] down 后 run_id 列必须消失");
+
+        // 再次 down 幂等 + up 恢复
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/postgres/0006_trace_turn_run_id.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("[L3A-E7] down 脚本必须幂等");
+        let report = repo
+            .ensure_trace_turn_run_id_schema()
+            .await
+            .expect("0006 重新 up 失败");
+        assert_eq!(
+            (report.columns_added, report.indexes_created),
+            (1, 1),
+            "[L3A-E7] 重新 up 应补回 1 列 + 1 索引：{report:?}"
+        );
     }
 
     #[tokio::test]

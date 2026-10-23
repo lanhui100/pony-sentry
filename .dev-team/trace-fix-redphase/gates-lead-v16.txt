@@ -1,0 +1,12 @@
+# Lead 门禁 v1.6 — 2026-10-23T23:31:44+08:00
+WORKSPACE_EXIT=0
+passed=218 failed=0
+SKIP=0
+CLIPPY_EXIT=0
+acceptance_trace_v2 EXIT=0 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 72.06s
+acceptance_trace_v2_ext EXIT=0 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.07s
+acceptance_trace_v2_ext2 EXIT=0 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.17s
+WEB_EXIT=0
+# pass 40
+# fail 0
+BUILD_EXIT=0

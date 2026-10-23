@@ -1,0 +1,89 @@
+# trace v2 amend v1.6 负向红相收据（Test Agent 冻结）
+契约真源：.dev-team/trace-fix-contract.md §C9 + amend v1.6（负向/对抗语义 8 条）
+被测二进制（当前 HEAD 快照，避开并发实施者的 cargo 锁与半成品树）：
+  /tmp/red-ext2-bin/pony-sentry-server  sha256=b47245cab0e8e61e3e22b426bf5108486e93b427fdb14ea9808b2ac9d532002f
+  构建：`cargo build --offline -p pony-sentry-server` @ 2026-10-23 23:16（HEAD 树，Finished in 44.03s）
+  同步副本 target/debug/pony-sentry-server sha256=b47245cab0e8e61e3e22b426bf5108486e93b427fdb14ea9808b2ac9d532002f
+运行时间：2026-10-23 23:18（Asia/Shanghai）
+
+## 一、命令与真实结果
+
+命令：
+  PONY_SENTRY_BIN=/tmp/red-ext2-bin/pony-sentry-server \
+    cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2_ext2 --offline
+
+编译状态：PASS（零 warning；红相是断言失败，不是编译错误）
+  → Finished `test` profile [unoptimized + debuginfo] / Executable acceptance_trace_v2_ext2-c1bd0a4e4302c77e
+
+真实输出尾部：
+----
+
+
+failures:
+    v16_2_underscore_keys_kept_and_reserved_keys_overridden
+    v16_3_warnings_are_union_merged
+    v16_4_truncated_decided_by_server_only
+    v16_6_summary_omits_note_and_counts_filtered
+    v16_7_llm_calls_normalized
+    v16_8_payload_bytes_help_says_upload_volume
+
+test result: FAILED. 2 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+
+error: test failed, to rerun pass `--test acceptance_trace_v2_ext2`
+----
+Exit code: 101
+
+结果：**2 passed; 6 failed; 0 ignored; finished in 1.33s**（8 条负向用例：6 红 + 2 绿守卫）
+
+## 二、逐条判定（用例 ↔ 契约条目 ↔ 红相原因）
+
+  - [RED]  v16_8_payload_bytes_help_says_upload_volume
+      契约条目：v1.6-12 payload_bytes HELP = 上报体积
+      [v1.6-12] payload_bytes_total 的 HELP 必须标注「上报体积」而非存储体积：# HELP pony_sentry_trace_payload_bytes_total trace 持久化 payload 累计字节数（每次 ingest 累加）
+  - [RED]  v16_3_warnings_are_union_merged
+      契约条目：v1.6-3 warnings 并集去重
+      [v1.6-3] 次轮的 turn_index=0 警告必须并入：[Object {"reason": String("invalid_turn"), "turn_index": Number(1)}]
+  - [RED]  v16_2_underscore_keys_kept_and_reserved_keys_overridden
+      契约条目：v1.6-2 `_` 前缀键保留 + 保留名服务端覆盖
+      assertion `left == right` failed: [v1.6-2] `_` 前缀的未知顶层键必须保留到 _unmapped（不得特殊丢弃）
+  - [RED]  v16_4_truncated_decided_by_server_only
+      契约条目：v1.6-4 truncated 由服务端判定
+      assertion `left != right` failed: [v1.6-4b] 客户端预置的 truncated=true 必须被忽略（服务端判定）：{"output":"short","status":"error","tool_call_id":"c1","tool_name":"read","truncated":true}
+  - [RED]  v16_6_summary_omits_note_and_counts_filtered
+      契约条目：v1.6-10 summary 无 note + X-Total-Count
+      [v1.6-6] fields=summary 投影不得返回 note 键（实际键：Some(["created_at", "environment", "eval_status", "id", "note", "project", "release", "reported_at", "run_id", "session_id", "total_duration_ms", "total_input
+  - [RED]  v16_7_llm_calls_normalized
+      契约条目：v1.6-6 llm_calls 归一（≤50 / error_type 合法化）
+      [v1.6-6] llm_calls 必须截断到 <= 50 条（实际 5001）
+
+## 三、2 条非红项（[GREEN-GUARD]：能力已在 HEAD 落地，非「未实现」）
+
+  - [GREEN-GUARD] test v16_5_run_id_matches_turn_level_run ... ok
+  - [GREEN-GUARD] test v16_1_sanitizer_matches_closing_quote_of_same_kind ... ok
+
+  客观证据（同一快照二进制直连探测，均按契约期望通过）：
+  - v1.6-1：`password="ab'cd"` / `password='ab"cd'` / `password="a b"` / `api_key='a b c d'` /
+    `{"password": "ab'cd"}` / `password='a"b'` 六种写法入库后均为 `[REDACTED_SECRET]`，
+    无 `ab`/`cd` 残片；且 `*tokens` 白名单（`total_tokens=12345`/`input_tokens=678`/`max_tokens=4096`）
+    不被误遮蔽。
+  - v1.6-5：`traces.run_id=run-A` + 轮次 `run-B`/`run-C` 时，`?run_id=run-B`、`?run_id=run-C`
+    均命中该 session（v1.5 的 W-04 落地已覆盖）。
+  处置建议：两条保留为**回归守卫**（v1.6 若回退即变红）。若要求 8/8 全红，需 Lead 针对这两条
+  追加「当前 HEAD 确实缺失」的新要求，例如：
+    (1) 脱敏：新增反例 `password="ab\"cd"`（转义引号）或 `Authorization: Bearer` 之后的
+        同类引号场景，并明确期望；
+    (2) run_id：0006 迁移「存量 trace_turns.run_id 按 traces.run_id 回填一次」的黑盒可观测口径
+        （需允许我构造 0005 形态库），否则该条只有单测可覆盖。
+
+## 四、运行环境
+
+  - 实施者仍在改 crates/**（本轮 23:16 构建成功即 HEAD 可用）；用 `PONY_SENTRY_BIN` 指向快照运行，
+    避免与并发 `cargo build` 抢锁（上一波曾阻塞 >10min）。
+  - 每用例独立端口 + 独立临时 SQLite 库；未触生产库；webhook 击穿按要求交 server 单测。
+
+## 五、写域核对
+
+  ?? tests/acceptance_trace_v2_ext2.rs               （新增，8 个 #[test]，242 行）
+   M tests/Cargo.toml                                 （新增 [[test]] acceptance_trace_v2_ext2）
+  ?? .dev-team/trace-fix-redphase/red-phase-ext2.txt  （本收据）
+未触碰：crates/**、migrations/**、web/src/**、.dev-team/trace-fix-contract.md

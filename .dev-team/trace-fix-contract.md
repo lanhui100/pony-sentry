@@ -151,3 +151,17 @@
   9) **I-09**：`phase/sequence/node/attempt_index/degraded/stats_incomplete` 在契约中标记为可选生产者字段，缺失时 UI 回退；不再视为死契约。
   10) **M-03**：新增可选 `TRACE_WEBHOOK_URL`（5s 超时；去重键 `project+tool_name+last_turn_status`，10 分钟内只发一次；失败只告警不重试）；UI 增加「待评审失败」筛选预设（`turn_status=failed&eval_status=unreviewed`）；不做 issue 建单。
   11) **M-02/M-05/M-06（生产者，job_copilot）**：`turns[].llm_calls[]`（≤50，含 model/status/duration_ms/tokens/attempt_index/error_type）、`turns[].sampled/sample_rate`、`turns[].input_summary={"chars","sha256_16","head"}`（不传原文）；对应 R 条款与单测在 job_copilot 内落。
+
+- **v1.6（2026-10-23，Lead 裁决，依据 ext 波 L3-A/L3-B 审查）**：
+  1) **脱敏正则**：引号值必须匹配到**同类引号**为止（`"…"`/`'…'` 两个分支 + 未加引号分支），值内出现另一种引号不得提前闭合；补 `password="ab'cd"` 反例。
+  2) **`_` 前缀键**：客户端未知键**一律保留**到 `payload._unmapped`（含 `_sdk`）；仅服务端保留名 `_redactions/_warnings/_unmapped` 由服务端注入覆盖（客户端同名先丢弃再注入）。深层嵌套中同名保留键同样剥离。
+  3) **warnings 合并**：二次上报的 `_warnings` 与旧值**并集去重**（按 `turn_index+reason`），不得以旧值覆盖新值。
+  4) **截断顺序**：先脱敏、后截断；`truncated` 由服务端判定，客户端预置值忽略；截断计数按**字段**累计（HELP 文案改为「截断字段数」）。
+  5) **SQLite 0006**：列与索引分别探测创建；PG 提供 `0006_*.down.sql`；存量 `trace_turns.run_id` 在迁移后按 `traces.run_id` 回填一次。
+  6) **llm_calls 服务端归一**（消费者侧防御）：`turns[].llm_calls` 截断到 50 条；键白名单 `{model,provider,status,duration_ms,input_tokens,output_tokens,cached_input_tokens,attempt_index,error_type,started_at_ms,started_at_estimated}`；`error_type` 截断 64 字符且限 `[A-Za-z0-9_.:-]`；超限/非法丢弃该条。
+  7) **input_summary 不含 head**（隐私）：仅 `{"chars","sha256_16"}`；`head` 字段不再外发（原实现会逐字带出姓名/院校/薪资）。
+  8) **采样自描述语义**：`sample_rate` 取配置原值（允许 0.0）；`sampled` 取该 trace 的实际保留决策（不再恒 true）；`_effective_sample_rate` 与 `_is_status_sampled` 共用同一配置读取。
+  9) **webhook 加固**：去重表按「条目 + 字节」双上限，满时淘汰最旧（禁止 clear）；并发任务信号量（≤8）；日志只打印 URL host；去重键各分量截断到 64 字符。
+  10) **summary 投影**：`fields=summary` 不返回 `note`；`X-Total-Count` 保留（admin/信任读之后，文档标注可探测规模）。
+  11) **started_at_estimated**：显式真实起点写 `false` 或省略并文档化「缺省=未知」；接线路径无真实起点时写 `true`。
+  12) **计数器语义文档化**：`payload_bytes_total` 为「上报体积」而非存储体积（HELP 文案修正）。

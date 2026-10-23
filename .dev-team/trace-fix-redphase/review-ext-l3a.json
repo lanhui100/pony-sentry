@@ -1,0 +1,77 @@
+{
+  "verdict": "FAIL",
+  "findings": [
+    {
+      "id": "L3A-E1",
+      "file": "crates/ingest/src/sanitizer.rs",
+      "line": 39,
+      "rule": "M-04：引号值脱敏必须完整覆盖；`[\"'][^\"']{1,}[\"']` 在值内含另一种引号时提前闭合，导致密钥尾部明文残留",
+      "counterexample": "sanitize_string(\"password=\\\"ab'cd\\\"\") == \"[REDACTED_SECRET]cd\\\"\"（尾巴 `cd\"` 明文落库）；同理 `password: \"p@ss\\\"x\"` → `[REDACTED_SECRET]x\"`。含撇号/转义引号的真实口令（`\"pa'ss\"`、JSON 日志里转义的 `\\\"`）都会漏尾巴，单测只覆盖了无内嵌引号的 5 种写法。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-E2",
+      "file": "crates/server/src/routes.rs",
+      "line": 1669,
+      "rule": "I-01（契约 v1.5-3）明确「以 `_` 开头的键不特殊处理」，实现却把 `_` 前缀当保留命名空间整键丢弃，等于对这类未知字段重新引入静默丢弃",
+      "counterexample": "POST {\"session_id\":\"s1\",\"_sdk\":{\"name\":\"vue\",\"version\":\"3.4\"},\"turns\":[{...}]} → 落库 payload 中既无 `_unmapped._sdk` 也无顶层 `_sdk`，字段永久丢失且无 `_warnings`。验收测试 i_01 只发了 `foo_unknown`/`another_unknown`（非下划线），未覆盖。防伪造目标本可由「注入总是覆盖同名键」达成，无需丢数据。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-E3",
+      "file": "crates/core/src/pg_repository.rs",
+      "line": 1395,
+      "rule": "I-02：`_warnings` 二次上报必须累积/去重；当前 `merge_warnings` 以旧 `_warnings` 为基底、只追加 repository 层 warnings，而 HTTP 路径上 repository 拿到的 turns 已被 routes 归一（warnings 恒为空），本次上报的 warning 被旧值覆盖",
+      "counterexample": "同一 session 第二次上报 turns=[非对象, ...]（routes 写入 _warnings=[{turn_index:0,invalid_turn}]），旧 payload 已有 _warnings=[{turn_index:1,invalid_turn}] → merge_warnings(merged=old+[])，落库 _warnings 仍为 [{turn_index:1}]，新 warning 丢失；sqlite_repository.rs:1205 同缺陷。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3A-E4",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 401,
+      "rule": "I-06：`pony_sentry_trace_truncated_total` 计数单位与 HELP 文案不一致（每截断一个字段 +1，HELP 写「被截断的 tool_call 数」）；单个 tool_call 双字段超限时 +2 而 truncated 只置一次",
+      "counterexample": "一个 tool_call 同时超限 output+arguments_summary → 计数 +2、tool_call 数 1；routes.rs:310 的 HELP 与实际口径矛盾，按 HELP 计算的告警/看板会翻倍。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-E5",
+      "file": "crates/core/src/trace_v2.rs",
+      "line": 404,
+      "rule": "I-06：`truncated` 由服务端派生但可被客户端伪造且不可复位；截断又在脱敏前执行，截断标记与最终长度可能不一致",
+      "counterexample": "客户端提交短 output + `truncated:true` → 原样落库（未校验）；同一 turn 先截断后再次上报短 output，`merge_turn` 视 `false` 为非有效值，`truncated` 永久保持 true；20001 字符中含密钥、脱敏后 <20000 仍置 truncated:true。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-E6",
+      "file": "crates/core/src/sqlite_repository.rs",
+      "line": 120,
+      "rule": "迁移 0006（SQLite）幂等守卫只探测列存在，索引语句被一并跳过，缺列/缺索引状态不可自愈",
+      "counterexample": "曾手工 `ALTER TABLE trace_turns ADD COLUMN run_id TEXT`（或旧库列已存在但索引名不同）→ 探测命中，`CREATE INDEX IF NOT EXISTS idx_trace_turns_run_id` 永不执行，`?run_id=` 的 EXISTS 子查询退化为全表扫描。应改为「列/索引分别探测」。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-E7",
+      "file": "migrations/postgres/0006_trace_turn_run_id.sql",
+      "line": 1,
+      "rule": "迁移 0006 无 down 迁移（PG），与 C1.3 的可回滚要求不一致",
+      "counterexample": "PG 升级后无法用随仓库的 down 脚本移除 `trace_turns.run_id`/`idx_trace_turns_run_id`，只能人工 DROP COLUMN（带锁）。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-E8",
+      "file": "crates/core/src/pg_repository.rs",
+      "line": 195,
+      "rule": "W-04 存量数据未回填 `trace_turns.run_id`：0006 只加列，backfill 只处理 `jsonb_array_length(payload->'turns') > turns_count` 的行",
+      "counterexample": "已回填完的老 trace（turns_count 相等）其 trace_turns.run_id 全为 NULL，若历史 turn.run_id 与 traces.run_id 不同，`?run_id=<旧turn run>` 查不到，直到该 session 再次 ingest 触发 hydrate 才补。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3A-E9",
+      "file": "tests/acceptance_trace_v2_ext.rs",
+      "line": 179,
+      "rule": "验收测试强度不足（弱断言/未覆盖关键反例）",
+      "counterexample": "① M-04 只断言不出现 `hunter2`/`abc123`，未覆盖双引号键 `\"password\": \"x\"` 与 `*tokens` 白名单非回归（误伤 `total_input_tokens` 的版本照样绿）；② I-02 只查 `!_warnings.is_empty()`，不覆盖二次上报累积（L3A-E3 可通过）；③ I-01 不覆盖 `_` 前缀键（L3A-E2 可通过）；④ I-06 只断言 `len <= 20000`（截成 100 字符也通过），未测 `arguments_summary`、未校验计数增量与 `X-Total-Count` 在 from/to/run_id 过滤下的一致性；⑤ W-04 两条 turn 的 run_id 均等于顶层 run_id，未测 turn.run_id≠顶层 的优先级与缺省回退。",
+      "severity": "MINOR"
+    }
+  ]
+}

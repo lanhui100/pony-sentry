@@ -39,6 +39,11 @@ path = "acceptance_trace_v2.rs"
 name = "acceptance_trace_v2_ext"
 path = "acceptance_trace_v2_ext.rs"
 
+# 契约：.dev-team/trace-fix-contract.md amend v1.6（负向/对抗语义 8 条）
+[[test]]
+name = "acceptance_trace_v2_ext2"
+path = "acceptance_trace_v2_ext2.rs"
+
 [dev-dependencies]
 serde_json = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

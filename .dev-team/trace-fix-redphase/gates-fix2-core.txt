@@ -1,0 +1,75 @@
+T11 补修门禁收据（executor-db / task-22，contract amend v1.6 的 core/ingest 部分）
+================================================================================
+写域：`crates/core/src/**`、`crates/ingest/src/**`、`migrations/**`（+ `crates/core/tests/trace_v2_ext_test.rs` 测试）
+未改：`crates/server/**`、`web/**`、仓库根 `tests/**`、`docs/**`
+时间：2026-10-23 23:1x–23:2x (Asia/Shanghai)；原始日志 `.dev-team/trace-fix-redphase/gates-fix2-core.raw.log`
+
+## Gate 1 · cargo test -p pony-sentry-core -p pony-sentry-ingest --offline（PG 真实执行）
+$ PONY_TEST_PG_URL='postgresql://job_copilot:***@10.43.206.170:5432/ponysentry_test' \
+    cargo test -p pony-sentry-core -p pony-sentry-ingest --offline
+  core  unittests/src/lib.rs               running 47 → ok. 47
+  core  tests/pg_repository_test.rs        running 4  → ok. 4
+  core  tests/storage_test.rs              running 2  → ok. 2
+  core  tests/trace_repository_test.rs     running 8  → ok. 8
+  core  tests/trace_v2_ext_test.rs         running 9  → ok. 9    # 本任务新增 2 条（E3/E6）+ E7 PG + 更新 I-06
+  core  tests/trace_v2_repository_test.rs  running 25 → ok. 25
+  ingest unittests/src/lib.rs              running 35 → ok. 35   # 含本任务新增 E1 反例
+  ingest tests/sanitizer_test.rs           running 2  → ok. 2
+合计 132 passed / 0 failed；`grep -c SKIP` = 0
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core -p pony-sentry-ingest --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CLIPPY_EXIT=0
+
+## 1) L3A-E1（MAJOR）引号值闭合 —— CLOSED
+`crates/ingest/src/sanitizer.rs`：值分支改为三段
+`"(?:[^"\\]|\\.){1,}"` / `'(?:[^'\\]|\\.){1,}'` / `[^\s,;"']{4,}`：
+同类引号闭合、值内允许另一种引号、转义序列（`\"`/`\'`）整体吞掉。
+反例单测 `e1_quoted_values_close_on_same_quote_only`：
+  - `password="ab'cd"` → 整值 `[REDACTED_SECRET]`，无 `'cd` 残留；
+  - `password='ab"cd'` → 整值脱敏，无 `ab` 残留；
+  - `password: "p@ss\"x"` → 整值脱敏，无 `p@ss` 残留；
+  三者 `counts.secrets == 1`。既有 5 写法正例与 `*tokens` 白名单用例保持通过。
+
+## 2) L3A-E3（MAJOR）warnings 并集去重 —— CLOSED
+`merge_warnings`（PG/SQLite 各一份）改为按 `(turn_index, reason)` 去重（`warning_identity`），
+旧值先入集、新值仅在未见时追加（旧值不会覆盖新值），上限 100。
+用例 `e3_warnings_union_keeps_old_and_new_indices`：首报 `{turn_index:1}` + 二报 `{turn_index:0}`
+⇒ 两条都在；第三次重复上报同警告 ⇒ 仍 2 条（去重）。
+
+## 3) L3A-E5（MAJOR）截断顺序/判定/计数 —— CLOSED
+- 截断从 `normalize_incoming_turns` 拆出为独立函数
+  `trace_v2::truncate_turns_tool_text(&mut Value) -> u64`（返回**实际截断字段数**）；
+  PG/SQLite `record_trace_locked` 在 `normalize_incoming_turns` 之后调用 ——
+  HTTP 路径顺序为 routes 脱敏 → 仓储归一 → 截断，满足「先脱敏、后截断」。
+- 客户端预置 `truncated` 一律先剥离，仅服务端实际截断时置 `true`
+  （单测 `e5_client_preset_truncated_is_ignored_and_recomputed` + 仓储级断言）。
+- 计数语义：进程级 `TRUNCATED_TOOL_TEXT` 按**字段**累加；`trace_truncated_total()` getter 不变；
+  HELP 文案由 HTTP 侧 writing 时标注「截断字段数」。
+
+## 4) L3A-E6/E7/E8 迁移 —— CLOSED
+- E6（SQLite 0006）：`migrate()` 改为**列与索引分别探测创建**（列缺失 → `ALTER`；索引缺失 →
+  `CREATE INDEX IF NOT EXISTS`），部分迁移可自愈。用例 `e6_sqlite_0006_index_self_heals_and_run_id_backfills`
+  （DROP INDEX → 再 migrate → 索引恢复）。
+- E7（PG down）：新增 `migrations/postgres/0006_trace_turn_run_id.down.sql`（`DROP INDEX` +
+  `DROP COLUMN IF EXISTS`，幂等）。用例 `pg::e7_pg_0006_down_migration_roundtrip`：down → 列消失 →
+  down 重放幂等 → `ensure_trace_turn_run_id_schema()` 重新 up 报告 `(1,1)`。
+- E8（run_id 回填）：迁移末尾执行一次性幂等回填
+  `UPDATE trace_turns SET run_id = (SELECT run_id FROM traces WHERE traces.session_id = trace_turns.session_id) WHERE run_id IS NULL`
+  （PG/SQLite 同步）；用例同上（清空 run_id → migrate → 按 `traces.run_id` 回填）。
+
+## 5) L3B-E8（llm_calls 消费者防御）—— CLOSED
+`trace_v2::normalize_llm_calls`（在 `normalize_incoming_turns`、`normalize_incoming_turn`（hydrate 路径）
+与 `annotate_turn`（合并后防御）三处调用）：
+  - 非数组 → 删除字段；超过 `LLM_CALLS_MAX = 50` 条 → 截断；
+  - 键白名单 11 项 `{model,provider,status,duration_ms,input_tokens,output_tokens,cached_input_tokens,
+    attempt_index,error_type,started_at_ms,started_at_estimated}`，其余丢弃；
+  - `error_type` 必须字符串、非空、≤64 字符、字符集 `[A-Za-z0-9_.:-]`，否则**丢弃该条**。
+单测 `e8_llm_calls_are_capped_and_whitelisted`：5000 条 → 50 条且白名单外键消失；自由文本
+`error_type`（含空格）/ 65 字符 / 非字符串 各丢弃；非数组 `llm_calls` 被删除。
+
+## 不在本任务写域（转交）
+- v1.6-2 `payload._unmapped`（未知键保留）：HTTP ingest 层（`crates/server/src/routes.rs`），需 HTTP 侧实现。
+- v1.6-7/8/9/10/11/12（input_summary 去 head、采样自描述、webhook 加固、summary 投影、
+  started_at_estimated、payload_bytes HELP）：生产者/HTTP 侧。

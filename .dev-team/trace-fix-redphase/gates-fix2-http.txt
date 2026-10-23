@@ -1,0 +1,100 @@
+补修门禁收据（契约 v1.6 / L3A-E2 · L3B-E4 · L3B-E6 · L3B-E7）— task-23
+================================================================================
+契约：`.dev-team/trace-fix-contract.md` amend v1.6
+写域：`crates/server/src/{routes.rs,trace_webhook.rs}`、`crates/server/tests/api_test.rs`
+未触碰：`crates/core/`、`crates/ingest/`、`migrations/`、`web/`、根 `tests/`、`docs/`、`README.md`（README/docs 由 Lead 同 commit）
+时间：2026-10-23 23:15–23:29 (Asia/Shanghai)
+
+## Gate 1 · cargo test --workspace --offline
+   合计：**218 passed / 0 failed / 0 ignored**     EXIT=0
+   （server lib 24：含新增 `trace_webhook` 8 条单测；api_test 33：上轮 31 + 本任务 2）
+
+## Gate 2 · cargo clippy --workspace --all-targets -- -D warnings
+   Finished `dev` profile [unoptimized + debuginfo] target(s)
+   CLIPPY_EXIT=0
+
+## Gate 3 · 冻结验收（双套，均未改动）
+$ cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2       --offline
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 71.27s   ACCEPT_EXIT=0
+$ cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2_ext   --offline
+    test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.08s    EXT_EXIT=0
+
+================================================================================
+## 1 · L3A-E2（MAJOR）未知顶层键保留策略
+
+实现（`routes.rs`）：
+- 新增 `RESERVED_PAYLOAD_KEYS = ["_redactions","_warnings","_unmapped"]`、`RESERVED_KEY_STRIP_MAX_DEPTH = 32`；
+- 新增 `strip_reserved_payload_keys(&mut Value, depth)`：递归剥离对象/数组中的保留键（深度上限 32）；
+- ingest 管线（顺序见 §5）：
+  1. `#[serde(flatten)]` 平铺回顶层的未知键**先整体摘下**；
+  2. 保留名（三个）→ **丢弃**（不进入 `_unmapped`），随后由服务端注入真实值；
+  3. **其余未知键（含 `_sdk`/`_trace_hint` 等 `_` 前缀）一律保留**到 `payload._unmapped`；
+  4. 每个未知值在入 `_unmapped` 前递归剥离内部保留键；
+  5. 对**整个 raw payload**（含 turns/extra 等已知字段）再递归剥离一次，客户端无法借已知通道伪造服务端派生键。
+
+集成用例 `test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped`：
+- `_sdk`/`_trace_hint` 保留；伪造 `_redactions/_warnings/_unmapped` 被剥夺；
+- `blob._warnings`、`blob.inner._redactions`、`turns[0].extra_blob._unmapped` 全部剥离且兄弟字段保留。
+
+物理收据（真实二进制 18501）：
+```
+_unmapped 键: ["_sdk","_trace_hint","blob"]
+_redactions(服务端注入): {"paths":0,"secrets":1}        # 客户端伪造的 9999 被替换
+blob（深层保留名剥离后）: {"inner":{"ok":true},"keep":1}
+```
+
+## 2 · L3B-E4（MAJOR）webhook 加固
+
+实现（`trace_webhook.rs` 重写）：
+- **双上限去重表**：`DedupeTable{entries, total_bytes}`，`DEDUPE_MAX_ENTRIES=1024` + `DEDUPE_MAX_BYTES=256KB`；
+  超限时 `min_by_key(sent_at)` **淘汰最旧**，**无 `clear()`**（防"清表即击穿"）；
+- **并发闸门**：`Semaphore(8)`，`spawn` 得到的任务内 `acquire_owned()`，permit 持有到整个 HTTP 请求结束；
+- **客户端复用**：`OnceLock<reqwest::Client>`（5s 超时），全进程单实例；
+- **日志脱敏**：构造期算 `url_digest = scheme://host[:port]`，所有日志只打 `host=` 字段，绝不打完整 URL/query；
+- **去重键归一**：`dedupe_key(project, tool, status)` 各分量截断 64 字符 + 非 `[A-Za-z0-9_.:-]`→`_`。
+
+新增单测（8 条，模块内可访问私有表）：
+`entries_cap_evicts_oldest_and_keeps_recent_dedupe`（淘汰最旧但**未淘汰的新 key 仍被去重**，不能击穿）、
+`bytes_cap_evicts_oldest_and_never_clears_table`（2200 条超 256KB 后 entries>0 且双上限均受控）、
+`concurrent_claims_keep_table_bounded`（100 线程 × 200 key 后仍受控）、
+`dedupe_key_parts_are_normalized_and_truncated`、`url_digest_never_exposes_path_or_query`、
+`dedupe_window_suppresses_repeats_and_expires`、`only_failure_terminal_states_are_notifiable`、
+`disabled_without_url_and_empty_string_counts_as_disabled`。
+
+物理收据（URL 带 query token `?token=SECRET_TOKEN_123`）：
+```
+日志中 SECRET_TOKEN_123 出现次数（须 0）: 0
+日志中 webhook host 行: host=http://127.0.0.1:18502
+严格同键第二次/第三次 failed ingest → webhook 条数 2 → 2 → 2（10 分钟内去重生效）
+```
+
+## 3 · L3B-E6 `fields=summary` 移除 note
+
+- `TraceSummary` 删除 `note` 字段（含 `From<TraceRecord>` 映射）；`X-Total-Count` 保留不变。
+- 集成用例 `test_list_order_summary_projection_and_total_count` 已同步断言 `note` 不存在（原断言"必须保留 note"改为"不得返回"）。
+- 物理收据：
+```
+x-total-count: 1
+summary 键: [created_at, environment, eval_status, id, project, release, reported_at, run_id,
+             session_id, total_duration_ms, total_input_tokens, total_output_tokens, turn_id,
+             turn_status, turns_count, updated_at]      # 无 note / 无 payload
+```
+> 说明：ext 冻结用例 `i_04_summary_projection_and_total_count_header` **未断言 note**，故无需裁决；已实测 EXT_EXIT=0。
+
+## 4 · L3B-E7 `payload_bytes` HELP 文案
+
+- 改为：`# HELP pony_sentry_trace_payload_bytes_total 上报体积（客户端内容序列化字节数，非存储体积；每次 ingest 累加）`
+- 集成用例 `test_metrics_payload_bytes_help_describes_upload_volume` 断言 HELP 含「上报体积」与「非存储体积」。
+- 顺带对齐 v1.6-4：`pony_sentry_trace_truncated_total` 的 HELP 改为「截断字段数」。
+
+## 5 · 额外对齐（同写域，非本任务清单但同契约 v1.6）
+
+1. **v1.6-4 顺序**：ingest 管线由「归一(截断) → 脱敏」改为「**脱敏 → 归一(截断)**」——先截断会把跨 20000 边界的密钥切成不匹配碎片而漏扫；ext I-06/I-07 双绿验证。
+2. 注入顺序：`_unmapped`（脱敏前，值也被扫）→ 脱敏 + `_redactions`（脱敏后，计数不被改写）→ 归一 + `_warnings`（最后，服务端生成）。
+3. v1.6-3（`_warnings` 并集去重）与 v1.6-4（客户端 `truncated` 预置值忽略）属 **core `aggregate_session`/`normalize_incoming_turns` 职责**，本轮 HTTP 侧未重复实现；如核出仍未覆盖请转 auditor-core。
+
+## 6 · 偏离与残余风险
+1. **Semaphore 在任务内 acquire**（契约措辞是"spawn 前"）：效果等价（在飞请求 ≤8），且不阻塞 ingest 主链路；如需严格"spawn 前"需把 `notify` 改 async（会牵动 handler 同步语义），当前不做。
+2. **webhook 去重仍是进程内**：多副本各去重（同一失败最多 N 次）。全局去重需外部存储，超出本波范围。
+3. **深层剥离覆盖全 payload**（不仅 `_unmapped`）：客户端在 `turns`/`extra` 里塞 `_warnings` 也会被剥离；若未来出现"合法业务键名恰好为 `_warnings`"的诉求需走契约 amend。
+4. `payload_bytes_total` 口径仍为"每次 ingest 观测到的持久化 payload 序列化字节"（E7 只改文档语义，不改计数口径）。

@@ -2118,8 +2118,8 @@ async fn test_list_order_summary_projection_and_total_count() {
     assert_eq!(row["turn_status"], "succeeded");
     assert_eq!(row["turns_count"], 1);
     assert!(
-        row.get("note").is_some(),
-        "summary 必须保留 note 键（可为 null）"
+        row.get("note").is_none(),
+        "L3B-E6：summary 投影不得返回 note（评审备注只走详情）：{row}"
     );
 
     // 4) 非法 fields → 400
@@ -2316,5 +2316,115 @@ async fn test_trace_webhook_notifies_failures_with_ten_minute_dedupe() {
         received.lock().unwrap().len(),
         2,
         "M-03：不同 tool 属于不同去重键，应再次投递"
+    );
+}
+
+#[tokio::test]
+async fn test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped() {
+    let server = trace_test_server().await;
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v16-e2-1",
+            // 非保留 `_` 前缀键：必须保留（L3A-E2）
+            "_sdk": {"name": "sdk", "build": 7},
+            "_trace_hint": "abc",
+            // 三个保留名：客户端伪造 → 丢弃后由服务端注入
+            "_redactions": {"secrets": 9999, "paths": 9999},
+            "_warnings": [{"turn_index": 0, "reason": "spoofed"}],
+            "_unmapped": {"spoofed": true},
+            // 深层嵌套中的保留名同样必须剥离
+            "blob": {
+                "keep": 1,
+                "_warnings": ["nested-spoof"],
+                "inner": {"_redactions": {"secrets": 5}, "ok": true}
+            },
+            "turns": [{
+                "turn_id": "t1",
+                "status": "succeeded",
+                "extra_blob": {"_unmapped": {"x": 1}, "keep_me": 2}
+            }]
+        }),
+    )
+    .await;
+
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=v16-e2-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    let payload = &listed[0]["payload"];
+
+    // 保留的未知键
+    assert_eq!(
+        payload["_unmapped"]["_sdk"]["build"], 7,
+        "`_sdk` 必须保留：{payload}"
+    );
+    assert_eq!(payload["_unmapped"]["_trace_hint"], "abc");
+    // 保留名被剥夺并替换为服务端真实值
+    assert_ne!(
+        payload["_redactions"]["secrets"], 9999,
+        "伪造的 _redactions 必须被替换：{payload}"
+    );
+    assert_eq!(
+        payload["_redactions"]["secrets"], 0,
+        "本次无密钥命中：{payload}"
+    );
+    assert!(
+        payload["_unmapped"].get("_unmapped").is_none(),
+        "保留名 _unmapped 不得进入 _unmapped：{payload}"
+    );
+    assert!(
+        payload["_unmapped"].get("_warnings").is_none(),
+        "保留名 _warnings 不得进入 _unmapped：{payload}"
+    );
+    // 深层剥离
+    assert_eq!(
+        payload["_unmapped"]["blob"]["keep"], 1,
+        "深层未知对象必须保留：{payload}"
+    );
+    assert!(
+        payload["_unmapped"]["blob"].get("_warnings").is_none(),
+        "深层的 _warnings 必须被剥离：{payload}"
+    );
+    assert!(
+        payload["_unmapped"]["blob"]["inner"]
+            .get("_redactions")
+            .is_none(),
+        "深层的 _redactions 必须被剥离：{payload}"
+    );
+    assert_eq!(payload["_unmapped"]["blob"]["inner"]["ok"], true);
+    // 已知字段内的深层保留名同样剥离
+    let turn_extra = &payload["turns"][0]["extra_blob"];
+    assert!(
+        turn_extra.get("_unmapped").is_none(),
+        "turns 内的保留名必须剥离：{payload}"
+    );
+    assert_eq!(turn_extra["keep_me"], 2);
+}
+
+#[tokio::test]
+async fn test_metrics_payload_bytes_help_describes_upload_volume() {
+    let server = trace_test_server().await;
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v16-e7-1",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }),
+    )
+    .await;
+    let metrics = server.get("/metrics").await.text();
+    let help_line = metrics
+        .lines()
+        .find(|line| line.starts_with("# HELP pony_sentry_trace_payload_bytes_total"))
+        .unwrap_or_else(|| panic!("缺少 payload_bytes HELP 行：\n{metrics}"));
+    assert!(
+        help_line.contains("上报体积"),
+        "L3B-E7：HELP 必须声明「上报体积」：{help_line}"
+    );
+    assert!(
+        help_line.contains("非存储体积"),
+        "L3B-E7：HELP 必须澄清「非存储体积」：{help_line}"
     );
 }

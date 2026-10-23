@@ -1,0 +1,121 @@
+{
+  "reviewer": "L3-B（安全/隐私/运维，只读）",
+  "target": "pony-sentry amend v1.5（05c465b: routes.rs/trace_webhook.rs/sanitizer.rs/App.vue）+ job_copilot 874dc9e95（payload.py/exporter.py/observability_sink.py）",
+  "verdict": "FAIL",
+  "summary": "6 项重点：PASS 3（llm_calls 内容面、_unmapped 顺序、指标基数）、FAIL 3（input_summary.head 实为原文片段、sample_rate 口径自相矛盾、webhook 去重+内存+任务无界）；另 2 项查询面/生产者契约 PASS-with-note。无 BLOCKER。",
+  "items": [
+    {
+      "id": "L3B-E1",
+      "item": "1. 隐私：input_summary.head / llm_calls 内容 / sampled+sample_rate 读侧暴露",
+      "verdict": "FAIL",
+      "detail": "head 确实经 redact_text，但 redact_text 只覆盖 6 类（手机/证件/Bearer/Authorization/sk-|rk-/邮箱）+ 本 PR 新增裸 secret 键值兜底，简历/JD 自由文本原样出境；llm_calls 无 prompt/response/自由文本（PASS）；sample_rate 透给所有读侧且数值失真（见 findings）。",
+      "findings": [
+        "L3B-E1",
+        "L3B-E3"
+      ]
+    },
+    {
+      "id": "L3B-E2",
+      "item": "2. webhook（M-03）：URL 来源 / SSRF / 去重上限 / 失败日志 / 异步任务",
+      "verdict": "FAIL",
+      "detail": "URL 仅 env TRACE_WEBHOOK_URL（main.rs:183）→ 非客户端可控，PASS（无 scheme/内网地址校验，管理员误配=SSRF，仅记录）；去重只限条目数不限字节、满额 clear() 可被轮转击穿；spawn 无并发闸且每任务新建 Client；失败日志不打印 payload（PASS）但会打印含密钥的 URL。",
+      "findings": [
+        "L3B-E4"
+      ]
+    },
+    {
+      "id": "L3B-E3",
+      "item": "3. 脱敏计数 _redactions / _unmapped 明文通道",
+      "verdict": "PASS",
+      "detail": "_unmapped 注入(routes.rs:1675) → turns 归一 → sanitize_trace_value(routes.rs:1690)，顺序正确；深度>32 替换为 [MAX_DEPTH_EXCEEDED]（fail-closed）；顶层 `_` 前缀键丢弃。_redactions 不被任何下游当承诺使用（web/src 0 命中），但计数口径窄（中文 PII 计 0）且嵌套层 _redactions 可伪造。",
+      "findings": [
+        "L3B-E5"
+      ]
+    },
+    {
+      "id": "L3B-E4",
+      "item": "4. 查询面：fields=summary / X-Total-Count / order_by",
+      "verdict": "PASS",
+      "detail": "order_by 白名单枚举 → 静态 SQL（models.rs:213-218），无注入；非法 fields/order → 400 且不回显。summary 仍含 note（管理员自由文本）与 environment/release，投影≠脱敏；X-Total-Count 与过滤条件一致，可做 session 存在性 oracle，但端点挂在 admin_auth/信任读之后。",
+      "findings": [
+        "L3B-E6"
+      ]
+    },
+    {
+      "id": "L3B-E5",
+      "item": "5. 指标三计数器：基数与客户端放大",
+      "verdict": "PASS",
+      "detail": "status_conflicts 为无 label 原子量；ingest_rejected 经 normalize_metric_label + 512 series 上限 + overflow 折叠；trace_payload_bytes_total 无 label。基数有界（F2 已修）。bytes 值来自客户端内容，可被灌水放大且无上限。",
+      "findings": [
+        "L3B-E7"
+      ]
+    },
+    {
+      "id": "L3B-E6",
+      "item": "6. 生产者契约：llm_calls≤50 / started_at_estimated / R1",
+      "verdict": "PASS",
+      "detail": "50 上限在 exporter 与 payload 双重执行（producer 侧不可绕）；R1 成立（_SAFE_ERROR_TYPES 收敛，error_message 不建键）；但服务端零校验，且 started_at_estimated 只在 True 时写键、唯一接线路径（observability_sink）从不传真实起点。",
+      "findings": [
+        "L3B-E8"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "L3B-E1",
+      "file": "api_v2/src/modules/agent/pony_sentry_trace/payload.py",
+      "line": 201,
+      "rule": "R48 声称「绝不外发原文 / 摘要」，实际 head = `cleaned[:200]` 原文经 redact_text（payload.py:179-183 只掩手机/证件/Bearer/Authorization/sk-|rk-/邮箱 6 类 + 裸 secret 键值）后原样保留，等于把输入文本前 200 字逐字外发到 pony-sentry（payload 详情页可 `JSON.stringify` 直读，App.vue:929）。",
+      "counterexample": "实测（仓库 venv 直跑真实函数）：build_input_summary('候选人张三，男，1996年生，手机13800001111，邮箱 zhangsan@example.com。清华大学计算机系本科，现任字节跳动后端工程师，期望薪资 45k。岗位JD：负责推荐系统排序模型，要求熟悉 Python/Rust。') → head='候选人张三，男，1996年生，手机138****11，邮箱 zha****om。清华大学计算机系本科，现任字节跳动后端工程师，期望薪资 45k。岗位JD：负责推荐系统排序模型，要求熟悉 Python/Rust。'（chars=118）。姓名/院校/雇主/薪资期望/JD 全文逐字保留，仅 2 处被掩。任何持有 read token/会话者或 payload 预览即可读简历片段。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-E3",
+      "file": "api_v2/src/modules/agent/pony_sentry_trace/exporter.py",
+      "line": 1013,
+      "rule": "R49 的 `_effective_sample_rate()` 把 rate<=0 归一为 1.0，而 `_is_status_sampled()`（exporter.py:1027）把 rate<=0 视为「全部丢弃」；docstring 自称「与 _is_status_sampled 共用同一配置来源，避免两处口径漂移」——恰在 rate=0 处分叉。配合 exporter.py:1115 `kwargs['sampled'] = True` 恒真，payload 永久自述「按 1.0 全量采样」，下游按 sample_rate 加权必错。",
+      "counterexample": "实测（PONY_SENTRY_TRACE_SAMPLE_RATE=0）：`_effective_sample_rate()` = 1.0，`_is_status_sampled('completed')` = False、`_is_status_sampled('failed')` = True。即：50% 丢弃时上报 sample_rate=1.0。新测 test_payload_sampled_and_sample_rate_contract 只断言 payload 纯函数、不覆盖该接线，故假绿。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-E4",
+      "file": "crates/server/src/trace_webhook.rs",
+      "line": 63,
+      "rule": "M-03 去重表只约束条目数（DEDUPE_MAX_ENTRIES=1024）不约束字节，且满额时 `retain` → 仍满 → `table.clear()`（:65-67）整体清空去重状态；key 由客户端可控字段拼成（routes.rs:1787 `project|tool_name|turn_status`，project/tool_name 无长度与字符集校验，受 2MB body 上限）。清空后原 key 立即可再投递 → 通知风暴。`handle.spawn`（:87）无并发闸/信号量，每任务新建 reqwest::Client，5s 超时；`warn!(error = %err)`（:103）会打印含密钥的 webhook URL（Slack/Discord 形态）。",
+      "counterexample": "攻击序列（持 client token 或未配 token 的自举部署）：① 连发 1024 条不同 `project` 的 failed trace → 表满；② 第 1025 条触发 retain（全部未过期）→ clear() → 插入；③ 再发第 1 条的 project 组合 → claim 通过，重复通知。单 key 若取 ~2MB project，1024 条可驻留 GB 级内存；每 5s 超时内可堆出上千在外连接。既有测试 dedupe_table_is_bounded（:158-165）只断言 len<=1024，未断言去重语义在 oversubscribe 后仍成立。失败日志侧：route payload 不入日志（PASS），但 URL 入日志。",
+      "severity": "MAJOR"
+    },
+    {
+      "id": "L3B-E5",
+      "file": "crates/server/src/routes.rs",
+      "line": 1697,
+      "rule": "`_redactions` 计数口径极窄（secrets=敏感键名+secret 正则，paths=USER_PATH_REGEX），中文姓名/简历正文/薪资等一律计 0，`{secrets:0,paths:0}` 极易被读侧当作「已脱敏、可放心看」的承诺；且只有顶层 `_` 前缀被剥离（routes.rs:1663-1675），payload.extra/ turns[]._redactions 等嵌套层的同名键可被客户端写入伪造自述（服务端会保留，sanitize 只改值不改键）。",
+      "counterexample": "上条 E1 的简历样本过 `SanitizationPipeline::sanitize_trace_value` 后 `_redactions` = {secrets:0, paths:0}，但内容含姓名/院校/雇主/薪资。伪造示例：`{\"extra\":{\"_redactions\":{\"secrets\":0}}}` 顶层不冲突，服务端原样入库，详情页 payload 预览中与真值并存。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-E6",
+      "file": "crates/server/src/routes.rs",
+      "line": 731,
+      "rule": "`fields=summary` 的 TraceSummary 仍带 `note`（管理员 PATCH 自由文本，可能写「此人简历造假」类主观 PII）与 environment/release/project；投影只省 payload，不省 note。`X-Total-Count` 为同过滤条件全量 count（:1918-1926），与 limit/offset 无关，可按 session_id/run_id 精确探测存在性与规模。",
+      "counterexample": "GET /api/v1/traces?fields=summary&session_id=<猜测值> → 响应体无 payload，但 note 原样返回、X-Total-Count=1 即确认该 session 存在；对不存在的 session 返回 0；即使 limit=1 也只回 1 条，但计数暴露全量。两者均在 admin_auth/信任读之后，且 order_by/fields 均为枚举白名单（无注入），故仅列 MINOR。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-E7",
+      "file": "crates/server/src/routes.rs",
+      "line": 235,
+      "rule": "`trace_payload_bytes_total` 每次 ingest 累加 `serde_json::to_vec(&saved.payload).len()`，值完全由客户端内容决定且无单次上限（受 2MB body，但 merge 后持久化行可含历史 turns），无 rate/饱和；客户端可低成本把该 counter 灌到任意量级，破坏容量类告警阈值。",
+      "counterexample": "POST 2MB trace × N → `pony_sentry_trace_payload_bytes_total` 每次 +≈2e6，与真实「合并后体积趋势」脱钩；指标无 label 故无基数问题（该点 PASS）。",
+      "severity": "MINOR"
+    },
+    {
+      "id": "L3B-E8",
+      "file": "api_v2/src/modules/agent/pony_sentry_trace/payload.py",
+      "line": 280,
+      "rule": "`started_at_estimated` 仅在值为 True 时写键（`raw.get(...) is True`），exporter 侧非估算时写 None（exporter.py:280）→ 线上永无 `false`，消费方无法区分「真实墙钟起点」与「该字段不适用」；且唯一接线路径 observability_sink.py:263-270 从不传 `started_at_ms`，恒由 `now - duration_ms` 回推并标 estimated=True，R46「区分真实起点」在真实链路上不可达。另：服务端（pony-sentry）对 llm_calls 零处理（crates/ web/src 全仓 0 命中 llm_calls/input_summary/sample_rate），50 条上限与受控键集仅靠生产者自律。",
+      "counterexample": "构造 `_normalize_llm_call({'status':'success','started_at_ms':123,'started_at_estimated':False})` → 输出无 estimated 键；`{'status':'success','started_at_ms':123,'started_at_estimated':True}` → 有键。服务端：直接 `POST /api/v1/traces {\"turns\":[{\"llm_calls\":[{\"error_type\":\"<任意 500 字自由文本>\"},...×5000]}]}` 可入库（仅 secrets/paths 正则兜底），契约「≤50 / 受控 error_type / 无自由文本」在边界上不成立。R1 在 job_copilot 侧成立（_SAFE_ERROR_TYPES 未知→Exception，error_message 不建键）。",
+      "severity": "MINOR"
+    }
+  ]
+}

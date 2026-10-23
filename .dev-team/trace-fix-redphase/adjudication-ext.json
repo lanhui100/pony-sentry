@@ -1,0 +1,107 @@
+{
+  "reviewer": "终审复核（只读）· v1.6",
+  "verdict": "FAIL",
+  "verdict_reason": "6 条 MAJOR 全部实质关闭；但 L3B-E7 的补修只改 HELP/文档文案、未改计数口径，形成新的「文案与实现相反」事实（契约 v1.6-12 未实装），按 PASS 条件（无 OPEN）判 FAIL。修复量约 1 行。",
+  "independent_evidence": {
+    "binary": "/tmp/adj-ext2-bin/pony-sentry-server sha256=3126fcc02cb85afce022ff7a2198a4abd332571aacbdabdb247287bf0b232a15（HEAD 工作树 2026-10-23T23:36 构建）",
+    "ext2": "PONY_SENTRY_BIN=/tmp/adj-ext2-bin/pony-sentry-server cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2_ext2 --offline → 8 passed / 0 failed（红相 6 红全部转绿）",
+    "server_lib": "cargo test -p pony-sentry-server --lib → 24 passed（含 trace_webhook 8 条）",
+    "core_ext": "cargo test -p pony-sentry-core --test trace_v2_ext_test → 9 passed（PG 用例因无凭据自 SKIP）",
+    "limitation": "PONY_TEST_PG_URL 不可用（28P01 认证失败），本轮无法重跑真实 PG；Lead 的 pg merge_warnings 以代码对称性 + SQLite 单测 + 黑盒 HTTP 用例（走 routes→pg/sqlite 同一逻辑）判定通过"
+  },
+  "closed": {
+    "L3A-E1": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "crates/ingest/src/sanitizer.rs:41-44 值分支改为 \"(?:[^\"\\\\]|\\\\.){1,}\" / '(?:[^'\\\\]|\\\\.){1,}' / 裸值，闭合到同类引号；单测 sanitizer.rs:331 e1_quoted_values_close_on_same_quote_only 覆盖 password=\"ab'cd\"/='ab\"cd'/转义引号，断言无残片且 counts.secrets==1；黑盒 v16_1 六种写法（含 {\"password\": \"ab'cd\"}）在我的 ext2 复跑中 ok，*tokens 白名单未误伤（sanitizer.rs:314）"
+    },
+    "L3A-E2": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "crates/server/src/routes.rs:52-73 仅 _redactions/_warnings/_unmapped 为保留名，递归剥离（深度上限 32）；routes.rs:1698-1716 其余未知键（含 _sdk）保留进 _unmapped，保留名先丢后由服务端注入；_unmapped 注入在脱敏前（routes.rs:1718 起）。黑盒 v16_2（_sdk 保留、伪造 _redactions/_warnings 被覆盖）我复跑 ok；api_test.rs:2323 覆盖 blob._warnings / inner._redactions 深层剥离"
+    },
+    "L3A-E3": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "Lead 直接修的 merge_warnings 已核对：pg_repository.rs:1420-1455、sqlite_repository.rs:1242 同构；以 old._warnings 为基底，并把**入参 payload 已携带的 _warnings**（HTTP 层归一产物，routes.rs:1741-1748 写入、经 merge_top_level/aggregate_session 保留）与仓储 warnings 一起按 (turn_index,reason) 并入，不再以旧值覆盖新值。receipt: cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2_ext2 → v16_3 我复跑 ok（旧 index=1 + 新 index=0 均在、无重复）；trace_v2_ext_test.rs:307 e3_warnings_union… 9 passed（SQLite 仓储级）"
+    },
+    "L3B-E1": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "api_v2/.../payload.py:173-192 build_input_summary 只返回 {chars,sha256_16}；payload.py:195-209 _normalize_input_summary 白名单重建，历史调用方夹带的 head 被丢弃；payload.py:437-441 input_summary 存在时 pop input_text；exporter.py:1121-1124 只把 input_text 转 digest 摘要、从不直传原文。物理收据 gates-fix2-producer.txt §6：summary_keys=['chars','sha256_16']，head_fragment/raw_token/tail_marker 均 False"
+    },
+    "L3B-E3": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "exporter.py:1007 _configured_sample_rate 原值钳 [0,1]（0.0 不归一）；exporter.py:1028 _sampling_decision 单一真源返回 (保留, 配置原值)，_is_status_sampled 委托；exporter.py:673-698 入队即落真实决策，1115-1138 透传（sampled 非恒 True，sample_rate 0.0 保留）。收据 §5 矩阵：rate=0.0 → completed(False,0.0)/failed(True,0.0)/effective=0.0；rate=0.25 双向 monkeypatch 验证"
+    },
+    "L3B-E4": {
+      "severity": "MAJOR",
+      "status": "CLOSED",
+      "evidence": "crates/server/src/trace_webhook.rs:63-95 DedupeTable 双上限（1024 条目 / 256KB）满额 min_by_key(sent_at) 淘汰最旧、无 clear()；:31-33 Semaphore(8) 任务内 acquire 且 permit 覆盖全请求（已登记的等价偏离）；:166-172 OnceLock<Client> 5s 超时复用；:117-129 describe_url 只留 scheme://host[:port]，:215-231 所有日志仅 host=；:174-181 去重键分量 64 字符归一。8 条单测通过（含 bytes_cap_evicts_oldest_and_never_clears_table / concurrent_claims_keep_table_bounded）；收据物理验证 SECRET_TOKEN_123 日志出现 0 次、同键重复 ingest 去重生效"
+    },
+    "L3A-E4": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "routes.rs:339 HELP 改为「截断字段数（…按字段累计）」；trace_v2.rs:407 truncate_turns_tool_text 返回实际截断字段数，计数与 HELP 同口径"
+    },
+    "L3A-E5": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "trace_v2.rs:424-444 客户端预置 truncated 先 remove、仅服务端实际截断才置 true；PG/SQLite 在 normalize 后调用（pg_repository.rs:1120 / sqlite_repository.rs:939），HTTP 管线为 routes 脱敏→仓储归一→截断（routes.rs:1718 → repository）；黑盒 v16_4a/4b 我复跑 ok"
+    },
+    "L3A-E6": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "sqlite_repository.rs:121-141 列（SELECT run_id LIMIT 0）与索引（sqlite_master 探测）分别判断、分别 CREATE；e6_sqlite_0006_index_self_heals_and_run_id_backfills 通过（DROP INDEX 后 migrate 自愈）"
+    },
+    "L3A-E7": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "migrations/postgres/0006_trace_turn_run_id.down.sql 新增（DROP INDEX IF EXISTS + DROP COLUMN IF EXISTS，幂等）；PG 用例 e7_pg_0006_down_migration_roundtrip 已写但本轮无 PG 凭据自 SKIP，仅代码级核对"
+    },
+    "L3A-E8": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "sqlite_repository.rs:143-148 迁移末尾一次性 UPDATE trace_turns.run_id 按 traces.run_id 回填（WHERE run_id IS NULL，幂等）；receipt 用例 e6 覆盖清空→migrate→回填"
+    },
+    "L3A-E9": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "红相 tests/acceptance_trace_v2_ext2.rs 8 条补齐原缺口（_ 前缀键、warnings 二次并集、truncated 客户端预置、run_id 轮次级、summary note、llm_calls 5001→50、HELP）；sanitizer 单测补 *tokens 白名单非回归与三种引号反例；core 补 E3/E6/E7 三条；我复跑 ext2 8/8、core ext 9/9 绿"
+    },
+    "L3B-E5": {
+      "severity": "MINOR",
+      "status": "CLOSED_WITH_NOTE",
+      "evidence": "嵌套伪造通道已封：routes.rs:58 strip_reserved_payload_keys 递归剥离已知字段/数组/unknown 值内的 _redactions/_warnings/_unmapped（api_test.rs:2323 实测）；计数口径仍只含 secrets/paths 正则（sanitizer.rs:47-58），文档 docs/trace-contract.md:57 仅称「脱敏命中计数」，未承诺内容安全，属可接受残余（建议后续在 payload 详情页加口径说明）"
+    },
+    "L3B-E6": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "TraceSummary 删除 note（routes.rs:746 投影注释同步），黑盒 v16_6 断言响应无 note 键、X-Total-Count=2；x-total-count 的规模可探测性按契约 v1.6-10 保留并在 docs/trace-contract.md:70-71 明确登记"
+    },
+    "L3B-E8": {
+      "severity": "MINOR",
+      "status": "CLOSED",
+      "evidence": "服务端归一 trace_v2.rs:466-518 normalize_llm_calls：非数组删除、>50 截断、11 键白名单、error_type ≤64 + 字符集否则丢弃；在 normalize_incoming_turns / normalize_incoming_turn(hydrate) / annotate_turn 三处调用；黑盒 v16_7（5001→50）我复跑 ok。生产者 started_at_estimated 在 exporter 有真实起点时写 false、回推写 true（收据 §6 矩阵），契约 v1.6-11 允许缺省=未知"
+    }
+  },
+  "open": [
+    {
+      "id": "L3B-E7",
+      "severity": "MINOR",
+      "status": "PARTIAL",
+      "file": "crates/server/src/routes.rs:1819",
+      "claimed_fix": "契约 v1.6-12 / 收据 gates-fix2-http.txt §4：HELP 改为「上报体积（客户端内容序列化字节数，非存储体积）」；docs/trace-contract.md:99 同步",
+      "actual": "计数仍是 serde_json::to_vec(&saved.payload).len()，即**合并后的持久化 payload**；收据 §6.4 自认「只改文档语义，不改计数口径」",
+      "counterexample": "实测（/tmp/adj-ext2-bin 二进制，SQLite，PORT=18777）：session m2 首报 1228B → payload_bytes +1457；二报仅上传 turn t2（1228B）→ 计数再 +2585，且 2585 == 存储行 payload 序列化长度（完全相等）。若按 HELP 的「客户端内容序列化字节数」应为 ≈1228。即文案与实现相反，容量/流量看板会按 2 倍以上高估（多轮会话随历史轮次线性放大）",
+      "impact": "仅运维可观测性语义/文档失真，不影响安全、数据完整性或拒绝服务面；修复量约 1 行",
+      "suggested_fix": "二选一：①计数改为上报侧序列化字节（routes.rs 在 merge 前对 sanitized_payload 取 len，或直接取请求体长度）；②保留存储口径则把 HELP 与 docs/trace-contract.md:99 改回「持久化 payload 体积」并在契约 v1.6-12 登记为该口径"
+    }
+  ],
+  "notes": [
+    "L3B-E4 残余（已登记，不阻断）：warn!(error = %err) 仍打印完整 error 文本；reqwest 0.12.28 的 Kind::Request 错误不带 URL（error.rs:327），但 builder/redirect 类错误 Display 含 URL（error.rs:267），异常配置下仍可能把 query token 写日志",
+    "webhook 去重与并发闸为进程内（多副本各去重）、permit 在 spawn 内获取：均已在 gates-fix2-http.txt §6 明确登记为偏离，且满足契约 v1.6-9 的「≤8」与「禁止 clear」硬要求",
+    "L3A-E1 残余：未闭合引号（如 password=\"ab 无收尾）仍不被引号分支命中、裸值分支又因 \" 被排除而不匹配——与 v1.5 行为一致，非本轮回归，未列入 OPEN"
+  ]
+}

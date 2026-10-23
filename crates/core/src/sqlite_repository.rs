@@ -117,17 +117,37 @@ impl SqliteIssueRepository {
 
         // 0006（W-04 / amend v1.5-6）：`trace_turns.run_id` + 索引。
         // SQLite 无 ADD COLUMN IF NOT EXISTS：按列探测守卫整份执行（范式同 0002/0004/0005）。
+        // `amend v1.6-5`（L3A-E6）：列与索引**分别探测创建**，部分迁移可自愈。
         let has_turn_run_id: bool = sqlx::query("SELECT run_id FROM trace_turns LIMIT 0")
             .fetch_all(&self.pool)
             .await
             .is_ok();
         if !has_turn_run_id {
-            let mut tx = self.pool.begin().await?;
-            sqlx::raw_sql(include_str!("../../../migrations/0006_trace_turn_run_id.sql"))
-                .execute(&mut *tx)
+            sqlx::query("ALTER TABLE trace_turns ADD COLUMN run_id TEXT;")
+                .execute(&self.pool)
                 .await?;
-            tx.commit().await?;
         }
+        let has_run_id_index: bool = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_trace_turns_run_id'",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some();
+        if !has_run_id_index {
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_trace_turns_run_id ON trace_turns(run_id);",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        // `amend v1.6-5`（L3A-E8）：存量轮次 run_id 按 `traces.run_id` 回填一次（幂等）。
+        sqlx::query(
+            "UPDATE trace_turns SET run_id = (
+                 SELECT run_id FROM traces WHERE traces.session_id = trace_turns.session_id)
+             WHERE run_id IS NULL",
+        )
+        .execute(&self.pool)
+        .await?;
 
         // C1.3 / amend v1.4-1：回填在 Rust 侧执行——turn_id 必须与运行时
         // `trace_v2::turn_key_of`（sha256）同构，SQL 方言无 sha256 故不写在迁移文件里。
@@ -915,6 +935,8 @@ async fn record_trace_locked(
     // 单 tool_call 超长文本截断），warnings 随后写入 `payload._warnings`。
     let mut incoming_top = trace.payload.clone();
     let turn_warnings = crate::trace_v2::normalize_incoming_turns(&mut incoming_top);
+    // `amend v1.6-4`：先脱敏（routes 侧）→ 再截断（此处）；截断只作用于已脱敏文本。
+    crate::trace_v2::truncate_turns_tool_text(&mut incoming_top);
     let existing = fetch_trace_by_session(&mut *tx, &session_id).await?;
     let old_payload = existing
         .as_ref()
@@ -1201,13 +1223,35 @@ fn turn_run_id_of(turn: &serde_json::Value, top_run_id: Option<&str>) -> Option<
         .or_else(|| top_run_id.map(str::to_string))
 }
 
-/// 把本轮 warnings 与旧 `payload._warnings` 合并写回（按 JSON 去重，最多保留 100 条 —— `I-02`）。
+/// warnings 去重身份：`(turn_index, reason)`（`amend v1.6-3`）。
+fn warning_identity(warning: &serde_json::Value) -> (i64, String) {
+    (
+        warning
+            .get("turn_index")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(-1),
+        warning
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+/// 把本轮 warnings 与旧 `payload._warnings` 合并写回（`turn_index+reason` 去重，最多 100 条 —— `I-02`/`v1.6-3`）。
 fn merge_warnings(
     payload: &mut serde_json::Value,
     old_payload: &serde_json::Value,
     warnings: Vec<serde_json::Value>,
 ) {
-    if warnings.is_empty() && old_payload.get("_warnings").is_none() {
+    // `amend v1.6-3`：入参 warnings（仓储归一产生）与**入参 payload 已携带的 `_warnings`**
+    // （HTTP 层归一产生）都要参与并集，否则二次上报会以旧值覆盖新值。
+    let incoming: Vec<serde_json::Value> = payload
+        .get("_warnings")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if warnings.is_empty() && incoming.is_empty() && old_payload.get("_warnings").is_none() {
         return;
     }
     let mut merged: Vec<serde_json::Value> = old_payload
@@ -1215,8 +1259,10 @@ fn merge_warnings(
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    for warning in warnings {
-        if !merged.contains(&warning) {
+    let mut seen: std::collections::HashSet<(i64, String)> =
+        merged.iter().map(warning_identity).collect();
+    for warning in incoming.into_iter().chain(warnings) {
+        if seen.insert(warning_identity(&warning)) {
             merged.push(warning);
         }
     }

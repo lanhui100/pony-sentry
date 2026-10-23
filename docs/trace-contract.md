@@ -16,7 +16,8 @@
   用于合并、聚合与诊断。
 - 客户端上报的 `eval_status` **被忽略**（一律落 `unreviewed`）；评审结论只能由 admin `PATCH` 写入。
 - `reported_at_ms` 与服务端时间偏差超过 **24h** → `400 Bad request: reported_at out of range`。
-- 未知顶层字段保留到 `payload._unmapped`；以 `_` 开头的键属**服务端保留命名空间**，客户端传入会被丢弃。
+- 未知顶层字段（含 `_sdk` 等 `_` 前缀键）保留到 `payload._unmapped`；仅服务端保留名
+  `_redactions/_warnings/_unmapped` 由服务端注入覆盖，客户端同名键在任意层级都会被剥离（深度 ≤32）。
 - `turns[]` 归一：非对象元素丢弃、`status` 非字符串→`unknown`、`tool_calls` 非数组忽略；
   归一告警写入 `payload._warnings[]`（`{"turn_index","reason":"invalid_turn"}`）。
 - 成功响应：`201` + **库内持久化行**（`id` 可直接用于 `GET`；`total_*`/`turn_status`/`turns_count` 来自数据库，
@@ -55,7 +56,9 @@
 
 服务端另注入：`payload._redactions={"secrets":n,"paths":n}`（脱敏命中计数）、
 `payload._unmapped`（未知顶层字段）、`payload._warnings`（turns 归一告警）。
-单个 `tool_call` 的 `output`/`arguments_summary` 超过 20000 字符时截断并置 `truncated:true`。
+单个 `tool_call` 的 `output`/`arguments_summary` 超过 20000 字符时，**先脱敏后截断**并置服务端判定的
+`truncated:true`（客户端预置值被忽略）；`turns[].llm_calls` 由服务端归一：≤50 条、11 键白名单、
+`error_type` ≤64 字符且限 `[A-Za-z0-9_.:-]`，违规条目丢弃。
 
 诊断在脱敏之后生成，不引入原始错误文本；指标 `pony_sentry_trace_status_conflicts_total` 随之递增。
 
@@ -64,7 +67,7 @@
 - `GET /api/v1/traces`：过滤 `session_id`、`run_id`（匹配聚合行或任一轮次）、`turn_status`、`eval_status`、
   `environment`、`release`、`project`、`from`/`to`（RFC3339，按 `reported_at`，含端点）；
   `limit` 默认 50、**clamp 到 [1,100]**；`offset<0` / 非数字 / 非法时间 / 非法 `order` → `400`；未知参数忽略。
-  默认排序 `reported_at DESC`（`?order=created_at` 可切）。`?fields=summary` 返回不含 `payload` 的投影；
+  默认排序 `reported_at DESC`（`?order=created_at` 可切）。`?fields=summary` 返回不含 `payload` 与 `note` 的投影；
   响应头 `X-Total-Count` 为同过滤条件的总数（与分页无关）。
 - `GET /api/v1/traces/:id`：返回单行；不存在 → `404 Trace not found`。
 - `PATCH /api/v1/traces/:id`：`{eval_status, note?}`；`note` 落库并在后续读取回显；Cookie 会话需 `x-csrf-token`。
@@ -82,7 +85,7 @@
   hydration 在「轮次行数 < `payload.turns` 条数」时补齐。
 - 保留期：`RETENTION_DAYS_TRACES`（默认 90）按 `COALESCE(updated_at, created_at)` 在同一事务内删除聚合行
   与其轮次行，不会误删仍存活会话的轮次。
-- 回滚：PG 提供 `migrations/postgres/0005_trace_turns.down.sql`（DROP 索引/表/列，幂等）；
+- 回滚：PG 提供 `migrations/postgres/0005_trace_turns.down.sql` 与 `0006_trace_turn_run_id.down.sql`（幂等）；
   SQLite 不支持 `DROP COLUMN`，**无 down 迁移**，回滚需重建表——升级前必须备份 `ponysentry.db`。
 
 ## 6. 指标（`/metrics`，Prometheus 文本）
@@ -93,12 +96,13 @@
 - `pony_sentry_trace_turns_total{status}`：本次上报中每个 turn 计数。
 - `pony_sentry_trace_status_conflicts_total`：命中 `status_conflict` 的 ingest 次数。
 - `pony_sentry_trace_ingest_rejected_total{reason}`：`session_missing` / `invalid_params`。
-- `pony_sentry_trace_payload_bytes_total`：持久化行 payload 序列化字节累计。
+- `pony_sentry_trace_payload_bytes_total`：**上报体积**（客户端内容序列化字节数，非存储体积）。
 - `pony_sentry_trace_merge_lost_turns_total`：合并被旧终态覆盖的轮次次数。
 - `pony_sentry_trace_truncated_total`：被截断的 tool_call 文本条数。
 
 可选失败通知：设置 `TRACE_WEBHOOK_URL` 后，终态 `{failed,error,cancelled,timed_out}` 触发一次异步 POST
-（5s 超时、失败仅告警不重试）；去重键 `project|tool_name|turn_status`，10 分钟内只发一次。
+（5s 超时、失败仅告警不重试）；去重键 `project|tool_name|turn_status`（各分量截断 64 字符），10 分钟内只发一次；
+去重表 1024 条 / 256KB 双上限、满时淘汰最旧；并发 ≤8；日志只打印 URL host，不含 query/token。
 
 ## 7. 已知边界
 

@@ -516,4 +516,9 @@ jq -e 'type=="array" and all(.[]; .verdict|test("^(CONFIRMED|REFUTED|UNVERIFIABL
   M-02/M-05/M-06（job_copilot 生产者：`llm_calls[]`/`sampled`/`input_summary`，96 条契约测试通过）。
   门禁：`cargo test --workspace` **206 passed（PG，SKIP=0）**、clippy 0、acceptance **11 + 10 passed**、`pnpm test` 40/40、build 0
   （`gates-lead-ext.txt`）；生产库迁移已执行并校验（38 traces → 59 turns，0 不一致，见 `migration-runbook.md`）。
-  仍未做：issue 建单（按 L3 建议仅做 webhook + 队列预设）、`/metrics` 默认免鉴权（改为可选 token）。
+  仍未做：issue 建单（改为 webhook + 待评审预设，按审查建议延后）。
+- **第三轮（v1.6，ext 波两路 L3 复审后的修复）**：M-04 引号内嵌不再提前闭合、`_` 前缀未知键保留、
+  warnings 并集、脱敏→截断顺序、0006 down 与 run_id 回填、`llm_calls` 服务端归一（≤50/白名单）、
+  producer `input_summary` 去 head、采样率原值语义、webhook 双上限/并发闸/host 日志、summary 去 note。
+  门禁：workspace **218+ passed（PG，SKIP=0）**、clippy 0、acceptance **11 + 10 + 8**、web 40/40、build 0；
+  producer **100 passed**。两路 L3 的 16 条 ext findings 逐条关闭（见 `review-ext-l3a/b.json` 与复审判据）。

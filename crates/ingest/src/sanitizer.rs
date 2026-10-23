@@ -36,7 +36,9 @@ static SECRET_PATTERNS: LazyLock<Regex> = LazyLock::new(|| {
         r"(?i)",
         r"(?:bearer\s+[a-zA-Z0-9_\-\.]{10,}|basic\s+[a-zA-Z0-9+/=]{10,})|",
         r"(?:ey[a-zA-Z0-9_-]{10,}\.ey[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})|",
-        r#"(?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|auth[_-]?token|token)["']?\s*[:=]\s*(?:["'][^"']{1,}["']|[^\s,;"']{4,}))|"#,
+        // `amend v1.6-1`（L3A-E1）：值必须闭合到**同类引号**；双引号值内允许单引号、单引号值内允许
+        // 双引号，转义序列（`\"`/`\'`）整体吞掉，避免 `password="ab'cd"` 提前闭合导致部分泄漏。
+        r#"(?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|auth[_-]?token|token)["']?\s*[:=]\s*(?:"(?:[^"\\]|\\.){1,}"|'(?:[^'\\]|\\.){1,}'|[^\s,;"']{4,}))|"#,
         r"(?:-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----)"
     )).unwrap()
 });
@@ -321,6 +323,28 @@ mod tests {
             let (output, counts) = SanitizationPipeline::sanitize_string_counted(input);
             assert_eq!(output, input, "计量字段被误改：{input} → {output}");
             assert_eq!(counts.secrets, 0);
+        }
+    }
+
+    /// `amend v1.6-1`（L3A-E1）反例：值内出现另一种引号/转义引号时必须整值脱敏，不得提前闭合。
+    #[test]
+    fn e1_quoted_values_close_on_same_quote_only() {
+        let cases = [
+            (r#"password="ab'cd""#, "'cd"),
+            (r#"password='ab"cd'"#, "ab"),
+            (r#"password: "p@ss\"x""#, "p@ss"),
+        ];
+        for (input, must_not_leak) in cases {
+            let (output, counts) = SanitizationPipeline::sanitize_string_counted(input);
+            assert!(
+                output.contains("[REDACTED_SECRET]"),
+                "反例未被脱敏：{input} → {output}"
+            );
+            assert!(
+                !output.contains(must_not_leak),
+                "引号值提前闭合导致泄漏（`{must_not_leak}`）：{input} → {output}"
+            );
+            assert_eq!(counts.secrets, 1, "反例 {input} 应命中 1 次：{output}");
         }
     }
 

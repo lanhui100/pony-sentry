@@ -20,6 +20,10 @@ Trace 写入从「单行读-改-写 + 旧轮优先」改为「`trace_turns` 行�
 - **迁移**：`0005` 只建 schema；存量回填在 `migrate()` 后用运行时 sha256 口径执行（幂等、可重放）；PG DDL 拆成逐条
   autocommit + 列存在性跳过 + `CREATE INDEX CONCURRENTLY`（二次启动 0 ALTER/0 CREATE），并提供 down 迁移。
 - **可观测面**：`/metrics` 可选鉴权（`METRICS_TOKEN`，空则保持免鉴权探针面）；trace 指标 label 归一 + 512 series 上限。
+- **v1.5 补全**（覆盖审核报告剩余条目）：脱敏支持单引号与裸 `token=` 并回传 `_redactions` 计数；
+  未知顶层字段进 `_unmapped`、turns 归一回 `_warnings`；`reported_at` 偏差 >24h 拒绝、列表默认按 `reported_at`；
+  `?fields=summary` + `X-Total-Count`；tool_call 文本 >20k 截断并计数；`trace_turns.run_id` + 索引；
+  `TRACE_WEBHOOK_URL` 失败通知（5s、10min 去重）；生产者侧新增 `llm_calls[]`/`input_summary`/`sampled`。
 
 依据：`docs/release/trace-audit-cards-2026-10-23/report.md`（W-01/W-02/W-03/W-09/W-10/M-01/I-11）
 与 `dsh-benchmark-review.md`（append-only 事件账本、稳定错误码、去重键）。

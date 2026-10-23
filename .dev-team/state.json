@@ -247,6 +247,39 @@
       "runbook": "docs/release/trace-audit-cards-2026-10-23/migration-runbook.md",
       "meta": ".dev-team/meta-retrospective-trace-ext.md",
       "script": "scripts/test-all.sh"
-    }
+    },
+    "v16_fix_round": {
+      "commits": [
+        "c02642a..",
+        "05c465b",
+        "4f688f9",
+        "后天 pending"
+      ],
+      "closed": [
+        "L3A-E1",
+        "L3A-E2",
+        "L3A-E3",
+        "L3A-E4",
+        "L3A-E5",
+        "L3A-E6",
+        "L3A-E7",
+        "L3A-E8",
+        "L3A-E9",
+        "L3B-E1",
+        "L3B-E3",
+        "L3B-E4",
+        "L3B-E5",
+        "L3B-E6",
+        "L3B-E7",
+        "L3B-E8"
+      ],
+      "adjudication": "FAIL(1 MINOR OPEN) -> Lead 1-line fix -> CLOSED (adjudication-ext-closure.md)",
+      "gates": "218 passed (PG, SKIP=0), clippy 0, acceptance 11+10+8, web 40/40, build 0",
+      "prod_migration": "0006 applied: trace_turns 64 rows, run_id 64 non-null, idx present"
+    },
+    "producer_commits": [
+      "874dc9e95",
+      "8917533ff"
+    ]
   }
 }
