@@ -1,0 +1,132 @@
+# trace v2 红相运行收据（Test Agent 冻结）
+契约真源：.dev-team/trace-fix-contract.md §C9（FROZEN）
+产出：tests/acceptance_trace_v2.rs（450 行，11 个 #[test]）+ tests/Cargo.toml [[test]] + web/tests/trace-ui.test.js（54 行，3 个用例）
+环境：Linux 本机，真实进程 + 真实 HTTP + 独立临时 SQLite 库；非 mock、非内存桩
+时间：2026-10-23 20:58–21:00（Asia/Shanghai），cargo 31.33s / web 243ms
+
+## 一、能力面（Rust 黑盒验收，11 用例）
+
+命令：
+  cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline 2>&1 | tail -60
+
+编译状态：PASS（测试二进制正常构建，红相为断言失败而非编译错误）
+  cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline --no-run
+  → Finished `test` profile [unoptimized + debuginfo] target(s) / Executable acceptance_trace_v2-32cc8d4c68cc7a56
+
+真实输出尾部：
+----
+thread 'c9_8_retention_judges_by_updated_at' (93106) panicked at acceptance_trace_v2.rs:381:5:
+assertion `left == right` failed: [C9.8] 须按 COALESCE(updated_at, created_at) 判定：updated_at 新的行被误删（created_at 旧）
+  left: 0
+ right: 1
+
+
+failures:
+    c9_10_migration_backfills_trace_turns_from_legacy_payload
+    c9_1_terminal_status_overrides_and_never_regresses
+    c9_1_tool_calls_merged_by_id_and_new_turn_appended
+    c9_2_concurrent_ingest_loses_no_turn
+    c9_3_post_id_gettable_and_totals_match_turns_sum
+    c9_4_invalid_query_params_rejected_without_db_leak
+    c9_5_diagnostics_three_flags
+    c9_6_extra_retained_eval_status_absent_session_id_source
+    c9_7_note_patch_and_aggregates_advance
+    c9_8_retention_judges_by_updated_at
+    c9_9_metrics_expose_four_trace_counters
+
+test result: FAILED. 0 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.33s
+
+error: test failed, to rerun pass `--test acceptance_trace_v2`
+----
+Exit code: 101
+
+结果：0 passed; 11 failed; 0 ignored; finished in 31.33s
+
+逐用例失败原因（均为「能力缺失」，非环境/编译问题）：
+  - [FAIL] c9_10_migration_backfills_trace_turns_from_legacy_payload
+      assertion `left == right` failed: [C9.10] 迁移回填后 turns_count 必须等于 payload.turns 条数（2）：{"created_at":"2026-10-01T00:00:00Z","environment":"development","eval_status":"unreviewed","id":"legacy-
+  - [FAIL] c9_5_diagnostics_three_flags
+      assertion `left == right` failed: [C9.5] failed 且无错误明细须标注 error_contract=missing：{"status":"failed","tool_calls":[{"output":"ok","status":"success","tool_call_id":"c1","tool_name":"parse"}],
+  - [FAIL] c9_3_post_id_gettable_and_totals_match_turns_sum
+      assertion `left == right` failed: [C9.3] POST 响应 total_input_tokens 必须等于 turns 求和 30（拒绝客户端直传值）   left: Some(99999)
+  - [FAIL] c9_7_note_patch_and_aggregates_advance
+      assertion `left == right` failed: [C9.7] 首次写入后 turns_count 必须为 1：{"created_at":"2026-10-23T12:58:27.700228122Z","environment":"development","eval_status":"unreviewed","id":"99b737f8-1afa-4ad
+  - [FAIL] c9_6_extra_retained_eval_status_absent_session_id_source
+      assertion `left == right` failed: [C9.6] 二次上报缺省的 extra 字段不得置 null（保留旧值）：{"created_at":"2026-10-23T12:58:27.698417831Z","environment":"development","eval_status":"triage_good","id":"2bbdbc1c-
+  - [FAIL] c9_9_metrics_expose_four_trace_counters
+      [C9.9] /metrics 必须包含指标 `pony_sentry_traces_total`： # HELP pony_sentry_issues_total Issue 总数（按 status 与 environment 维度）
+  - [FAIL] c9_1_tool_calls_merged_by_id_and_new_turn_appended
+      assertion `left == right` failed: [C9.1] tool_calls 必须按 id 合并（旧保留 + 新 id 追加）：{"status":"running","tool_calls":[{"output":"ok","status":"success","tool_call_id":"c1","tool_name":"parse"},{"ou
+  - [FAIL] c9_1_terminal_status_overrides_and_never_regresses
+      assertion `left == right` failed: [C9.1] running→failed 必须由终态覆盖：{"created_at":"2026-10-23T12:58:27.698418131Z","environment":"development","eval_status":"unreviewed","id":"843dd867-0cf1-47e9
+  - [FAIL] c9_2_concurrent_ingest_loses_no_turn
+      assertion `left == right` failed: [C9.2] 20 并发 × 2 turn 必须全部入库（turns_count=40）：{"created_at":"2026-10-23T12:58:27.705948535Z","environment":"development","eval_status":"unreviewed","id":"97f
+  - [FAIL] c9_4_invalid_query_params_rejected_without_db_leak
+      assertion `left == right` failed: [C9.4] `limit=-5` 必须 400（不得静默接受/降级）：[{"id":"068049c1-09e7-4c70-ab9c-4e6bfde43582","session_id":"c9-4-104-93094-112","run_id":null,"turn_id":null,"environmen
+  - [FAIL] c9_8_retention_judges_by_updated_at
+      assertion `left == right` failed: [C9.8] 须按 COALESCE(updated_at, created_at) 判定：updated_at 新的行被误删（created_at 旧）   left: 0
+
+## 二、UI 面（C9.11，3 用例）
+
+命令：
+  cd web && pnpm test 2>&1 | tail -30
+
+真实输出尾部：
+----
+  stack: |-
+    holds (file:///home/dm/pony-sentry/web/tests/trace-ui.test.js:21:39)
+    TestContext.<anonymous> (file:///home/dm/pony-sentry/web/tests/trace-ui.test.js:46:3)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 37
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 243.312969
+ ELIFECYCLE  Test failed. See above for more details.
+----
+Exit code: 1
+
+结果：# tests 40 / # pass 37 / # fail 3（既有 37 条全绿；新增 3 条 C9.11 全红）
+新增失败用例：
+  - C9.11 列表行必须渲染 turn_status 徽标（C8 颜色档）
+  - C9.11 抽屉必须渲染「失败原因」区（diagnostics 三标志）
+  - C9.11 抽屉 Turn 头必须显示 status/attempt_index/degraded，空 error 显式「未上报」
+现状证据（红相直接来源）：`grep -c` 于 web/src/App.vue → turn_status=0、diagnostics=0、
+error_contract=0、status_conflict=0、error_missing=0、未上报=0、attempt_index=0。
+
+## 三、口径与偏差（全部为客观事实，非裁量）
+
+1. 渲染器：web/package.json 的 test 脚本是 `node --test tests/*.test.js`，未接线 vitest；
+   vitest/jsdom 只作为传递依赖存在于 node_modules（不在 devDependencies），也没有 .vue 加载器。
+   故 trace-ui.test.js 用 node:test，对 src/App.vue 做模板级 DOM 契约断言（不挂载组件）。
+   若后续把 vitest 接线进 package.json，本文件可原地迁移为组件渲染断言（断言锚点不变）。
+2. C9.8 保留期：黑盒可触发——`RETENTION_DAYS_TRACES=1` 下服务启动 30s 后执行首轮清理；
+   用例用 python3 直连库文件把 A 行写成 created/updated 均 10 天前、B 行写成 created 10 天前但
+   updated=现在，轮询 GET list 观测（无 SKIP、无硬编码 sleep 判据，超时上限 75s）。
+   当前实现按 created_at 删除 → B 行被误删，断言真实失败（left: 0 / right: 1）。
+3. C9.10 迁移回填：用 python3 执行 migrations/0001–0004 真实 SQL 构造「旧形态」库 + 仅含
+   payload.turns 的存量行，再启动服务（启动即迁移），随后 GET 校验 turns_count/turn_status，
+   并直连库查 trace_turns 行数与 seq 顺序。红相失败点：迁移回填后 turns_count 仍缺失。
+4. C9.12（回归）：本文件不重复造轮子，由 `cargo test --workspace` + `web pnpm test` 全量覆盖。
+5. 零脏数据：每用例独立临时目录 + 独立端口，Proc::drop 回收子进程与目录；未触生产库。
+6. 已知契约空隙（需 Lead 裁决，未写入断言）：C2 未定义 per-turn token 字段名，
+   本文件按 producer 现形态取 turns[].input_tokens/output_tokens/duration_ms（见
+   docs/release/trace-audit-cards-2026-10-23/report.md:95-96）。
+
+## 四、本轮写域核对（git status --porcelain 摘要）
+
+  ?? tests/acceptance_trace_v2.rs         （新增，450 行）
+   M tests/Cargo.toml                     （新增 [[test]] acceptance_trace_v2）
+  ?? web/tests/trace-ui.test.js           （新增，54 行 / 3 用例）
+  ?? .dev-team/red-phase-trace-v2.txt     （本收据）
+未触碰：crates/**、migrations/**、web/src/**、.dev-team/trace-fix-contract.md（契约只读）
