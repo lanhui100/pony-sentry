@@ -23,3 +23,6 @@ PonySentry 后端本身是纯 Rust 编写、且在编译期将前端 SingleFile 
 ## Consequences
 - 发布与重启耗时由 90 秒缩短至 3 秒（`cargo build --release && sudo systemctl restart pony-sentry`）。
 - 宿主机诊断与服务端完全同构，消除容器网络穿透障碍。
+- Decision 第 2 条的访问路径已被取代：`127.0.0.1:30543`（NodePort）于 2026-10-22 下线，
+  宿主机改连固定 ClusterIP `10.43.206.170:5432`，见
+  `implemented/bug-fix/2026-10-23-console-timeout-db-nodeport-retired.md`。

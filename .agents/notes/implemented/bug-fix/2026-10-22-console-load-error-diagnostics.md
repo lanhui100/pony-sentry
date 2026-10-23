@@ -33,3 +33,7 @@ Status: implemented
 - 超时显示请求超时，断网显示网络异常，5xx 显示服务端错误；未知错误仍回退为通用「数据加载失败」。
 - 同一时刻多个数据源失败时按 auth > timeout > server > network 的优先级展示一个主要原因；各源独立成功后会清除自身失败。
 - 失败横幅的既有 `data-testid` 与空态区分语义保持不变。
+- 已知盲区（2026-10-23 实测）：前端 `API_TIMEOUT_MS = 3000` 与服务端 PostgreSQL
+  `acquire_timeout = 3000ms` 相等，DB 不可达时浏览器先 abort、拿不到那条 3.003s 的 500，
+  于是归因为 timeout（显示「网络不稳定」而非「服务端错误」）。见
+  `implemented/bug-fix/2026-10-23-console-timeout-db-nodeport-retired.md`。
