@@ -324,7 +324,7 @@ fn c9_6_extra_retained_eval_status_absent_session_id_source() {
     assert_eq!(rec["payload"]["extra"]["project_path"], "b", "[C9.6] extra 非空新值必须覆盖旧值：{rec}");
     assert_eq!(rec["payload"]["extra"]["keep"], "x", "[C9.6] 二次上报缺省的 extra 字段不得置 null（保留旧值）：{rec}");
     assert!(rec["payload"].get("eval_status").is_none(), "[C9.6] payload.eval_status 必须移除（列是唯一真源）：{rec}");
-    assert_eq!(rec["eval_status"], "triage_good", "[C9.6] eval_status 列必须保留首报值：{rec}");
+    assert_eq!(rec["eval_status"], "unreviewed", "[C9.6-amend.v1.4] ingest 必须忽略客户端 eval_status（防写 token 自评），评审结论只能走 admin PATCH：{rec}");
     assert_eq!(rec["payload"]["session_id_source"], "session_id", "[C9.6] 主键来源须回写 payload.session_id_source：{rec}");
     let thread = uniq("c9-6-thread");
     server.post_api(&json!({"thread_id": thread.clone(), "environment": "development", "release": "dev", "turns": [turn("t1", "succeeded")]}));
