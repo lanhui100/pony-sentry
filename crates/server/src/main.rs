@@ -149,8 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Connecting to PostgreSQL database...");
             let pool = PgPoolOptions::new()
                 .max_connections(10)
-                // 控制台前端 API_TIMEOUT_MS（web/src/lib/apiTimeout.js）必须严格大于本值 + 2000ms，见 .dev-team/contract-console-timeout.md
                 .acquire_timeout(Duration::from_millis(3000))
+                // 控制台前端 API_TIMEOUT_MS（web/src/lib/apiTimeout.js）必须严格大于本值 + 2000ms，见 .dev-team/contract-console-timeout.md
                 .connect(&db_url)
                 .await?;
             let pg_repo = PgIssueRepository::new(pool);
