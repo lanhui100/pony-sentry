@@ -138,3 +138,16 @@
   6) 指标 label 归一：`project` 截断 64 字符 + 非 `[A-Za-z0-9_.:-]` 替换为 `_`；`turn_status` 仅受控集合，其余 `other`；series 上限 512，超出记 `overflow` 并只告警一次。
   7) 所有 HTTP 错误响应（含 issue 路径、PATCH rejection）统一 `Bad request`/`Internal error`，不得回显 DB/serde 原文。
   8) 提供 `migrations/postgres/0005_trace_turns.down.sql`；SQLite 不支持 down，需在 docs 明记。
+
+- **v1.5（2026-10-23，Lead 裁决，覆盖审核报告剩余条目）**：
+  1) **M-04**：`SECRET_PATTERNS` 兼容单引号（`'password': 'x'`/`"password": "x"`/`password=x`）与裸 `token=`；保留 `*tokens` 白名单；补 5 种写法的单测。
+  2) **W-05**：`reported_at_ms` 与服务器时间偏差 > 24h → `400 Bad request: reported_at out of range`；列表默认 `ORDER BY reported_at DESC`（`?order=created_at` 可切）。
+  3) **I-01**：ingest 未知顶层字段保留到 `payload._unmapped`（对象；以 `_` 开头的键不特殊处理），不再静默丢弃。
+  4) **I-02**：`turns[]` 归一：非对象元素丢弃并记 `payload._warnings[]={"turn_index","reason":"invalid_turn"}`；`status` 非字符串→`unknown`；`tool_calls` 非数组→忽略。不拒绝整条请求。
+  5) **I-07**：脱敏管道返回计数，routes 注入 `payload._redactions={"secrets":n,"paths":n}`；路径仍改写为 `[USER_HOME]`（导出副本语义，无 canonical）；文档写明。
+  6) **W-04**：`trace_turns` 增 `run_id` 列（迁移 0006）+ 索引；`?run_id=` 同时匹配 `traces.run_id` 或任一轮次 run_id。
+  7) **I-04**：`?fields=summary` 时返回不含 `payload` 的记录；响应头 `X-Total-Count`（与过滤条件一致的计数）。
+  8) **I-06**：新增 `pony_sentry_trace_payload_bytes_total`、`pony_sentry_trace_merge_lost_turns_total`、`pony_sentry_trace_truncated_total`；单个 tool_call 的 `output`/`arguments_summary` 超过 20000 字符时截断并置 `truncated:true`。
+  9) **I-09**：`phase/sequence/node/attempt_index/degraded/stats_incomplete` 在契约中标记为可选生产者字段，缺失时 UI 回退；不再视为死契约。
+  10) **M-03**：新增可选 `TRACE_WEBHOOK_URL`（5s 超时；去重键 `project+tool_name+last_turn_status`，10 分钟内只发一次；失败只告警不重试）；UI 增加「待评审失败」筛选预设（`turn_status=failed&eval_status=unreviewed`）；不做 issue 建单。
+  11) **M-02/M-05/M-06（生产者，job_copilot）**：`turns[].llm_calls[]`（≤50，含 model/status/duration_ms/tokens/attempt_index/error_type）、`turns[].sampled/sample_rate`、`turns[].input_summary={"chars","sha256_16","head"}`（不传原文）；对应 R 条款与单测在 job_copilot 内落。

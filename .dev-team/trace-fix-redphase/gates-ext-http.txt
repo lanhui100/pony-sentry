@@ -1,0 +1,121 @@
+契约 v1.5（HTTP 侧）实现门禁收据 — task-19
+================================================================================
+契约：`.dev-team/trace-fix-contract.md` amend v1.5（2026-10-23）
+写域：`crates/server/src/{routes.rs,main.rs,lib.rs,trace_webhook.rs}`、`crates/server/tests/api_test.rs`
+      （另 `crates/server/tests/pg_api_duplicate_test.rs` 仅 1 行 AppState 字面量补齐，编译必要）
+未触碰：`crates/core/`、`crates/ingest/`、`migrations/`、`web/`、根 `tests/`、`docs/`、`README.md`
+时间：2026-10-23 22:38–23:03 (Asia/Shanghai)
+协作说明：core/ingest 的 v1.5 API 由 auditor-core 并行落地（`normalize_incoming_turns` / `RedactionCounts` /
+      `sanitize_trace_value` / `TraceOrder`+`order_by` / `count_traces` / `trace_merge_lost_total` /
+      `trace_truncated_total`）；本文件全部按 Lead 给定的签名接线，**未自造第二套语义**。
+
+## Gate 1 · cargo test --workspace --offline
+$ cargo test --workspace --offline
+      core lib 45 | pg_repository 4 | storage 2 | trace_repository 8 | trace_v2_repository 6
+      fingerprint lib 12 | hasher 1
+      ingest lib 34 | sanitizer 2
+      server lib 20 | adversarial_tailnet 3 | **api_test 31**（上轮 24 + 本任务 7）
+             | pg_api_duplicate 1 | reindex 1 | trust_unit 11
+   合计：206 passed / 0 failed / 0 ignored        EXIT=0
+
+## Gate 2 · cargo clippy --workspace --all-targets -- -D warnings
+$ cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+    CLIPPY_EXIT=0
+
+## Gate 3 · cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2 --offline
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 71.59s
+    ACCEPT_EXIT=0        # 冻结测试零改动（`git status --porcelain tests/` 为空）
+
+================================================================================
+## 逐项状态（全部 CLOSED）
+
+| 条目 | 状态 | 实现锚点 | 集成用例 |
+| :--- | :--- | :--- | :--- |
+| M-04 脱敏计数 | **CLOSED** | `routes.rs` ingest：`SanitizationPipeline::sanitize_trace_value(&raw_payload)` → 注入 `payload._redactions={"secrets":n,"paths":n}`（注入在脱敏后，计数不被二次改写） | `test_ingest_injects_redaction_counts` |
+| W-05 时间精度（前半） | **CLOSED** | `REPORTED_AT_MAX_SKEW_MS=24h`；越界 → `400 Bad request: reported_at out of range`（并计入 `invalid_params`） | `test_ingest_rejects_reported_at_out_of_range` |
+| W-05 排序（后半） | **CLOSED** | `TraceQuery.order` → `TraceOrder::{ReportedAt(default),CreatedAt}`；非法值 → 400；契约默认 = `reported_at DESC` | `test_list_order_summary_projection_and_total_count` |
+| I-01 未知顶层字段 | **CLOSED** | `AgentTraceIngestRequest` 增 `#[serde(flatten)] unknown: Map<String,Value>`；非 `_` 前缀 → `payload._unmapped`（注入在脱敏前，故未知字段内的敏感值同样被扫） | `test_ingest_unknown_fields_go_to_payload_unmapped` |
+| I-02 turns 归一 | **CLOSED** | ingest 调 `trace_v2::normalize_incoming_turns(&mut raw_payload)`；warnings 非空时写 `payload._warnings[]`；不拒整条请求 | `test_ingest_normalizes_turns_and_records_warnings` |
+| I-04 summary + 总数 | **CLOSED** | 新增 `TraceSummary` DTO（除 `payload` 外同构）；`?fields=summary` 返回投影，非法值 400；响应头 `X-Total-Count` 由 `count_traces(filter)` 计算（与 limit/offset 无关） | 同上 |
+| I-06 三个计数器 | **CLOSED** | `/metrics` 增 `pony_sentry_trace_payload_bytes_total`（本地累加**持久化行** payload 序列化字节）、`pony_sentry_trace_merge_lost_turns_total` 与 `pony_sentry_trace_truncated_total`（直接读 core 进程级 getter，避免双份计数漂移） | `test_metrics_expose_extended_v15_counters` |
+| M-03 失败态 webhook | **CLOSED** | 新模块 `crates/server/src/trace_webhook.rs`：`TraceNotifier{url, Mutex<HashMap<dedupe,Instant>>}`；`TRACE_WEBHOOK_URL` 启用；终态 `{failed,error,cancelled,timed_out}` 触发；5s 超时；失败仅 `warn!` 不重试；10 分钟去重（键 `project|tool_name|turn_status`，表上限 1024，超限先按窗口清理再整体清空）；`tokio::spawn` fire-and-forget | `test_trace_webhook_notifies_failures_with_ten_minute_dedupe`（含 4 单测） |
+
+## 物理收据（真实二进制 + curl，PORT 18401 + 本地 webhook 接收器 18402）
+
+```text
+$ # M-04/I-01/I-02/I-06：一次失败态 ingest（未知字段 / 伪造 _redactions / 坏 turn / 超长 tool 输出 / 密钥）
+  POST /api/v1/traces -> http_code=201
+  {"id":"3e8c9ef3-…","session_id":"probe-v15","turn_status":"failed","turns_count":1,"eval_status":"unreviewed"}
+$ # 落库 payload 派生字段
+  {"unmapped":{"custom_extra":{"k":"v"}},
+   "warnings":[{"reason":"invalid_turn","turn_index":1}],
+   "redactions":{"paths":1,"secrets":1},      # 客户端伪造的 secrets:999 被丢弃并替换为真实计数
+   "turns_len":1,                              # 非对象 turn 已丢弃
+   "token":"[REDACTED_SECRET]","input_text":"read [USER_HOME]/x",
+   "truncated":true,"output_len":20000}        # 20050 字符被截断到 20000 并标 truncated
+
+$ # W-05：reported_at 越界 → 400 精确文案
+  reported_at now-90000000ms -> Bad request: reported_at out of range [http_code=400]
+  reported_at now+90000000ms -> Bad request: reported_at out of range [http_code=400]
+  reported_at now-1h         -> http_code=201
+
+$ # I-04：X-Total-Count + ?fields=summary
+  GET ?fields=summary&limit=1 -> http_code=200  x-total-count: 2
+  summary item 键：["created_at","environment","eval_status","id","note","project","release",
+                    "reported_at","run_id","session_id","total_duration_ms","total_input_tokens",
+                    "total_output_tokens","turn_id","turn_status","turns_count","updated_at"]
+  含 payload? false
+  非法 fields -> Bad request: invalid `fields` parameter [http_code=400]
+  非法 order  -> Bad request: invalid `order` parameter  [http_code=400]
+
+$ # W-05 后半：默认 reported_at DESC
+  默认顺序          -> ["probe-order-new","probe-order-old"]
+  order=created_at  -> ["probe-order-new","probe-order-old"]（合法 200）
+
+$ # I-06：三个新计数器（真实值）
+  pony_sentry_trace_payload_bytes_total 21884
+  pony_sentry_trace_merge_lost_turns_total 0        # 本次无合并丢失；管道已接通 core getter
+  pony_sentry_trace_truncated_total 1               # 与上面 20050→20000 的截断一致
+
+$ # M-03：webhook 投递 + 去重
+  hook 收到条数（首次）: 1
+  第二次同键 ingest http_code=201
+  hook 收到条数（去重后仍应为 1）: 1
+  hook 首条关键字段: {"event":"trace_failure","turn_status":"failed","tool_name":"format_jd_to_json",
+                      "project":"job_copilot","trace_id":"3e8c9ef3-…","has_run_id":true}
+```
+
+## 集成用例清单（api_test.rs，24 → 31）
+
+1. `test_ingest_unknown_fields_go_to_payload_unmapped`（I-01 + 保留命名空间防伪造）
+2. `test_ingest_normalizes_turns_and_records_warnings`（I-02）
+3. `test_ingest_injects_redaction_counts`（M-04）
+4. `test_ingest_rejects_reported_at_out_of_range`（W-05 前半，含 ±1h 边界正例）
+5. `test_list_order_summary_projection_and_total_count`（W-05 后半 + I-04：默认排序 / 非法 order/fields 400 / summary 无 payload / X-Total-Count 不随 limit 变）
+6. `test_metrics_expose_extended_v15_counters`（I-06：三指标存在 + 字节数增长 + 截断计数 ≥1 + 落库 `truncated:true` 且长度 ≤20000）
+7. `test_trace_webhook_notifies_failures_with_ten_minute_dedupe`（M-03：投递 / 同键去重 / 成功不触发 / 不同 tool 再投递）
+另：`trace_webhook.rs` 内置 4 条单测（未配置不触发、终态白名单、去重窗口、去重表有界）。
+
+## 偏离与说明（须知会 Lead）
+
+1. **`_` 前缀未知字段一律丢弃**（契约 v1.5-3 原文「以 `_` 开头的键不特殊处理」存在两种读法）：
+   我按「服务端保留命名空间」处理——否则客户端可伪造 `_redactions`/`_warnings` 覆盖服务端派生事实。
+   若契约本意是「原样保留在顶层」，改一行即可（`if !key.starts_with('_')` → 恒定成立），但需同时接受伪造风险。
+2. **`_redactions` 在脱敏之后注入**：保证计数本身不被二次扫描改写；`_unmapped`/**`_warnings` 在脱敏之前注入**，
+   使未知字段里的密钥同样被计入与替换（实测 `secrets:1` 来自 `_unmapped` 之外的 `token` 键，行为正确）。
+3. **`trace_payload_bytes_total` 用「持久化行 payload 序列化长度」**（Lead 指定口径），**不是**请求体长度；
+   重复上报同一 session 会按持久化后的聚合体积再累加一次（counter 语义 = 每次 ingest 观测到的体积）。
+4. **`merge_lost`/`truncated` 直接读 core getter**（`trace_merge_lost_total()` / `trace_truncated_total()`），
+   不在 server 侧再存一份，避免同一事实两个家；代价是 `/metrics` 依赖 core 进程级静态量（同进程，无跨进程问题）。
+5. **`?order` 与 `?fields` 非法值 → 400**（与 `eval_status`/`limit` 的既有严格风格一致）；缺省/`reported_at`/`full`
+   分别等价契约默认。
+6. **webhook 未配置时零副作用**：不建 client、不建 task、不建去重表条目；`TRACE_WEBHOOK_URL=""` 视作未配置。
+7. **webhook 与全链路一致性**：投递失败只 `warn!`；`claim()` 在**投递前**登记，故 10 分钟内失败也不会重试（符合契约「不重试」）。
+8. **`crates/server/tests/pg_api_duplicate_test.rs` 1 行补齐**：`AppState` 新增 `notifier` 字段的编译必要改动（无断言变化）。
+
+## 残余风险 / 交接
+1. **v1.5-6（`trace_turns.run_id` + `?run_id=` 双匹配）属 core 侧**；HTTP 侧仅透传 filter，未改语义。
+2. **webhook 去重是进程内**：多副本部署时各副本各自去重（同一失败可能被 N 个副本各发一次）。如需全局去重需外部存储，属后续波次。
+3. **`X-Total-Count` 每次列表多一次 `count_traces` 查询**；大表高 QPS 下建议加索引/缓存（已在 core 侧 `(run_id)/(turn_status)/(updated_at)` 索引面上）。
+4. **`?fields=summary` 的 DTO 需与控制台同步演进**：新增列时两处都要改（本轮无新增列）。

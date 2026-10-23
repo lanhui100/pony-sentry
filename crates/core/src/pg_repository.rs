@@ -64,6 +64,13 @@ impl PgIssueRepository {
             indexes_skipped = schema_report.indexes_skipped,
             "trace v2 schema ensured"
         );
+        // 0006（W-04 / amend v1.5-6）：`trace_turns.run_id` + 索引（同样逐条 autocommit + 跳过已存在）。
+        let run_id_report = self.ensure_trace_turn_run_id_schema().await?;
+        tracing::debug!(
+            columns_added = run_id_report.columns_added,
+            indexes_created = run_id_report.indexes_created,
+            "trace turn run_id schema ensured"
+        );
         // C1.3 / amend v1.4-1：回填在 Rust 侧执行——turn_id 必须与运行时
         // `trace_v2::turn_key_of`（sha256）同构，SQL 方言无 sha256 故不写在迁移文件里。
         self.backfill_trace_turns().await?;
@@ -77,7 +84,20 @@ impl PgIssueRepository {
     /// 索引用 `CREATE INDEX CONCURRENTLY`（不在事务内，允许写入并行）。
     /// 返回逐类计数，供启动日志与测试断言（`TraceSchemaReport`）。
     pub async fn ensure_trace_v2_schema(&self) -> Result<TraceSchemaReport, sqlx::Error> {
-        let sql = include_str!("../../../migrations/postgres/0005_trace_turns.sql");
+        self.ensure_schema(include_str!("../../../migrations/postgres/0005_trace_turns.sql"))
+            .await
+    }
+
+    /// 0006：`trace_turns.run_id` 列 + 索引（`amend v1.5-6` / W-04）。
+    pub async fn ensure_trace_turn_run_id_schema(&self) -> Result<TraceSchemaReport, sqlx::Error> {
+        self.ensure_schema(include_str!(
+            "../../../migrations/postgres/0006_trace_turn_run_id.sql"
+        ))
+        .await
+    }
+
+    /// 逐条 autocommit 落实一份迁移文件（见 [`Self::ensure_trace_v2_schema`] 的规则）。
+    async fn ensure_schema(&self, sql: &str) -> Result<TraceSchemaReport, sqlx::Error> {
         let mut report = TraceSchemaReport::default();
         for statement in schema_statements(sql) {
             let upper = statement.to_ascii_uppercase();
@@ -836,80 +856,50 @@ impl TraceRepository for PgIssueRepository {
     }
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
-        let mut query = format!("SELECT {TRACE_COLUMNS} FROM traces WHERE 1=1");
-        let mut binds: Vec<String> = Vec::new();
-        let mut bind_index = 1;
-
-        if let Some(session_id) = &filter.session_id {
-            query.push_str(&format!(" AND session_id = ${bind_index}"));
-            binds.push(session_id.clone());
-            bind_index += 1;
-        }
-        if let Some(eval_status) = &filter.eval_status {
-            query.push_str(&format!(" AND eval_status = ${bind_index}"));
-            binds.push(eval_status.to_string());
-            bind_index += 1;
-        }
-        if let Some(environment) = &filter.environment {
-            query.push_str(&format!(" AND environment = ${bind_index}"));
-            binds.push(environment.clone());
-            bind_index += 1;
-        }
-        if let Some(release) = &filter.release {
-            query.push_str(&format!(" AND release = ${bind_index}"));
-            binds.push(release.clone());
-            bind_index += 1;
-        }
-        if let Some(project) = &filter.project {
-            query.push_str(&format!(" AND project = ${bind_index}"));
-            binds.push(project.clone());
-            bind_index += 1;
-        }
-        // C5：新增 run_id / turn_status / 时间窗（按 reported_at，含端点）筛选。
-        if let Some(run_id) = &filter.run_id {
-            query.push_str(&format!(" AND run_id = ${bind_index}"));
-            binds.push(run_id.clone());
-            bind_index += 1;
-        }
-        if let Some(turn_status) = &filter.turn_status {
-            query.push_str(&format!(" AND turn_status = ${bind_index}"));
-            binds.push(turn_status.clone());
-            bind_index += 1;
-        }
-        if filter.from.is_some() {
-            query.push_str(&format!(" AND reported_at >= ${bind_index}"));
-            bind_index += 1;
-        }
-        if filter.to.is_some() {
-            query.push_str(&format!(" AND reported_at <= ${bind_index}"));
-        }
-
-        query.push_str(" ORDER BY created_at DESC");
-
+        let (clause, binds, from, to) = pg_trace_filter_clause(&filter);
+        // `amend v1.5-2`：默认按 `reported_at DESC`，`order_by=CreatedAt` 可切回历史行为。
+        let order = filter.order_by.unwrap_or_default().order_clause();
         // C5：limit clamp 到 [1,100]；offset 不得为负（HTTP 层负责 400，仓储层兜底）。
         let limit = filter.limit.unwrap_or(50).clamp(1, 100);
         let offset = filter.offset.unwrap_or(0).max(0);
-        query.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+        let query = format!(
+            "SELECT {TRACE_COLUMNS} FROM traces{clause} {order} LIMIT {limit} OFFSET {offset}"
+        );
 
         let mut q = sqlx::query(&query);
         for b in binds {
             q = q.bind(b);
         }
         // 时间窗按 `DateTime<Utc>` 绑定（TIMESTAMPTZ 语义，避免文本比较）。
-        if let Some(from) = filter.from {
+        if let Some(from) = from {
             q = q.bind(to_micros(from));
         }
-        if let Some(to) = filter.to {
+        if let Some(to) = to {
             q = q.bind(to_micros(to));
         }
-
         let rows = q.fetch_all(&self.pool).await?;
         let mut traces = Vec::new();
         for row in rows {
             traces.push(Self::trace_from_row(row)?);
         }
-
         Ok(traces)
+    }
+
+    async fn count_traces(&self, filter: TraceFilter) -> Result<i64, RepositoryError> {
+        let (clause, binds, from, to) = pg_trace_filter_clause(&filter);
+        let query = format!("SELECT COUNT(*) AS n FROM traces{clause}");
+        let mut q = sqlx::query(&query);
+        for b in binds {
+            q = q.bind(b);
+        }
+        if let Some(from) = from {
+            q = q.bind(to_micros(from));
+        }
+        if let Some(to) = to {
+            q = q.bind(to_micros(to));
+        }
+        let row = q.fetch_one(&self.pool).await?;
+        Ok(row.get::<i64, _>("n"))
     }
 
     async fn update_trace_review(
@@ -1038,6 +1028,64 @@ impl TraceRepository for PgIssueRepository {
     }
 }
 
+/// `pg_trace_filter_clause` 的返回类型：(SQL 子句, 文本 binds, 时间窗下限, 时间窗上限)。
+type PgTraceFilterClause = (String, Vec<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+/// 拼接 `traces` 过滤子句（`list_traces` / `count_traces` 共用，保证口径一致）。
+///
+/// 返回 `(clause, 文本 binds, from, to)`：时间窗最后以 `DateTime<Utc>` 绑定（TIMESTAMPTZ）。
+/// `run_id` 语义（`amend v1.5-6` / W-04）：命中 `traces.run_id` **或**其任一轮次的
+/// `trace_turns.run_id`。
+fn pg_trace_filter_clause(filter: &TraceFilter) -> PgTraceFilterClause {
+    let mut clause = " WHERE 1=1".to_string();
+    let mut binds: Vec<String> = Vec::new();
+    let mut bind_index = 1;
+    // 宏而非闭包：需要同时修改 `bind_index` 与两个入参（借用检查无法用闭包表达）。
+    macro_rules! push {
+        ($clause:expr, $binds:expr, $value:expr, $predicate:expr) => {{
+            $clause.push_str(&format!(" AND {} = ${}", $predicate, bind_index));
+            $binds.push($value);
+            bind_index += 1;
+        }};
+    }
+    if let Some(session_id) = &filter.session_id {
+        push!(clause, binds, session_id.clone(), "session_id");
+    }
+    if let Some(eval_status) = &filter.eval_status {
+        push!(clause, binds, eval_status.to_string(), "eval_status");
+    }
+    if let Some(environment) = &filter.environment {
+        push!(clause, binds, environment.clone(), "environment");
+    }
+    if let Some(release) = &filter.release {
+        push!(clause, binds, release.clone(), "release");
+    }
+    if let Some(project) = &filter.project {
+        push!(clause, binds, project.clone(), "project");
+    }
+    if let Some(run_id) = &filter.run_id {
+        clause.push_str(&format!(
+            " AND (run_id = ${bind_index} OR EXISTS (SELECT 1 FROM trace_turns AS tt
+                 WHERE tt.session_id = traces.session_id AND tt.run_id = ${next}))",
+            next = bind_index + 1
+        ));
+        binds.push(run_id.clone());
+        binds.push(run_id.clone());
+        bind_index += 2;
+    }
+    if let Some(turn_status) = &filter.turn_status {
+        push!(clause, binds, turn_status.clone(), "turn_status");
+    }
+    if filter.from.is_some() {
+        clause.push_str(&format!(" AND reported_at >= ${bind_index}"));
+        bind_index += 1;
+    }
+    if filter.to.is_some() {
+        clause.push_str(&format!(" AND reported_at <= ${bind_index}"));
+    }
+    (clause, binds, filter.from, filter.to)
+}
+
 /// `traces` 行读取列（对齐 0003 + 0005 新增的 `turn_status` / `turns_count` / `note`）。
 ///
 /// `payload` 必须 `::text`（JSONB → TEXT），与 events 读取路径同约定。
@@ -1057,7 +1105,9 @@ async fn record_trace_locked(
 ) -> Result<TraceRecord, RepositoryError> {
     let now = to_micros(Utc::now());
     let session_id = trace.session_id.clone();
-    let incoming_top = trace.payload.clone();
+    // `amend v1.5-4`（I-02）：就地归一 turns + 单 tool_call 超长文本截断；warnings 写入 `payload._warnings`。
+    let mut incoming_top = trace.payload.clone();
+    let turn_warnings = crate::trace_v2::normalize_incoming_turns(&mut incoming_top);
     let existing = fetch_trace_by_session(&mut *tx, &session_id).await?;
     let old_payload = existing
         .as_ref()
@@ -1074,9 +1124,18 @@ async fn record_trace_locked(
     // 否则本次聚合只看得见新 turn，会把缺失的历史轮次整体丢掉。
     hydrate_trace_turns(&mut *tx, &session_id, &old_payload).await?;
 
+    // W-04（amend v1.5-6）：轮次 run 归属 = turn.run_id，缺省回退 payload 顶层 run_id。
+    let top_run_id = incoming_top
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string)
+        .or_else(|| trace.run_id.clone());
     for raw_turn in incoming_turns {
         let incoming = crate::trace_v2::normalize_incoming_turn(&raw_turn);
         let turn_id = crate::trace_v2::turn_key_of(&incoming);
+        let turn_run_id = turn_run_id_of(&incoming, top_run_id.as_deref());
         let (seq, mut merged) = match fetch_trace_turn(&mut *tx, &session_id, &turn_id).await? {
             Some((seq, stored)) => (seq, crate::trace_v2::merge_turn(&stored, &incoming)),
             None => (next_turn_seq(&mut *tx, &session_id).await?, incoming),
@@ -1090,11 +1149,20 @@ async fn record_trace_locked(
         }
         crate::trace_v2::annotate_turn(&mut merged);
         let status = crate::trace_v2::turn_status_of(&merged);
-        store_trace_turn(&mut *tx, &session_id, &turn_id, seq, &status, &merged, now).await?;
+        store_trace_turn(
+            &mut *tx,
+            &session_id,
+            &turn_id,
+            seq,
+            &status,
+            turn_run_id.as_deref(),
+            &merged,
+            now,
+        )
+        .await?;
     }
 
     let turns = list_turn_payloads(&mut *tx, &session_id).await?;
-    let mut incoming_top = incoming_top;
     if let Some(object) = incoming_top.as_object_mut() {
         object.insert(
             "session_id_source".to_string(),
@@ -1102,7 +1170,8 @@ async fn record_trace_locked(
         );
     }
     let top = crate::trace_v2::merge_top_level(&old_payload, &incoming_top);
-    let payload = crate::trace_v2::aggregate_session(&turns, &top);
+    let mut payload = crate::trace_v2::aggregate_session(&turns, &top);
+    merge_warnings(&mut payload, &old_payload, turn_warnings);
     let turn_status = turns
         .last()
         .map(crate::trace_v2::turn_status_of)
@@ -1160,6 +1229,11 @@ async fn hydrate_trace_turns(
     session_id: &str,
     payload: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
+    let top_run_id = payload
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty());
     let legacy_turns = payload
         .get("turns")
         .and_then(serde_json::Value::as_array)
@@ -1203,7 +1277,18 @@ async fn hydrate_trace_turns(
             object.insert("seq".to_string(), serde_json::Value::from(seq));
         }
         let status = crate::trace_v2::turn_status_of(&turn);
-        store_trace_turn(conn, session_id, turn_id, seq, &status, &turn, now).await?;
+        let run_id = turn_run_id_of(&turn, top_run_id);
+        store_trace_turn(
+            conn,
+            session_id,
+            turn_id,
+            seq,
+            &status,
+            run_id.as_deref(),
+            &turn,
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1261,21 +1346,25 @@ async fn next_turn_seq(conn: &mut sqlx::PgConnection, session_id: &str) -> Resul
 }
 
 /// 写入/合并单条 turn（`seq` 与 `created_at` 在冲突时保持不变，保证顺序稳定）。
+#[allow(clippy::too_many_arguments)]
 async fn store_trace_turn(
     conn: &mut sqlx::PgConnection,
     session_id: &str,
     turn_id: &str,
     seq: i64,
     status: &str,
+    run_id: Option<&str>,
     payload: &serde_json::Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     sqlx::query(
-        "INSERT INTO trace_turns (session_id, turn_id, seq, status, payload, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        "INSERT INTO trace_turns
+             (session_id, turn_id, seq, status, run_id, payload, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
          ON CONFLICT (session_id, turn_id) DO UPDATE SET
              status = excluded.status,
+             run_id = COALESCE(excluded.run_id, trace_turns.run_id),
              payload = excluded.payload,
              updated_at = excluded.updated_at",
     )
@@ -1283,12 +1372,52 @@ async fn store_trace_turn(
     .bind(turn_id)
     .bind(seq as i32)
     .bind(status)
+    .bind(run_id)
     .bind(payload)
     .bind(now)
     .bind(now)
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// 轮次的 run 归属（`W-04`）：`turn.run_id` 优先，缺失回退顶层 `run_id`。
+fn turn_run_id_of(turn: &serde_json::Value, top_run_id: Option<&str>) -> Option<String> {
+    turn.get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string)
+        .or_else(|| top_run_id.map(str::to_string))
+}
+
+/// 把本轮 warnings 与旧 `payload._warnings` 合并写回（按 JSON 去重，最多保留 100 条 —— `I-02`）。
+fn merge_warnings(
+    payload: &mut serde_json::Value,
+    old_payload: &serde_json::Value,
+    warnings: Vec<serde_json::Value>,
+) {
+    if warnings.is_empty() && old_payload.get("_warnings").is_none() {
+        return;
+    }
+    let mut merged: Vec<serde_json::Value> = old_payload
+        .get("_warnings")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for warning in warnings {
+        if !merged.contains(&warning) {
+            merged.push(warning);
+        }
+    }
+    merged.truncate(100);
+    if let Some(object) = payload.as_object_mut() {
+        if merged.is_empty() {
+            object.remove("_warnings");
+        } else {
+            object.insert("_warnings".to_string(), serde_json::Value::Array(merged));
+        }
+    }
 }
 
 /// 按 `seq` 升序读回会话全部 turn（聚合的唯一数据源）。

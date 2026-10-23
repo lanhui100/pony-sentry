@@ -115,6 +115,20 @@ impl SqliteIssueRepository {
             tx.commit().await?;
         }
 
+        // 0006（W-04 / amend v1.5-6）：`trace_turns.run_id` + 索引。
+        // SQLite 无 ADD COLUMN IF NOT EXISTS：按列探测守卫整份执行（范式同 0002/0004/0005）。
+        let has_turn_run_id: bool = sqlx::query("SELECT run_id FROM trace_turns LIMIT 0")
+            .fetch_all(&self.pool)
+            .await
+            .is_ok();
+        if !has_turn_run_id {
+            let mut tx = self.pool.begin().await?;
+            sqlx::raw_sql(include_str!("../../../migrations/0006_trace_turn_run_id.sql"))
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
         // C1.3 / amend v1.4-1：回填在 Rust 侧执行——turn_id 必须与运行时
         // `trace_v2::turn_key_of`（sha256）同构，SQL 方言无 sha256 故不写在迁移文件里。
         self.backfill_trace_turns().await?;
@@ -714,61 +728,33 @@ impl TraceRepository for SqliteIssueRepository {
     }
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError> {
-        let mut query = format!("SELECT {TRACE_COLUMNS} FROM traces WHERE 1=1");
-        let mut binds: Vec<String> = Vec::new();
-
-        if let Some(session_id) = &filter.session_id {
-            query.push_str(" AND session_id = ?");
-            binds.push(session_id.clone());
-        }
-        if let Some(eval_status) = &filter.eval_status {
-            query.push_str(" AND eval_status = ?");
-            binds.push(eval_status.to_string());
-        }
-        if let Some(environment) = &filter.environment {
-            query.push_str(" AND environment = ?");
-            binds.push(environment.clone());
-        }
-        if let Some(release) = &filter.release {
-            query.push_str(" AND release = ?");
-            binds.push(release.clone());
-        }
-        if let Some(project) = &filter.project {
-            query.push_str(" AND project = ?");
-            binds.push(project.clone());
-        }
-        // C5：新增 run_id / turn_status / 时间窗（按 reported_at，含端点）筛选。
-        if let Some(run_id) = &filter.run_id {
-            query.push_str(" AND run_id = ?");
-            binds.push(run_id.clone());
-        }
-        if let Some(turn_status) = &filter.turn_status {
-            query.push_str(" AND turn_status = ?");
-            binds.push(turn_status.clone());
-        }
-        if let Some(from) = &filter.from {
-            query.push_str(" AND reported_at >= ?");
-            binds.push(from.to_rfc3339());
-        }
-        if let Some(to) = &filter.to {
-            query.push_str(" AND reported_at <= ?");
-            binds.push(to.to_rfc3339());
-        }
-
-        query.push_str(" ORDER BY created_at DESC");
-
-        // C5：limit clamp 到 [1,100]；offset 不得为负（HTTP 层负责 400，仓储层兜底防负值 SQL）。
+        let (clause, binds) = sqlite_trace_filter_clause(&filter);
+        // `amend v1.5-2`：默认按 `reported_at DESC`，`order_by=CreatedAt` 可切回历史行为。
+        let order = filter.order_by.unwrap_or_default().order_clause();
+        // C5：limit clamp 到 [1,100]；offset 不得为负（HTTP 层负责 400，仓储层兜底）。
         let limit = filter.limit.unwrap_or(50).clamp(1, 100);
         let offset = filter.offset.unwrap_or(0).max(0);
-        query.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
+        let query = format!(
+            "SELECT {TRACE_COLUMNS} FROM traces{clause} {order} LIMIT {limit} OFFSET {offset}"
+        );
 
         let mut q = sqlx::query(&query);
         for b in binds {
             q = q.bind(b);
         }
-
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows.iter().map(trace_from_row).collect())
+    }
+
+    async fn count_traces(&self, filter: TraceFilter) -> Result<i64, RepositoryError> {
+        let (clause, binds) = sqlite_trace_filter_clause(&filter);
+        let query = format!("SELECT COUNT(*) AS n FROM traces{clause}");
+        let mut q = sqlx::query(&query);
+        for b in binds {
+            q = q.bind(b);
+        }
+        let row = q.fetch_one(&self.pool).await?;
+        Ok(row.get::<i64, _>("n"))
     }
 
     async fn update_trace_review(
@@ -858,6 +844,56 @@ impl TraceRepository for SqliteIssueRepository {
     }
 }
 
+/// 拼接 `traces` 过滤子句（`list_traces` / `count_traces` 共用，保证两者口径一致）。
+///
+/// `run_id` 语义（`amend v1.5-6` / W-04）：命中 `traces.run_id` **或**其任一轮次的
+/// `trace_turns.run_id`。
+fn sqlite_trace_filter_clause(filter: &TraceFilter) -> (String, Vec<String>) {
+    let mut clause = " WHERE 1=1".to_string();
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(session_id) = &filter.session_id {
+        clause.push_str(" AND session_id = ?");
+        binds.push(session_id.clone());
+    }
+    if let Some(eval_status) = &filter.eval_status {
+        clause.push_str(" AND eval_status = ?");
+        binds.push(eval_status.to_string());
+    }
+    if let Some(environment) = &filter.environment {
+        clause.push_str(" AND environment = ?");
+        binds.push(environment.clone());
+    }
+    if let Some(release) = &filter.release {
+        clause.push_str(" AND release = ?");
+        binds.push(release.clone());
+    }
+    if let Some(project) = &filter.project {
+        clause.push_str(" AND project = ?");
+        binds.push(project.clone());
+    }
+    if let Some(run_id) = &filter.run_id {
+        clause.push_str(
+            " AND (run_id = ? OR EXISTS (SELECT 1 FROM trace_turns AS tt
+                 WHERE tt.session_id = traces.session_id AND tt.run_id = ?))",
+        );
+        binds.push(run_id.clone());
+        binds.push(run_id.clone());
+    }
+    if let Some(turn_status) = &filter.turn_status {
+        clause.push_str(" AND turn_status = ?");
+        binds.push(turn_status.clone());
+    }
+    if let Some(from) = &filter.from {
+        clause.push_str(" AND reported_at >= ?");
+        binds.push(from.to_rfc3339());
+    }
+    if let Some(to) = &filter.to {
+        clause.push_str(" AND reported_at <= ?");
+        binds.push(to.to_rfc3339());
+    }
+    (clause, binds)
+}
+
 /// `traces` 行读取列（对齐 0003 + 0005 新增的 `turn_status` / `turns_count` / `note`）。
 const TRACE_COLUMNS: &str = "id, session_id, run_id, turn_id, environment, release, project, \
      eval_status, payload, total_input_tokens, total_output_tokens, total_duration_ms, \
@@ -875,7 +911,10 @@ async fn record_trace_locked(
 ) -> Result<TraceRecord, RepositoryError> {
     let now = Utc::now();
     let session_id = trace.session_id.clone();
-    let incoming_top = trace.payload.clone();
+    // `amend v1.5-4`（I-02）：就地归一 turns（丢弃非法元素 / status 归一 / tool_calls 非数组忽略 /
+    // 单 tool_call 超长文本截断），warnings 随后写入 `payload._warnings`。
+    let mut incoming_top = trace.payload.clone();
+    let turn_warnings = crate::trace_v2::normalize_incoming_turns(&mut incoming_top);
     let existing = fetch_trace_by_session(&mut *tx, &session_id).await?;
     let old_payload = existing
         .as_ref()
@@ -892,9 +931,18 @@ async fn record_trace_locked(
         .cloned()
         .unwrap_or_default();
 
+    // W-04（amend v1.5-6）：轮次 run 归属 = turn.run_id，缺省回退 payload 顶层 run_id。
+    let top_run_id = incoming_top
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string)
+        .or_else(|| trace.run_id.clone());
     for raw_turn in incoming_turns {
         let incoming = crate::trace_v2::normalize_incoming_turn(&raw_turn);
         let turn_id = crate::trace_v2::turn_key_of(&incoming);
+        let turn_run_id = turn_run_id_of(&incoming, top_run_id.as_deref());
         let (seq, mut merged) = match fetch_trace_turn(&mut *tx, &session_id, &turn_id).await? {
             Some((seq, stored)) => (seq, crate::trace_v2::merge_turn(&stored, &incoming)),
             None => (next_turn_seq(&mut *tx, &session_id).await?, incoming),
@@ -908,11 +956,20 @@ async fn record_trace_locked(
         }
         crate::trace_v2::annotate_turn(&mut merged);
         let status = crate::trace_v2::turn_status_of(&merged);
-        store_trace_turn(&mut *tx, &session_id, &turn_id, seq, &status, &merged, now).await?;
+        store_trace_turn(
+            &mut *tx,
+            &session_id,
+            &turn_id,
+            seq,
+            &status,
+            turn_run_id.as_deref(),
+            &merged,
+            now,
+        )
+        .await?;
     }
 
     let turns = list_turn_payloads(&mut *tx, &session_id).await?;
-    let mut incoming_top = incoming_top;
     if let Some(object) = incoming_top.as_object_mut() {
         object.insert(
             "session_id_source".to_string(),
@@ -920,7 +977,8 @@ async fn record_trace_locked(
         );
     }
     let top = crate::trace_v2::merge_top_level(&old_payload, &incoming_top);
-    let payload = crate::trace_v2::aggregate_session(&turns, &top);
+    let mut payload = crate::trace_v2::aggregate_session(&turns, &top);
+    merge_warnings(&mut payload, &old_payload, turn_warnings);
     let turn_status = turns
         .last()
         .map(crate::trace_v2::turn_status_of)
@@ -978,6 +1036,11 @@ async fn hydrate_trace_turns(
     session_id: &str,
     payload: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
+    let top_run_id = payload
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty());
     let legacy_turns = payload
         .get("turns")
         .and_then(serde_json::Value::as_array)
@@ -1021,7 +1084,18 @@ async fn hydrate_trace_turns(
             object.insert("seq".to_string(), serde_json::Value::from(seq));
         }
         let status = crate::trace_v2::turn_status_of(&turn);
-        store_trace_turn(conn, session_id, turn_id, seq, &status, &turn, now).await?;
+        let run_id = turn_run_id_of(&turn, top_run_id);
+        store_trace_turn(
+            conn,
+            session_id,
+            turn_id,
+            seq,
+            &status,
+            run_id.as_deref(),
+            &turn,
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1082,21 +1156,25 @@ async fn next_turn_seq(
 }
 
 /// 写入/合并单条 turn（`seq` 与 `created_at` 在冲突时保持不变，保证顺序稳定）。
+#[allow(clippy::too_many_arguments)]
 async fn store_trace_turn(
     conn: &mut sqlx::SqliteConnection,
     session_id: &str,
     turn_id: &str,
     seq: i64,
     status: &str,
+    run_id: Option<&str>,
     payload: &serde_json::Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     sqlx::query(
-        "INSERT INTO trace_turns (session_id, turn_id, seq, status, payload, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO trace_turns
+             (session_id, turn_id, seq, status, run_id, payload, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (session_id, turn_id) DO UPDATE SET
              status = excluded.status,
+             run_id = COALESCE(excluded.run_id, trace_turns.run_id),
              payload = excluded.payload,
              updated_at = excluded.updated_at",
     )
@@ -1104,12 +1182,52 @@ async fn store_trace_turn(
     .bind(turn_id)
     .bind(seq)
     .bind(status)
+    .bind(run_id)
     .bind(payload)
     .bind(now.to_rfc3339())
     .bind(now.to_rfc3339())
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// 轮次的 run 归属（`W-04`）：`turn.run_id` 优先，缺失回退顶层 `run_id`。
+fn turn_run_id_of(turn: &serde_json::Value, top_run_id: Option<&str>) -> Option<String> {
+    turn.get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string)
+        .or_else(|| top_run_id.map(str::to_string))
+}
+
+/// 把本轮 warnings 与旧 `payload._warnings` 合并写回（按 JSON 去重，最多保留 100 条 —— `I-02`）。
+fn merge_warnings(
+    payload: &mut serde_json::Value,
+    old_payload: &serde_json::Value,
+    warnings: Vec<serde_json::Value>,
+) {
+    if warnings.is_empty() && old_payload.get("_warnings").is_none() {
+        return;
+    }
+    let mut merged: Vec<serde_json::Value> = old_payload
+        .get("_warnings")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for warning in warnings {
+        if !merged.contains(&warning) {
+            merged.push(warning);
+        }
+    }
+    merged.truncate(100);
+    if let Some(object) = payload.as_object_mut() {
+        if merged.is_empty() {
+            object.remove("_warnings");
+        } else {
+            object.insert("_warnings".to_string(), serde_json::Value::Array(merged));
+        }
+    }
 }
 
 /// 按 `seq` 升序读回会话全部 turn（聚合的唯一数据源）。

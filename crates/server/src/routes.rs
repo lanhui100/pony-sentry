@@ -2,6 +2,7 @@ use crate::session::{
     csrf_token_from_header, session_token_from_bearer, session_token_from_cookie, SessionOrigin,
     SessionStore,
 };
+use crate::trace_webhook::TraceNotifier;
 use crate::trust::{is_proxied, normalize_peer, TrustConfig, TrustDecision};
 use axum::{
     body::Body,
@@ -16,7 +17,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use pony_sentry_core::{
-    models::{EvalStatus, IssueStatus, TraceFilter, TraceRecord},
+    models::{EvalStatus, IssueStatus, TraceFilter, TraceOrder, TraceRecord},
     repository::{IssueFilter, IssueRepository, NewEventRecord, TraceRepository},
 };
 use pony_sentry_ingest::{
@@ -46,6 +47,9 @@ const DB_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 /// `F1`：通用错误响应文案（契约 v1.4-7：DB/serde 原文只进日志，绝不外发）。
 const BAD_REQUEST_BODY: &str = "Bad request";
 const INTERNAL_ERROR_BODY: &str = "Internal error";
+
+/// `W-05`（契约 v1.5-2）：`reported_at_ms` 与服务器时间的允许偏差（超过即 400）。
+const REPORTED_AT_MAX_SKEW_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// `F2`：指标 label 的最大字符数（`project` 截断，防无界基数）。
 const METRIC_LABEL_MAX_CHARS: usize = 64;
@@ -165,6 +169,11 @@ pub struct IngestMetrics {
     ingest_rejected: Mutex<BTreeMap<String, u64>>,
     /// `F2`：series 溢出告警「只告警一次」的闸门（跨 map 共享）。
     series_overflow_warned: std::sync::atomic::AtomicBool,
+    /// `I-06`（契约 v1.5-8）：每次 ingest 累加持久化行 payload 的字节数。
+    ///
+    /// 合并丢失 / 文本截断两个计数由 core 进程级原子量持有（`trace_merge_lost_total()` /
+    /// `trace_truncated_total()`），`/metrics` 渲染时直接读取，避免双份计数漂移。
+    trace_payload_bytes_total: AtomicU64,
 }
 
 impl IngestMetrics {
@@ -222,6 +231,12 @@ impl IngestMetrics {
             );
         }
     }
+    /// `I-06`：一次 ingest 的持久化 payload 体积。
+    fn record_trace_payload_bytes(&self, payload_bytes: u64) {
+        self.trace_payload_bytes_total
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+    }
+
     /// `C7` + `F2`：直接把 trace 指标写入 Prometheus 文本（持锁迭代，不整表 clone）。
     ///
     /// 锁序固定为 traces → turns → rejected，三段之间不嵌套，故与写入侧不会死锁。
@@ -274,6 +289,31 @@ impl IngestMetrics {
                 ));
             }
         }
+        // `I-06`（契约 v1.5-8）：payload 体积 / 截断 / 合并丢失三个计数器。
+        body.push_str(
+            "# HELP pony_sentry_trace_payload_bytes_total trace 持久化 payload 累计字节数（每次 ingest 累加）\n\
+             # TYPE pony_sentry_trace_payload_bytes_total counter\n",
+        );
+        body.push_str(&format!(
+            "pony_sentry_trace_payload_bytes_total {}\n",
+            self.trace_payload_bytes_total.load(Ordering::Relaxed)
+        ));
+        body.push_str(
+            "# HELP pony_sentry_trace_merge_lost_turns_total 合并期丢失的 turn 数（core 进程级计数）\n\
+             # TYPE pony_sentry_trace_merge_lost_turns_total counter\n",
+        );
+        body.push_str(&format!(
+            "pony_sentry_trace_merge_lost_turns_total {}\n",
+            pony_sentry_core::trace_v2::trace_merge_lost_total()
+        ));
+        body.push_str(
+            "# HELP pony_sentry_trace_truncated_total 被截断的 tool_call 数（output/arguments_summary 超限）\n\
+             # TYPE pony_sentry_trace_truncated_total counter\n",
+        );
+        body.push_str(&format!(
+            "pony_sentry_trace_truncated_total {}\n",
+            pony_sentry_core::trace_v2::trace_truncated_total()
+        ));
     }
     pub fn snapshot(&self) -> (u64, u64, u64) {
         (
@@ -295,6 +335,8 @@ pub struct AppState {
     /// `METRICS_TOKEN`（可选）：为空时 `/metrics` 保持免鉴权（探针/README 现状）；非空时要求
     /// `Authorization: Bearer <token>` 或 `x-metrics-token: <token>`，否则 401。
     pub metrics_token: Option<String>,
+    /// `M-03`（契约 v1.5-10）：失败态 trace 的可选异步 webhook 通知器。
+    pub notifier: Arc<TraceNotifier>,
     pub metrics: Arc<IngestMetrics>,
     /// 控制台服务端会话（HttpOnly Cookie / 短期 Bearer 令牌）。
     pub sessions: Arc<SessionStore>,
@@ -309,6 +351,7 @@ impl AppState {
             admin_token: None,
             webhook_url: None,
             metrics_token: None,
+            notifier: Arc::default(),
             metrics: Arc::new(IngestMetrics::default()),
             sessions: Arc::new(SessionStore::default()),
         }
@@ -322,6 +365,12 @@ impl AppState {
     /// 可选 `/metrics` 鉴权令牌（`METRICS_TOKEN`）。`None`/空串保持免鉴权。
     pub fn with_metrics_token(mut self, metrics_token: Option<String>) -> Self {
         self.metrics_token = metrics_token.filter(|token| !token.is_empty());
+        self
+    }
+
+    /// 可选失败态 trace webhook（`TRACE_WEBHOOK_URL`，契约 v1.5-10）。`None`/空串即关闭。
+    pub fn with_trace_webhook(mut self, url: Option<String>) -> Self {
+        self.notifier = Arc::new(TraceNotifier::new(url));
         self
     }
 
@@ -594,6 +643,12 @@ pub struct AgentTraceIngestRequest {
     pub total_output_tokens: Option<i64>,
     pub total_duration_ms: Option<i64>,
     pub reported_at_ms: Option<u64>,
+    /// `I-01`（契约 v1.5-3）：未知顶层字段不再静默丢弃，归一后写入 `payload._unmapped`。
+    ///
+    /// 以 `_` 开头的键属服务端保留命名空间（`_unmapped`/`_warnings`/`_redactions`），
+    /// 客户端传入一律丢弃，避免伪造服务端派生字段。
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -619,6 +674,10 @@ pub struct TraceQuery {
     /// `C5`：非数字 → 400；负值 → 400。
     #[serde(default, deserialize_with = "deserialize_strict_i64_param")]
     pub offset: Option<i64>,
+    /// `W-05` 后半（契约 v1.5-2）：`created_at` 可切换到按入库时间倒序；缺省 `reported_at`。
+    pub order: Option<String>,
+    /// `I-04`（契约 v1.5-7）：`summary` 时响应不含 `payload`；缺省返回完整记录。
+    pub fields: Option<String>,
 }
 
 /// `C5`：严格整数解析——空串视作缺省，非整数字面量返回反序列化错误（axum 统一 400），
@@ -653,6 +712,53 @@ where
     DateTime::parse_from_rfc3339(trimmed)
         .map(|value| Some(value.with_timezone(&Utc)))
         .map_err(|_| D::Error::custom("Bad request: RFC3339 timestamp expected"))
+}
+
+/// `I-04`（契约 v1.5-7）：`?fields=summary` 的列表投影——除 `payload` 外与完整记录同构，
+/// 便于控制台列表页在万行级场景下省掉正文传输。
+#[derive(Debug, Serialize)]
+pub struct TraceSummary {
+    pub id: String,
+    pub session_id: String,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub environment: String,
+    pub release: String,
+    pub project: Option<String>,
+    pub eval_status: EvalStatus,
+    pub turn_status: String,
+    pub turns_count: i64,
+    pub note: Option<String>,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_duration_ms: Option<i64>,
+    pub reported_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<TraceRecord> for TraceSummary {
+    fn from(record: TraceRecord) -> Self {
+        Self {
+            id: record.id,
+            session_id: record.session_id,
+            run_id: record.run_id,
+            turn_id: record.turn_id,
+            environment: record.environment,
+            release: record.release,
+            project: record.project,
+            eval_status: record.eval_status,
+            turn_status: record.turn_status,
+            turns_count: record.turns_count,
+            note: record.note,
+            total_input_tokens: record.total_input_tokens,
+            total_output_tokens: record.total_output_tokens,
+            total_duration_ms: record.total_duration_ms,
+            reported_at: record.reported_at,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1533,16 +1639,65 @@ async fn handle_ingest_trace(
     })?;
 
     let now = chrono::Utc::now();
+
+    // `W-05`（契约 v1.5-2）：`reported_at_ms` 与服务器时间偏差超过 24h → 400（防时钟错标污染时间线）。
+    if let Some(ms) = payload.reported_at_ms {
+        let skew = ms as i128 - now.timestamp_millis() as i128;
+        if skew.abs() > REPORTED_AT_MAX_SKEW_MS as i128 {
+            state.metrics.record_trace_ingest_rejected("invalid_params");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Bad request: reported_at out of range".to_string(),
+            ));
+        }
+    }
+
     let reported_at = payload
         .reported_at_ms
         .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
         .unwrap_or(now);
 
-    let raw_payload = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
+    let mut raw_payload = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
 
-    // 服务端二次脱敏：客户端 SDK 已脱敏一次，入库前按同一管道再扫一遍，
-    // 防止绕过客户端的敏感字段（token/secret/password 等）落库。
-    let sanitized_payload = SanitizationPipeline::sanitize_json_value(raw_payload, 0);
+    // `I-01`（契约 v1.5-3）：`#[serde(flatten)]` 会把未知顶层字段平铺回顶层；这里摘出来改注入
+    // `payload._unmapped`（对象）。`_` 前缀属服务端保留命名空间，客户端传入一律丢弃（防伪造
+    // `_unmapped`/`_warnings`/`_redactions`）。注入发生在脱敏之前，故 `_unmapped` 内的敏感值同样被扫。
+    if let Some(object) = raw_payload.as_object_mut() {
+        let mut unmapped = serde_json::Map::new();
+        for key in payload.unknown.keys() {
+            if let Some(value) = object.remove(key) {
+                if !key.starts_with('_') {
+                    unmapped.insert(key.clone(), value);
+                }
+            }
+        }
+        if !unmapped.is_empty() {
+            object.insert("_unmapped".to_string(), serde_json::Value::Object(unmapped));
+        }
+    }
+
+    // `I-02`（契约 v1.5-4）：`turns[]` 归一——非对象丢弃、status 非字符串→unknown、
+    // tool_calls 非数组忽略、超长 tool 文本截断；warnings 回写 `payload._warnings`（不拒整条请求）。
+    let turn_warnings = pony_sentry_core::trace_v2::normalize_incoming_turns(&mut raw_payload);
+    if !turn_warnings.is_empty() {
+        if let Some(object) = raw_payload.as_object_mut() {
+            object.insert(
+                "_warnings".to_string(),
+                serde_json::Value::Array(turn_warnings),
+            );
+        }
+    }
+
+    // 服务端二次脱敏（`M-04` / 契约 v1.5-5）：客户端 SDK 已脱敏一次，入库前按同一管道再扫一遍，
+    // 防止绕过客户端的敏感字段（token/secret/password 等）落库；同时取回命中计数。
+    let (mut sanitized_payload, redactions) =
+        SanitizationPipeline::sanitize_trace_value(&raw_payload);
+    if let Some(object) = sanitized_payload.as_object_mut() {
+        object.insert(
+            "_redactions".to_string(),
+            json!({"secrets": redactions.secrets, "paths": redactions.paths}),
+        );
+    }
 
     // `C5`：`session_id` 优先，缺失/空白时回退 `thread_id`；两者皆空 → 400（纯文本，不含 DB 信息）。
     let session_id = match (
@@ -1562,8 +1717,12 @@ async fn handle_ingest_trace(
         }
     };
 
-    // `C7`：本次上报的 turn 状态分布 + `C4` status_conflict 探测（只读副本，不改入参）。
-    let incoming_turns: Vec<serde_json::Value> = payload.turns.clone().unwrap_or_default();
+    // `C7`：本次上报的 turn 状态分布 + `C4` status_conflict 探测（取归一后的 turns，只读）。
+    let incoming_turns: Vec<serde_json::Value> = sanitized_payload
+        .get("turns")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let turn_statuses: Vec<String> = incoming_turns
         .iter()
         .map(pony_sentry_core::trace_v2::turn_status_of)
@@ -1615,7 +1774,54 @@ async fn handle_ingest_trace(
         state.metrics.record_trace_status_conflict();
     }
 
+    // `I-06`（契约 v1.5-8）：payload 体积取**持久化行**序列化长度；合并丢失/截断读 core 进程级计数。
+    let payload_bytes = serde_json::to_vec(&saved.payload)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or(0);
+    state.metrics.record_trace_payload_bytes(payload_bytes);
+
+    // `M-03`（契约 v1.5-10）：失败态 turn 触发可选异步 webhook（去重键 project|tool_name|turn_status）。
+    if state.notifier.should_notify(&saved.turn_status) {
+        let project = saved.project.as_deref().unwrap_or("unknown");
+        let tool_name = first_tool_name(&saved.payload).unwrap_or_else(|| "unknown".to_string());
+        let dedupe_key = format!("{project}|{tool_name}|{}", saved.turn_status);
+        state.notifier.notify(
+            dedupe_key,
+            json!({
+                "event": "trace_failure",
+                "trace_id": saved.id,
+                "session_id": saved.session_id,
+                "run_id": saved.run_id,
+                "project": saved.project,
+                "environment": saved.environment,
+                "release": saved.release,
+                "turn_status": saved.turn_status,
+                "turns_count": saved.turns_count,
+                "tool_name": tool_name,
+                "reported_at": saved.reported_at.to_rfc3339(),
+            }),
+        );
+    }
+
     Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// `M-03`：取 payload 中首个 tool_call 的 `tool_name`（去重键的一部分）。
+fn first_tool_name(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("turns")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find_map(|turn| {
+            turn.get("tool_calls")
+                .and_then(serde_json::Value::as_array)?
+                .iter()
+                .find_map(|call| {
+                    call.get("tool_name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+        })
 }
 
 async fn handle_list_traces(
@@ -1660,6 +1866,40 @@ async fn handle_list_traces(
         other => other,
     };
 
+    // `W-05` 后半（契约 v1.5-2）：排序维度白名单，非法值 → 400。
+    let order_by = match query
+        .order
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("reported_at") => None, // 契约默认 = ReportedAt
+        Some("created_at") => Some(TraceOrder::CreatedAt),
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Bad request: invalid `order` parameter".to_string(),
+            ));
+        }
+    };
+
+    // `I-04`（契约 v1.5-7）：投影白名单，非法值 → 400。
+    let summary_only = match query
+        .fields
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("full") => false,
+        Some("summary") => true,
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Bad request: invalid `fields` parameter".to_string(),
+            ));
+        }
+    };
+
     let filter = TraceFilter {
         session_id: query.session_id,
         eval_status,
@@ -1670,9 +1910,22 @@ async fn handle_list_traces(
         turn_status: query.turn_status,
         from: query.from,
         to: query.to,
+        order_by,
         limit,
         offset,
     };
+
+    // `I-04`：`X-Total-Count` 必须与过滤条件一致（不随 limit/offset 变化）。
+    let total = trace_repo
+        .count_traces(filter.clone())
+        .await
+        .map_err(|err| {
+            error!(error = %err, "trace count failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                INTERNAL_ERROR_BODY.to_string(),
+            )
+        })?;
 
     let traces = trace_repo.list_traces(filter).await.map_err(|err| {
         error!(error = %err, "trace list failed");
@@ -1682,7 +1935,17 @@ async fn handle_list_traces(
         )
     })?;
 
-    Ok(Json(traces))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static("x-total-count"),
+        HeaderValue::from_str(&total.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
+
+    if summary_only {
+        let summaries: Vec<TraceSummary> = traces.into_iter().map(TraceSummary::from).collect();
+        return Ok((StatusCode::OK, headers, Json(summaries)).into_response());
+    }
+    Ok((StatusCode::OK, headers, Json(traces)).into_response())
 }
 
 async fn handle_get_trace(

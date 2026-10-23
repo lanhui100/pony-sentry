@@ -1,0 +1,82 @@
+T10 扩展门禁收据（executor-db / task-18，contract amend v1.5 core/ingest 部分）
+================================================================================
+写域：`crates/core/src/**`、`crates/ingest/src/**`、`migrations/**`
+（`crates/core/tests/trace_v2_ext_test.rs` 为新增测试；`crates/core/tests/trace_repository_test.rs` 仅补
+ `order_by: None` 编译衍生字段，未改任何断言 —— 依据 v1.3-2 编译衍生豁免）
+未改：`crates/server/**`、`web/**`、仓库根 `tests/**`、`docs/**`
+时间：2026-10-23 22:4x–23:0x (Asia/Shanghai)；原始日志 `.dev-team/trace-fix-redphase/gates-ext-core.raw.log`
+
+## Gate 1 · cargo test -p pony-sentry-core -p pony-sentry-ingest --offline（PG 真实执行）
+$ PONY_TEST_PG_URL='postgresql://job_copilot:***@10.43.206.170:5432/ponysentry_test' \
+    cargo test -p pony-sentry-core -p pony-sentry-ingest --offline
+  core  unittests/src/lib.rs            running 45 → ok. 45 passed
+  core  tests/pg_repository_test.rs     running 4  → ok. 4 passed
+  core  tests/storage_test.rs           running 2  → ok. 2 passed
+  core  tests/trace_repository_test.rs  running 8  → ok. 8 passed
+  core  tests/trace_v2_ext_test.rs      running 6  → ok. 6 passed     # 本任务新增（含 2 条 PG 真跑）
+  core  tests/trace_v2_repository_test.rs running 25 → ok. 25 passed  # 含 6 条 PG 真跑
+  ingest unittests/src/lib.rs           running 34 → ok. 34 passed    # 含 3 条本任务新增
+  ingest tests/sanitizer_test.rs        running 2  → ok. 2 passed
+合计 126 passed / 0 failed；`grep -c SKIP` = 0
+TEST_EXIT=0
+
+## Gate 2 · cargo clippy -p pony-sentry-core -p pony-sentry-ingest --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s)
+CLIPPY_EXIT=0
+
+## 逐项落点
+1) **M-04**（`crates/ingest/src/sanitizer.rs`）
+   - `SECRET_PATTERNS`：键允许单/双引号、`:`/`=` 两侧空白、值「带引号 ≥1 字符 / 裸值 ≥4 字符」，
+     显式加入裸 `token`；`*tokens` / `token_count` 白名单不变（单测断言不被误改）。
+   - 新增 `pub struct RedactionCounts { pub secrets: u64, pub paths: u64 }`（`lib.rs` 已 re-export）与
+     `SanitizationPipeline::sanitize_trace_value(&Value) -> (Value, RedactionCounts)`（HTTP 约定签名）。
+     配套 `sanitize_json_value_counted` / `sanitize_string_counted` / `sanitize_path_counted` /
+     `sanitize_event_counted`；原入口全部保留并委托（无双套语义）。
+   - 单测：`m04_redacts_five_secret_spellings`（5 写法：`password=`、`"password": "x"`、
+     `'password': 'x'`、`token=`、`'api_key' = 'x'`）、`m04_token_metrics_are_not_redacted`、
+     `m04_sanitize_trace_value_counts_secrets_and_paths`。
+2) **I-02**（`crates/core/src/trace_v2.rs`）
+   - `pub fn normalize_incoming_turns(payload: &mut Value) -> Vec<Value>`：非对象丢弃并产出
+     `{"turn_index","reason":"invalid_turn"}`；`status` 非字符串 → `unknown`；`tool_calls` 非数组 → 删除。
+   - 写路径（PG/SQLite `record_trace_locked`）调用并写入 `payload._warnings`（与旧值按 JSON 去重合集，上限 100）。
+   - 单测：`i02_normalize_incoming_turns_drops_invalid_and_collects_warnings`、
+     `i02_invalid_turns_are_dropped_and_warnings_persisted`（仓储级，含二次上报保留旧 warnings）。
+3) **W-04**（迁移 + 仓储）
+   - `migrations/0006_trace_turn_run_id.sql` + `migrations/postgres/0006_trace_turn_run_id.sql`：
+     `trace_turns.run_id` 列 + `idx_trace_turns_run_id`；SQLite 由列探测守卫单事务执行，
+     PG 走 `ensure_trace_turn_run_id_schema()`（逐条 autocommit/跳过已存在/CONCURRENTLY 索引）。
+   - 写入填充：`turn.run_id` 优先，缺失回退 `payload` 顶层 `run_id`（`turn_run_id_of`），
+     upsert 用 `run_id = COALESCE(excluded.run_id, trace_turns.run_id)`；hydration/backfill 同步填充。
+   - `list_traces` / `count_traces` 的 `run_id` 过滤：
+     `run_id = $1 OR EXISTS (SELECT 1 FROM trace_turns tt WHERE tt.session_id = traces.session_id AND tt.run_id = $1)`。
+   - 单测：`w04_turn_run_id_column_and_filter_matches_turn_or_trace`（列填充两种来源 + 三向过滤 + 幂等重迁移）、
+     `pg::w04_pg_run_id_filter_and_0006_schema`（0006 二次 ensure 0/0 + 列存在 + PG 过滤）。
+4) **I-06**（截断 + 计数）
+   - `TOOL_CALL_TEXT_MAX_CHARS = 20_000`；`normalize_incoming_turns` 内对每个 tool_call 的
+     `output` / `arguments_summary` 截断并置 `truncated: true`，累计 `TRUNCATED_TOOL_TEXT`。
+   - 进程级计数接口（供 `/metrics`）：`trace_truncated_total()` / `take_truncated_tool_text()`；
+     合并丢失：`trace_merge_lost_total()` / `take_merge_lost_turns()`（旧终态覆盖新值时 `merge_turn` 累加）。
+   - 单测：`i06_tool_call_text_is_truncated_at_limit_and_flagged`、
+     `i06_long_tool_call_text_is_truncated_persisted_with_flag`（含 trace_turns 落盘值）、
+     `v15_merge_lost_total_counts_old_terminal_overriding_new_value`（正/负例）。
+5) **I-04/W-05**（仓储支撑）
+   - `TraceFilter.order_by: Option<TraceOrder>`（`TraceOrder::{ReportedAt, CreatedAt}`，`Default = ReportedAt`）；
+     `list_traces` 默认 `ORDER BY reported_at DESC, created_at DESC`，`CreatedAt` 切换回历史行为。
+   - `TraceRepository::count_traces(filter) -> i64`（与 list 共用同一过滤子句 helper，不受 limit/offset 影响；
+     PG/SQLite 各一份 `*_trace_filter_clause`）。
+   - 单测：`i04_count_traces_matches_filter_and_order_by_switches`、`pg::i04_pg_count_and_order_by`。
+
+## 接口（供 HTTP 侧，已按 Lead 给定签名实现，无双套）
+- `pony_sentry_ingest::RedactionCounts { pub secrets: u64, pub paths: u64 }`
+- `SanitizationPipeline::sanitize_trace_value(&serde_json::Value) -> (serde_json::Value, RedactionCounts)`
+- `pony_sentry_core::trace_v2::normalize_incoming_turns(payload: &mut Value) -> Vec<Value>`
+- `TraceRepository::count_traces(&self, filter: TraceFilter) -> Result<i64, RepositoryError>`
+- `TraceFilter { …, order_by: Option<TraceOrder> }`；`pony_sentry_core::TraceOrder { ReportedAt, CreatedAt }`
+- `pony_sentry_core::trace_v2::trace_merge_lost_total() -> u64`（另有 `trace_truncated_total() -> u64`）
+
+## 已知影响 / 待 HTTP 侧接线
+1. `TraceFilter` 新增字段：`crates/server` 的 `TraceFilter { … }` 字面量需补 `order_by`（HTTP 侧并行修改），
+   否则 server 编译失败（本任务门禁不含 server）。
+2. `payload._redactions` 由 routes 调用 `sanitize_trace_value` 注入；`payload._warnings` 由仓储写入。
+3. `/metrics` 新增三个计数器读数接口已就绪（`trace_merge_lost_total` / `trace_truncated_total` /
+   payload bytes 由 HTTP 侧自行统计）。

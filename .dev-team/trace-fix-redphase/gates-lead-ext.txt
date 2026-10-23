@@ -1,0 +1,13 @@
+# Lead 门禁 ext（PG 启用）— 2026-10-23T23:05:22+08:00
+WORKSPACE_EXIT=0
+passed=206 failed=0
+SKIP=0
+CLIPPY_EXIT=0
+ACC1_EXIT=0
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 68.53s
+ACC2_EXIT=0
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.00s
+WEB_EXIT=0
+# pass 40
+# fail 0
+BUILD_EXIT=0

@@ -328,6 +328,7 @@ async fn test_trace_upsert_on_same_session_id() {
             turn_status: None,
             from: None,
             to: None,
+            order_by: None,
             limit: None,
             offset: None,
         })
@@ -449,6 +450,7 @@ async fn test_trace_incremental_merge_upsert_dedup() {
             turn_status: None,
             from: None,
             to: None,
+            order_by: None,
             limit: None,
             offset: None,
         })
@@ -549,6 +551,7 @@ async fn test_trace_filter_by_project() {
         turn_status: None,
         from: None,
         to: None,
+        order_by: None,
         limit: None,
         offset: None,
     };
@@ -575,6 +578,7 @@ async fn test_trace_filter_by_project() {
         turn_status: None,
         from: None,
         to: None,
+        order_by: None,
         limit: None,
         offset: None,
     };

@@ -1,0 +1,59 @@
+# T20 控制台 v1.5 小改门禁凭证（executor-web，2026-10-23T22:40:50+08:00）
+# I-09 Turn 头可选字段回退 / M-03「待评审失败」预设筛选 / I-04 无 payload 记录降级
+
+## 1) cd web && pnpm test
+EXIT=0
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 299.582963
+
+## 2) cd web && pnpm build
+EXIT=0
+[plugin vite:singlefile] Inlining: index-D-qM2FZB.js
+[plugin vite:singlefile] Inlining: style-CZAPNsFR.css
+computing gzip size...
+dist/index.html  353.06 kB │ gzip: 105.89 kB
+
+✓ built in 3.10s
+
+## 3) I-09/M-03/I-04 行为校验（从 src/App.vue 原样抽取实现执行）
+I-09/M-03/I-04 OK: 19/19 checks
+EXIT=0
+
+## 4) 既有门禁回归（C8/C9.11 徽标/F8 上限/F9 配色）
+F8-residual OK: 12/12 checks
+EXIT=0
+F9 OK: 13/13 mapping
+EXIT=0
+
+## 5) 模板接线抽检
+631:              data-testid="trace-failed-preset"
+634:              @click="toggleTraceFailurePreset"
+683:                  <span>Turns: <strong class="text-stone-300 font-medium">{{ getTraceTurns(trace).length || trace.turns_count || 0 }}</strong></span>
+721:                    <Badge v-if="selectedTrace.payload?.stats_incomplete === true" variant="warning">
+789:                      <span v-if="turnPhaseLabel(turn)" class="text-stone-500 font-normal">({{ turnPhaseLabel(turn) }})</span>
+791:                    <span class="text-stone-500">seq {{ turnSeqLabel(turn) }} · {{ turnNodeLabel(turn) }} · {{ formatDuration(turn.duration_ms) }}</span>
+930:                  <div v-else class="font-mono text-[10px] text-stone-500">无 payload 详情（summary 模式）</div>
+1304:const toggleTraceFailurePreset = () => {
+
+## 6) payload 访问审计（无 ?. 的两处均已显式 guard：:491 v-if、:1348 early return）
+491:                      <div v-if="ev.payload && ev.payload.breadcrumbs && ev.payload.breadcrumbs.length" class="space-y-1">
+495:                            v-for="(b, idx) in ev.payload.breadcrumbs"
+1349:  // 1. 标准格式：payload.turns 数组
+1350:  if (Array.isArray(trace.payload.turns)) return trace.payload.turns
+1351:  // 2. LangGraph / LangChain 兼容：payload.steps 数组
+1352:  if (Array.isArray(trace.payload.steps)) return trace.payload.steps
+1353:  // 3. LangGraph RunTree 兼容：payload.runs 数组
+1354:  if (Array.isArray(trace.payload.runs)) return trace.payload.runs
+
+## 7) 改动范围（仅 web/src/App.vue + web/dist 产物；web/tests 未改）
+ M web/dist/index.html
+ M web/src/App.vue
+ web/src/App.vue | 48 +++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 43 insertions(+), 5 deletions(-)

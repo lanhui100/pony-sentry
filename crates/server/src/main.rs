@@ -179,6 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_token = std::env::var("METRICS_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
+    // 可选失败态 trace webhook（M-03 / 契约 v1.5-10）：未配置时零副作用。
+    let trace_webhook_url = std::env::var("TRACE_WEBHOOK_URL")
+        .ok()
+        .filter(|t| !t.is_empty());
     if admin_token.is_none() && client_token.is_none() {
         warn!(
             "未配置 ADMIN_TOKEN / CLIENT_TOKEN：读接口与 PATCH 将按 fail-closed 返回 503 \
@@ -241,6 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_token,
         webhook_url,
         metrics_token,
+        notifier: std::sync::Arc::new(pony_sentry_server::TraceNotifier::new(trace_webhook_url)),
         metrics: Arc::default(),
         sessions: Arc::new(SessionStore::new(
             Duration::from_secs(session_ttl_secs),

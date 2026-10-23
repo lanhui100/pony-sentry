@@ -19,6 +19,7 @@ async fn test_ingest_and_agent_api_flow() {
         webhook_url: None,
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -132,6 +133,7 @@ async fn test_ingest_requires_client_token_when_configured() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -177,6 +179,7 @@ async fn test_sql_injection_is_safely_parametrized() {
         webhook_url: None,
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -232,6 +235,7 @@ async fn test_project_path_is_surfaced_and_filterable() {
         webhook_url: None,
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -330,6 +334,7 @@ async fn test_traces_ingest_supports_langgraph_thread_id_and_upsert() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -433,6 +438,7 @@ async fn test_webhook_anti_avalanche_on_regression() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -537,6 +543,7 @@ async fn test_traces_api_project_filter_and_aggregation() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -617,6 +624,7 @@ async fn test_traces_server_side_sanitization() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -716,6 +724,7 @@ async fn test_traces_large_payload_limit_2mb() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -756,6 +765,7 @@ async fn test_ingest_contract_diagnostics_and_synonym_resolution() {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -895,6 +905,7 @@ async fn test_console_session_login_cookie_csrf_and_logout() {
         webhook_url: None,
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let app = create_app_with_state(state);
@@ -1012,6 +1023,7 @@ async fn trace_test_server() -> TestServer {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     TestServer::new(create_app_with_state(state)).unwrap()
@@ -1375,6 +1387,7 @@ async fn file_db_server(tag: &str) -> FileDbServer {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     let server = TestServer::new(create_app_with_state(state)).unwrap();
@@ -1747,6 +1760,7 @@ async fn metrics_server(metrics_token: Option<&str>) -> TestServer {
         admin_token: Some("test-admin-token".into()),
         metrics: std::sync::Arc::default(),
         metrics_token: metrics_token.map(|token| token.to_string()),
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     TestServer::new(create_app_with_state(state)).unwrap()
@@ -1820,4 +1834,487 @@ async fn test_metrics_requires_bearer_or_metrics_token_when_configured() {
         .add_header("x-admin-token", "test-admin-token")
         .await
         .assert_status(StatusCode::OK);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 契约 v1.5（HTTP 侧）：I-01/I-02/M-04/W-05/I-04/I-06/M-03
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 带可选 webhook 的 trace 测试应用。
+async fn trace_test_server_with_webhook(url: Option<&str>) -> TestServer {
+    let pool = create_pool("sqlite::memory:").await.unwrap();
+    let repo = Arc::new(SqliteIssueRepository::new(pool));
+    repo.migrate().await.unwrap();
+    let state = AppState {
+        repo: repo.clone(),
+        trace_repo: Some(repo.clone()),
+        webhook_url: None,
+        client_token: None,
+        admin_token: Some("test-admin-token".into()),
+        metrics: std::sync::Arc::default(),
+        metrics_token: None,
+        notifier: std::sync::Arc::default(),
+        sessions: Default::default(),
+    }
+    .with_trace_webhook(url.map(|value| value.to_string()));
+    TestServer::new(create_app_with_state(state)).unwrap()
+}
+
+async fn ingest_ok(server: &TestServer, body: serde_json::Value) -> serde_json::Value {
+    let resp = server.post("/api/v1/traces").json(&body).await;
+    resp.assert_status(StatusCode::CREATED);
+    resp.json()
+}
+
+#[tokio::test]
+async fn test_ingest_unknown_fields_go_to_payload_unmapped() {
+    let server = trace_test_server().await;
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-unmapped-1",
+            // 未知顶层字段（I-01）：非 `_` 前缀 → `_unmapped`
+            "custom_block": {"a": 1, "b": "x"},
+            "another_one": [1, 2, 3],
+            // `_` 前缀属服务端保留命名空间：客户端伪造必须被丢弃
+            "_redactions": {"secrets": 999, "paths": 999},
+            "_warnings": ["spoofed"],
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }),
+    )
+    .await;
+
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=v15-unmapped-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    let payload = &listed[0]["payload"];
+    assert_eq!(
+        payload["_unmapped"]["custom_block"]["b"], "x",
+        "未知顶层字段必须保留到 payload._unmapped（I-01）：{payload}"
+    );
+    assert_eq!(payload["_unmapped"]["another_one"][2], 3);
+    assert!(
+        payload.get("_warnings").is_none(),
+        "伪造的 _warnings 必须被丢弃：{payload}"
+    );
+    assert_eq!(
+        payload["_redactions"]["secrets"], 0,
+        "伪造的 _redactions 必须被丢弃并替换为服务端真实计数：{payload}"
+    );
+    for key in ["custom_block", "another_one"] {
+        assert!(
+            payload.get(key).is_none(),
+            "未知字段不得平铺回 payload 顶层（`{key}`）：{payload}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_ingest_normalizes_turns_and_records_warnings() {
+    let server = trace_test_server().await;
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-normalize-1",
+            "turns": [
+                { "turn_id": "t1", "status": "succeeded" },
+                "not-an-object",
+                { "turn_id": "t3", "status": 42, "tool_calls": "not-an-array" }
+            ]
+        }),
+    )
+    .await;
+
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=v15-normalize-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    let payload = &listed[0]["payload"];
+    let turns = payload["turns"].as_array().expect("turns 必须是数组");
+    assert_eq!(turns.len(), 2, "非对象 turn 必须被丢弃（I-02）：{payload}");
+    assert_eq!(
+        turns[1]["status"], "unknown",
+        "非字符串 status 必须归一为 unknown：{payload}"
+    );
+    assert!(
+        turns[1].get("tool_calls").is_none(),
+        "非数组 tool_calls 必须被忽略：{payload}"
+    );
+    assert_eq!(
+        payload["_warnings"][0]["turn_index"], 1,
+        "warnings 必须记录被丢弃 turn 的原下标：{payload}"
+    );
+    assert_eq!(payload["_warnings"][0]["reason"], "invalid_turn");
+    assert_eq!(
+        listed[0]["turns_count"], 2,
+        "turns_count 必须只计入归一后的 turn：{payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_ingest_injects_redaction_counts() {
+    let server = trace_test_server().await;
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-redact-1",
+            "turns": [{
+                "turn_id": "t1",
+                "status": "failed",
+                "input_text": "读取 /home/developer/secrets/app.key",
+                "token": "sk-live-DEADBEEF",
+                "note": "Authorization: Bearer secret-access-token"
+            }]
+        }),
+    )
+    .await;
+
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=v15-redact-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    let payload = &listed[0]["payload"];
+    let redactions = &payload["_redactions"];
+    assert!(
+        redactions["secrets"].as_u64().unwrap_or(0) >= 1,
+        "M-04：密钥命中数必须 > 0：{payload}"
+    );
+    assert!(
+        redactions["paths"].as_u64().unwrap_or(0) >= 1,
+        "M-04：路径命中数必须 > 0：{payload}"
+    );
+    let turn = &payload["turns"][0];
+    assert_eq!(turn["token"], "[REDACTED_SECRET]", "敏感键必须整值替换");
+    assert!(
+        turn["input_text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("[USER_HOME]"),
+        "用户路径必须改写为 [USER_HOME]：{turn}"
+    );
+}
+
+#[tokio::test]
+async fn test_ingest_rejects_reported_at_out_of_range() {
+    let server = trace_test_server().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let too_old = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "v15-skew-1",
+            "reported_at_ms": now_ms - 25 * 3600 * 1000,
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await;
+    too_old.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        too_old.text(),
+        "Bad request: reported_at out of range",
+        "W-05：超 24h 必须精确返回该文案"
+    );
+
+    let too_new = server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "v15-skew-2",
+            "reported_at_ms": now_ms + 25 * 3600 * 1000,
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await;
+    too_new.assert_status(StatusCode::BAD_REQUEST);
+
+    // 边界内（±1h）必须接受
+    server
+        .post("/api/v1/traces")
+        .json(&json!({
+            "session_id": "v15-skew-ok",
+            "reported_at_ms": now_ms - 3600 * 1000,
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_list_order_summary_projection_and_total_count() {
+    let server = trace_test_server().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    for (index, offset_ms) in [(0, 0_i64), (1, -60_000), (2, -120_000)] {
+        ingest_ok(
+            &server,
+            json!({
+                "session_id": format!("v15-order-{index}"),
+                "project": "order-proj",
+                "reported_at_ms": now_ms + offset_ms,
+                "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+            }),
+        )
+        .await;
+    }
+
+    // 1) 默认排序 = reported_at DESC（最新在前）
+    let resp = server
+        .get("/api/v1/traces?project=order-proj")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    resp.assert_status(StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok()),
+        Some("3"),
+        "I-04：X-Total-Count 必须等于过滤命中数"
+    );
+    let rows: Vec<serde_json::Value> = resp.json();
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|row| row["session_id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["v15-order-0", "v15-order-1", "v15-order-2"],
+        "W-05：默认必须按 reported_at DESC 排序"
+    );
+
+    // 2) `?order=created_at` 合法；非法值 → 400
+    server
+        .get("/api/v1/traces?order=created_at&project=order-proj")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .assert_status(StatusCode::OK);
+    let bad_order = server
+        .get("/api/v1/traces?order=bogus")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    bad_order.assert_status(StatusCode::BAD_REQUEST);
+    assert!(bad_order.text().contains("order"));
+
+    // 3) `?fields=summary`：不含 payload，但含 turn_status/turns_count/note
+    let summary = server
+        .get("/api/v1/traces?fields=summary&project=order-proj&limit=1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await;
+    summary.assert_status(StatusCode::OK);
+    assert_eq!(
+        summary
+            .headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok()),
+        Some("3"),
+        "X-Total-Count 不得随 limit 变化"
+    );
+    let summary_rows: Vec<serde_json::Value> = summary.json();
+    assert_eq!(summary_rows.len(), 1, "limit 仍应生效");
+    let row = &summary_rows[0];
+    assert!(
+        row.get("payload").is_none(),
+        "I-04：summary 不得包含 payload：{row}"
+    );
+    assert_eq!(row["turn_status"], "succeeded");
+    assert_eq!(row["turns_count"], 1);
+    assert!(
+        row.get("note").is_some(),
+        "summary 必须保留 note 键（可为 null）"
+    );
+
+    // 4) 非法 fields → 400
+    server
+        .get("/api/v1/traces?fields=bogus")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_metrics_expose_extended_v15_counters() {
+    let server = trace_test_server().await;
+    // 超长 tool 文本 → core 归一阶段截断并计入 truncated 计数（I-06）
+    let long_text = "X".repeat(20_050);
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-metrics-1",
+            "turns": [{
+                "turn_id": "t1",
+                "status": "failed",
+                "tool_calls": [{
+                    "tool_call_id": "c1",
+                    "tool_name": "format_jd_to_json",
+                    "status": "error",
+                    "output": long_text
+                }]
+            }]
+        }),
+    )
+    .await;
+
+    let metrics = server.get("/metrics").await.text();
+    for name in [
+        "pony_sentry_trace_payload_bytes_total",
+        "pony_sentry_trace_merge_lost_turns_total",
+        "pony_sentry_trace_truncated_total",
+    ] {
+        assert!(
+            metrics.contains(name),
+            "I-06：`/metrics` 必须包含 `{name}`：\n{metrics}"
+        );
+    }
+    let value_of = |name: &str| -> f64 {
+        metrics
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .and_then(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+            .unwrap_or(-1.0)
+    };
+    assert!(
+        value_of("pony_sentry_trace_payload_bytes_total") > 0.0,
+        "payload 字节数必须随 ingest 增长：\n{metrics}"
+    );
+    assert!(
+        value_of("pony_sentry_trace_truncated_total") >= 1.0,
+        "超长 tool 文本必须计入截断计数：\n{metrics}"
+    );
+
+    // 截断后的持久化值必须真的被裁剪并带 truncated 标记
+    let listed: Vec<serde_json::Value> = server
+        .get("/api/v1/traces?session_id=v15-metrics-1")
+        .add_header("x-admin-token", "test-admin-token")
+        .await
+        .json();
+    let call = &listed[0]["payload"]["turns"][0]["tool_calls"][0];
+    assert_eq!(
+        call["truncated"], true,
+        "截断的 tool_call 必须标 truncated:true：{call}"
+    );
+    assert!(
+        call["output"].as_str().unwrap_or("").chars().count() <= 20_000,
+        "output 必须被截断到 20000 字符以内"
+    );
+}
+
+#[tokio::test]
+async fn test_trace_webhook_notifies_failures_with_ten_minute_dedupe() {
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+
+    let received: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured = received.clone();
+    let app = Router::new()
+        .route(
+            "/trace-hook",
+            post(
+                |State(sink): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
+                 axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    sink.lock().unwrap().push(body);
+                    StatusCode::OK
+                },
+            ),
+        )
+        .with_state(captured);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("http://127.0.0.1:{port}/trace-hook");
+    let server = trace_test_server_with_webhook(Some(&url)).await;
+
+    let failed_turn = |session: &str| {
+        json!({
+            "session_id": session,
+            "project": "hook-proj",
+            "turns": [{
+                "turn_id": "t1",
+                "status": "failed",
+                "tool_calls": [{
+                    "tool_call_id": "c1",
+                    "tool_name": "format_jd_to_json",
+                    "status": "error"
+                }]
+            }]
+        })
+    };
+
+    // 1) 首个 failed ingest → 应投递 1 次
+    ingest_ok(&server, failed_turn("v15-hook-1")).await;
+    for _ in 0..40 {
+        if !received.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let first = received.lock().unwrap().clone();
+    assert_eq!(
+        first.len(),
+        1,
+        "M-03：失败态 ingest 必须投递 webhook（实际 {first:?}）"
+    );
+    assert_eq!(first[0]["turn_status"], "failed");
+    assert_eq!(first[0]["tool_name"], "format_jd_to_json");
+    assert_eq!(first[0]["project"], "hook-proj");
+    assert!(first[0]["trace_id"].as_str().is_some());
+
+    // 2) 同 project|tool_name|turn_status 的第二个 session → 10 分钟内去重
+    ingest_ok(&server, failed_turn("v15-hook-2")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        received.lock().unwrap().len(),
+        1,
+        "M-03：同去重键 10 分钟内只投递一次"
+    );
+
+    // 3) 成功态不触发
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-hook-ok",
+            "project": "hook-proj",
+            "turns": [{ "turn_id": "t1", "status": "succeeded" }]
+        }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        received.lock().unwrap().len(),
+        1,
+        "M-03：成功态不得触发 webhook"
+    );
+
+    // 4) 不同去重键（换 tool）→ 允许再次投递
+    ingest_ok(
+        &server,
+        json!({
+            "session_id": "v15-hook-3",
+            "project": "hook-proj",
+            "turns": [{
+                "turn_id": "t1",
+                "status": "failed",
+                "tool_calls": [{
+                    "tool_call_id": "c2",
+                    "tool_name": "resume_parser",
+                    "status": "error"
+                }]
+            }]
+        }),
+    )
+    .await;
+    for _ in 0..40 {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        received.lock().unwrap().len(),
+        2,
+        "M-03：不同 tool 属于不同去重键，应再次投递"
+    );
 }

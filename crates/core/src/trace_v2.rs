@@ -12,6 +12,36 @@
 
 use serde_json::{Map, Value};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// `amend v1.5-8`（I-06）：单个 tool_call 的 `output` / `arguments_summary` 字符上限。
+pub const TOOL_CALL_TEXT_MAX_CHARS: usize = 20_000;
+
+/// 进程级计数器（供 `/metrics` 读取；不依赖仓储实例，HTTP 侧可直接读）。
+static MERGE_LOST_TURNS: AtomicU64 = AtomicU64::new(0);
+static TRUNCATED_TOOL_TEXT: AtomicU64 = AtomicU64::new(0);
+
+/// `amend v1.5-8`：合并阶段「旧终态覆盖新值」的累计次数（`pony_sentry_trace_merge_lost_turns_total`）。
+///
+/// **HTTP 侧接口（task-18 约定）**：`trace_merge_lost_total() -> u64`。
+pub fn trace_merge_lost_total() -> u64 {
+    MERGE_LOST_TURNS.load(Ordering::Relaxed)
+}
+
+/// 读取并清零合并丢失计数（Prometheus counter 语义：只增不减时可改用 [`trace_merge_lost_total`]）。
+pub fn take_merge_lost_turns() -> u64 {
+    MERGE_LOST_TURNS.swap(0, Ordering::Relaxed)
+}
+
+/// `amend v1.5-8`：tool_call 文本截断累计次数（`pony_sentry_trace_truncated_total`）。
+pub fn trace_truncated_total() -> u64 {
+    TRUNCATED_TOOL_TEXT.load(Ordering::Relaxed)
+}
+
+/// 读取并清零截断计数。
+pub fn take_truncated_tool_text() -> u64 {
+    TRUNCATED_TOOL_TEXT.swap(0, Ordering::Relaxed)
+}
 use sha2::{Digest, Sha256};
 
 /// `C2.1` 终态集合：一旦到达即不再回退的轮次状态。
@@ -132,6 +162,8 @@ pub fn merge_turn(existing: &Value, incoming: &Value) -> Value {
     let clears_error_residue = is_terminal_status(&old_status) && is_success_status(&new_status);
     // `C2.1`：终态单调。旧终态 + 新非终态 → 保留旧；新终态 → 新覆盖；其余交给字段级深合并。
     let monotonic_status = if is_terminal_status(&old_status) && !is_terminal_status(&new_status) {
+        // `amend v1.5-8`：旧终态吞掉新上报（非终态）——计入 merge-lost 指标。
+        MERGE_LOST_TURNS.fetch_add(1, Ordering::Relaxed);
         Some(old_status)
     } else if is_terminal_status(&new_status) {
         Some(new_status)
@@ -297,6 +329,81 @@ fn explicit_turn_id(turn: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|turn_id| !turn_id.is_empty())
         .map(str::to_string)
+}
+
+/// `amend v1.5-4`（I-02）**HTTP/仓储共用接口**：就地归一 `payload.turns`，返回 warnings。
+///
+/// 规则：
+/// - 非对象元素**丢弃**并产出 `{"turn_index": <原下标>, "reason": "invalid_turn"}`；
+/// - `status` 存在但非字符串 → 置 `"unknown"`；
+/// - `tool_calls` 存在但非数组 → 忽略该字段（删除）；
+/// - tool_call 的 `output` / `arguments_summary` 超 [`TOOL_CALL_TEXT_MAX_CHARS`] → 截断并置
+///   `truncated: true`（累计到进程级截断计数）。
+///
+/// 返回的 [`Value`] 元素可直接追加到 `payload._warnings[]`。
+pub fn normalize_incoming_turns(payload: &mut Value) -> Vec<Value> {
+    let Some(object) = payload.as_object_mut() else {
+        return Vec::new();
+    };
+    let Some(turns) = object.get_mut("turns").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    let mut kept = Vec::with_capacity(turns.len());
+    for (index, turn) in turns.drain(..).enumerate() {
+        let Value::Object(mut map) = turn else {
+            warnings.push(serde_json::json!({
+                "turn_index": index,
+                "reason": "invalid_turn"
+            }));
+            continue;
+        };
+        // status 非字符串 → unknown（缺失保持缺失，交给 turn_status_of 归一）
+        if let Some(status) = map.get("status") {
+            if !status.is_string() {
+                map.insert("status".to_string(), Value::String("unknown".to_string()));
+            }
+        }
+        // tool_calls 非数组 → 忽略
+        if let Some(tool_calls) = map.get("tool_calls") {
+            if !tool_calls.is_array() {
+                map.remove("tool_calls");
+            }
+        }
+        // 单 tool_call 文本截断（I-06）
+        if let Some(calls) = map.get_mut("tool_calls").and_then(Value::as_array_mut) {
+            for call in calls.iter_mut() {
+                truncate_tool_call_text(call);
+            }
+        }
+        kept.push(Value::Object(map));
+    }
+    *turns = kept;
+    warnings
+}
+
+/// 单个 tool_call 的文本字段截断（`output` / `arguments_summary`），返回是否发生截断。
+fn truncate_tool_call_text(call: &mut Value) -> bool {
+    let Some(object) = call.as_object_mut() else {
+        return false;
+    };
+    let mut truncated = false;
+    for field in ["output", "arguments_summary"] {
+        let Some(Value::String(text)) = object.get(field) else {
+            continue;
+        };
+        if text.chars().count() <= TOOL_CALL_TEXT_MAX_CHARS {
+            continue;
+        }
+        let clipped: String = text.chars().take(TOOL_CALL_TEXT_MAX_CHARS).collect();
+        object.insert(field.to_string(), Value::String(clipped));
+        truncated = true;
+        TRUNCATED_TOOL_TEXT.fetch_add(1, Ordering::Relaxed);
+    }
+    if truncated {
+        object.insert("truncated".to_string(), Value::Bool(true));
+    }
+    truncated
 }
 
 /// 把上报的 turn 归一为可入库的 JSON 对象（`C1.1`）：对象原样返回，非对象元素包一层 `value`
@@ -946,6 +1053,81 @@ mod tests {
             turn_key_of(&json!({"status": "succeeded"})),
             "不同对象必须得到不同自动 turn_id"
         );
+    }
+
+    // ── amend v1.5：turns 归一 / 截断 / merge-lost 计数 ──────────────────
+
+    #[test]
+    fn i02_normalize_incoming_turns_drops_invalid_and_collects_warnings() {
+        let mut payload = json!({"turns": [
+            {"turn_id": "t1", "status": 123, "tool_calls": "not-an-array"},
+            "garbage",
+            {"turn_id": "t2", "status": "succeeded"}
+        ]});
+        let warnings = normalize_incoming_turns(&mut payload);
+        let turns = payload["turns"].as_array().expect("turns");
+        assert_eq!(turns.len(), 2, "非对象元素必须被丢弃");
+        assert_eq!(turns[0]["status"], "unknown", "status 非字符串必须归一为 unknown");
+        assert!(
+            turns[0].get("tool_calls").is_none(),
+            "tool_calls 非数组必须忽略"
+        );
+        assert_eq!(
+            warnings,
+            vec![json!({"turn_index": 1, "reason": "invalid_turn"})],
+            "warnings 必须记录原下标"
+        );
+    }
+
+    #[test]
+    fn i06_tool_call_text_is_truncated_at_limit_and_flagged() {
+        let long_output = "x".repeat(TOOL_CALL_TEXT_MAX_CHARS + 100);
+        let long_arguments = "y".repeat(TOOL_CALL_TEXT_MAX_CHARS + 5);
+        let mut payload = json!({"turns": [{"turn_id": "t1", "status": "failed", "tool_calls": [{
+            "tool_call_id": "c1",
+            "output": long_output,
+            "arguments_summary": long_arguments
+        }]}]});
+        let before = trace_truncated_total();
+        assert!(normalize_incoming_turns(&mut payload).is_empty());
+        let call = &payload["turns"][0]["tool_calls"][0];
+        assert_eq!(
+            call["output"].as_str().map(|text| text.chars().count()),
+            Some(TOOL_CALL_TEXT_MAX_CHARS),
+            "[I-06] output 必须截断到上限"
+        );
+        assert_eq!(
+            call["arguments_summary"].as_str().map(|text| text.chars().count()),
+            Some(TOOL_CALL_TEXT_MAX_CHARS)
+        );
+        assert_eq!(call["truncated"], true, "[I-06] 截断必须置 truncated:true");
+        assert!(
+            trace_truncated_total() >= before + 2,
+            "[I-06] 截断计数必须累加（before={before}, after={}）",
+            trace_truncated_total()
+        );
+    }
+
+    #[test]
+    fn v15_merge_lost_total_counts_old_terminal_overriding_new_value() {
+        let before = trace_merge_lost_total();
+        let merged = merge_turn(
+            &json!({"turn_id": "t1", "status": "failed", "error": {"message": "keep"}}),
+            &json!({"turn_id": "t1", "status": "running"}),
+        );
+        assert_eq!(merged["status"], "failed");
+        assert!(
+            trace_merge_lost_total() > before,
+            "[v1.5-8] 旧终态覆盖新值必须计入 merge-lost"
+        );
+        // 新终态覆盖旧终态不计入 merge-lost
+        let before_new = trace_merge_lost_total();
+        let merged = merge_turn(
+            &json!({"turn_id": "t2", "status": "succeeded"}),
+            &json!({"turn_id": "t2", "status": "failed"}),
+        );
+        assert_eq!(merged["status"], "failed");
+        assert_eq!(trace_merge_lost_total(), before_new, "新终态覆盖不得计入 merge-lost");
     }
 
     #[test]

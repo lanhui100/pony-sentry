@@ -10,7 +10,7 @@ pub mod trace_v2;
 pub use db::{create_pool, DatabasePool};
 pub use models::{
     EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, Platform, TraceFilter,
-    TraceRecord,
+    TraceOrder, TraceRecord,
 };
 pub use pg_repository::PgIssueRepository;
 pub use reindex::{FingerprintOut, ReindexPlan, ReindexSummary};

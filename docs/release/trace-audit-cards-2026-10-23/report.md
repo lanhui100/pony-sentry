@@ -510,4 +510,10 @@ jq -e 'type=="array" and all(.[]; .verdict|test("^(CONFIRMED|REFUTED|UNVERIFIABL
   （`turn_srv_*`），两轮迁移 idempotency/CONCURRENTLY 索引/64 位锁键均实测（`gates-fix-core2.txt`）。
 - 对抗审查与关闭：L3-A/L3-B 各判 FAIL（1 BLOCKER + 5/4 MAJOR），修复后终审
   **PASS**（`adjudication2.json`：0 OPEN / 0 PARTIAL）；控制台补齐失败状态色与 20KB payload 预览上限。
-- 未实施（仍留在建议里）：Wave A/C 生产者字段（LLM span、error_type 外发）、列表投影、告警/issue 联动。
+- **第二轮（v1.5，2026-10-23 23:xx）**：剩余条目已收口——M-04（脱敏单引号/裸 token）、W-05（24h 越界 + 默认 reported_at 排序）、
+  I-01（`_unmapped`）、I-02（`_warnings` 归一）、I-07（`_redactions` 计数）、W-04（`trace_turns.run_id` + 双来源过滤）、
+  I-04（`fields=summary` + `X-Total-Count`）、I-06（3 个计数器 + 20k 截断）、I-09（可选字段回退）、M-03（可选 webhook + 待评审预设）、
+  M-02/M-05/M-06（job_copilot 生产者：`llm_calls[]`/`sampled`/`input_summary`，96 条契约测试通过）。
+  门禁：`cargo test --workspace` **206 passed（PG，SKIP=0）**、clippy 0、acceptance **11 + 10 passed**、`pnpm test` 40/40、build 0
+  （`gates-lead-ext.txt`）；生产库迁移已执行并校验（38 traces → 59 turns，0 不一致，见 `migration-runbook.md`）。
+  仍未做：issue 建单（按 L3 建议仅做 webhook + 队列预设）、`/metrics` 默认免鉴权（改为可选 token）。

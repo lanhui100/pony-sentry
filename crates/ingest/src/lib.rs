@@ -10,7 +10,7 @@ pub use parser::{
     STACKTRACE_TEXT_MAX_CHARS,
 };
 pub use project::{infer_project_name, project_name_from_extra};
-pub use sanitizer::SanitizationPipeline;
+pub use sanitizer::{RedactionCounts, SanitizationPipeline};
 pub use validate::{
     guard_extra, normalize_dimension, normalize_grafana_url, normalize_level, normalize_loki_query,
     normalize_source_kind, normalize_tags, parse_timestamp, truncate_chars, validate_event_id,

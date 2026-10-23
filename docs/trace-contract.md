@@ -15,6 +15,10 @@
   `turn_id`、`status`、`input_tokens`、`output_tokens`、`duration_ms`、`tool_calls[].{tool_call_id,status,error,output,error_type}`
   用于合并、聚合与诊断。
 - 客户端上报的 `eval_status` **被忽略**（一律落 `unreviewed`）；评审结论只能由 admin `PATCH` 写入。
+- `reported_at_ms` 与服务端时间偏差超过 **24h** → `400 Bad request: reported_at out of range`。
+- 未知顶层字段保留到 `payload._unmapped`；以 `_` 开头的键属**服务端保留命名空间**，客户端传入会被丢弃。
+- `turns[]` 归一：非对象元素丢弃、`status` 非字符串→`unknown`、`tool_calls` 非数组忽略；
+  归一告警写入 `payload._warnings[]`（`{"turn_index","reason":"invalid_turn"}`）。
 - 成功响应：`201` + **库内持久化行**（`id` 可直接用于 `GET`；`total_*`/`turn_status`/`turns_count` 来自数据库，
   是 turns 的派生值，客户端上报的 `total_*` 不落库）。
 - 失败响应：`400 Bad request` / `500 Internal error`（**不包含数据库错误原文**；原文只进服务端日志）。
@@ -49,13 +53,19 @@
 | `status_conflict: true` | 某 tool_call `status=="success"` 但其 `output` 命中失败特征（失败/异常/解析失败/unable/空结果） |
 | `error_missing: true` | 某 tool_call `status=="error"` 但 `error` 为 null/缺失 |
 
+服务端另注入：`payload._redactions={"secrets":n,"paths":n}`（脱敏命中计数）、
+`payload._unmapped`（未知顶层字段）、`payload._warnings`（turns 归一告警）。
+单个 `tool_call` 的 `output`/`arguments_summary` 超过 20000 字符时截断并置 `truncated:true`。
+
 诊断在脱敏之后生成，不引入原始错误文本；指标 `pony_sentry_trace_status_conflicts_total` 随之递增。
 
 ## 4. 读接口
 
-- `GET /api/v1/traces`：过滤 `session_id`、`run_id`、`turn_status`、`eval_status`、`environment`、`release`、
-  `project`、`from`/`to`（RFC3339，按 `reported_at`，含端点）；`limit` 默认 50、**clamp 到 [1,100]**；
-  `offset<0` / 非数字 / 非法时间 → `400`；未知参数忽略。返回裸数组（`TraceRecord[]`）。
+- `GET /api/v1/traces`：过滤 `session_id`、`run_id`（匹配聚合行或任一轮次）、`turn_status`、`eval_status`、
+  `environment`、`release`、`project`、`from`/`to`（RFC3339，按 `reported_at`，含端点）；
+  `limit` 默认 50、**clamp 到 [1,100]**；`offset<0` / 非数字 / 非法时间 / 非法 `order` → `400`；未知参数忽略。
+  默认排序 `reported_at DESC`（`?order=created_at` 可切）。`?fields=summary` 返回不含 `payload` 的投影；
+  响应头 `X-Total-Count` 为同过滤条件的总数（与分页无关）。
 - `GET /api/v1/traces/:id`：返回单行；不存在 → `404 Trace not found`。
 - `PATCH /api/v1/traces/:id`：`{eval_status, note?}`；`note` 落库并在后续读取回显；Cookie 会话需 `x-csrf-token`。
 - `TraceRecord` 的 trace 维度字段：`id/session_id/run_id/turn_id/environment/release/project/eval_status/
@@ -83,6 +93,12 @@
 - `pony_sentry_trace_turns_total{status}`：本次上报中每个 turn 计数。
 - `pony_sentry_trace_status_conflicts_total`：命中 `status_conflict` 的 ingest 次数。
 - `pony_sentry_trace_ingest_rejected_total{reason}`：`session_missing` / `invalid_params`。
+- `pony_sentry_trace_payload_bytes_total`：持久化行 payload 序列化字节累计。
+- `pony_sentry_trace_merge_lost_turns_total`：合并被旧终态覆盖的轮次次数。
+- `pony_sentry_trace_truncated_total`：被截断的 tool_call 文本条数。
+
+可选失败通知：设置 `TRACE_WEBHOOK_URL` 后，终态 `{failed,error,cancelled,timed_out}` 触发一次异步 POST
+（5s 超时、失败仅告警不重试）；去重键 `project|tool_name|turn_status`，10 分钟内只发一次。
 
 ## 7. 已知边界
 

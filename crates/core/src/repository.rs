@@ -130,6 +130,11 @@ pub trait TraceRepository: Send + Sync {
 
     async fn list_traces(&self, filter: TraceFilter) -> Result<Vec<TraceRecord>, RepositoryError>;
 
+    /// 与 [`TraceRepository::list_traces`] **同过滤条件**的计数（供 `X-Total-Count`，`amend v1.5-7`）。
+    ///
+    /// 不受 `limit/offset` 影响。
+    async fn count_traces(&self, filter: TraceFilter) -> Result<i64, RepositoryError>;
+
     async fn update_trace_review(
         &self,
         id: &str,

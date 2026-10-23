@@ -1,0 +1,204 @@
+=== GATE1: PONY_TEST_PG_URL=... cargo test -p pony-sentry-core -p pony-sentry-ingest --offline
+    Blocking waiting for file lock on build directory
+   Compiling sqlx-core v0.8.6
+   Compiling sqlx-postgres v0.8.6
+   Compiling sqlx-sqlite v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+   Compiling pony-sentry-fingerprint v0.1.0 (/home/dm/pony-sentry/crates/fingerprint)
+   Compiling pony-sentry-ingest v0.1.0 (/home/dm/pony-sentry/crates/ingest)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 07s
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_core-955c2ba60009b016)
+
+running 45 tests
+test models::tests::trace_filter_new_dimensions_default_to_none ... ok
+test models::tests::trace_record_serde_defaults_keep_legacy_rows_decodable ... ok
+test models::tests::trace_record_serializes_new_columns ... ok
+test reindex::tests::preserves_first_seen_from_earliest_event ... ok
+test reindex::tests::keeps_unparseable_events_and_their_issue ... ok
+test reindex::tests::merges_issues_with_same_new_fingerprint_and_deletes_originals ... ok
+test reindex::tests::reuses_issue_when_one_to_one_mapping ... ok
+test reindex::tests::splits_issue_when_events_map_to_different_groups ... ok
+test trace_merge::tests::new_payload_without_turns_keeps_old_turns ... ok
+test trace_merge::tests::old_payload_without_turns_takes_new ... ok
+test trace_merge::tests::merge_without_turn_id_aligns_by_content_hash ... ok
+test trace_v2::tests::c2_1_late_terminal_status_advances_between_terminal_states ... ok
+test trace_merge::tests::same_turn_id_is_merged_not_duplicated_and_new_ids_are_appended ... ok
+test trace_v2::tests::c2_1_non_terminal_report_never_regresses_terminal_status ... ok
+test trace_merge::tests::totals_are_recomputed_from_turns_and_eval_status_is_stripped ... ok
+test trace_v2::tests::c2_1_terminal_status_overrides_and_keeps_late_error ... ok
+test trace_v2::tests::c2_1_terminal_to_success_clears_legacy_error_residue ... ok
+test trace_v2::tests::c2_2_step_deeper_json_object_is_deep_merged ... ok
+test trace_v2::tests::c2_3_empty_or_missing_tool_calls_keep_existing ... ok
+test trace_v2::tests::c2_2_field_level_merge_skips_null_and_empty_values ... ok
+test trace_v2::tests::c2_3_tool_calls_merge_by_id_and_append_new_ids ... ok
+test trace_v2::tests::c2_5_missing_status_never_erases_known_status ... ok
+test trace_v2::tests::c2_4_diagnostics_union_survives_merge ... ok
+test trace_v2::tests::c2_aggregate_sums_turns_and_ignores_client_totals ... ok
+test trace_v2::tests::c2_aggregate_totals_are_null_without_any_turn_field ... ok
+test trace_v2::tests::c2_3_tool_calls_without_id_merge_by_name_and_arguments ... ok
+test trace_v2::tests::c2_aggregate_sorts_turns_by_seq_and_passes_session_id_source ... ok
+test trace_v2::tests::c2_top_level_extra_and_tags_deep_merge_and_eval_status_removed ... ok
+test trace_v2::tests::c2_totals_use_checked_add_and_flag_stats_incomplete ... ok
+test trace_v2::tests::c4_error_contract_missing_for_terminal_status_without_error_details ... ok
+test trace_v2::tests::c4_error_missing_when_tool_call_error_has_no_details ... ok
+test trace_v2::tests::c4_error_contract_not_raised_when_error_or_tool_error_reported ... ok
+test trace_v2::tests::c4_status_conflict_when_success_output_hits_failure_marker ... ok
+test trace_v2::tests::i02_normalize_incoming_turns_drops_invalid_and_collects_warnings ... ok
+test trace_v2::tests::merge_top_level_keeps_old_only_scalars_and_strips_eval_status ... ok
+test trace_v2::tests::normalize_incoming_turn_keeps_non_object_payloads ... ok
+test trace_v2::tests::session_id_source_follows_payload_or_falls_back_to_thread_id ... ok
+test trace_v2::tests::terminal_set_matches_contract_and_ignores_case ... ok
+test trace_v2::tests::turn_key_prefers_explicit_id_and_hashes_missing_id_deterministically ... ok
+test trace_v2::tests::v15_merge_lost_total_counts_old_terminal_overriding_new_value ... ok
+test trace_v2::tests::turn_keys_for_keeps_explicit_ids_and_dedupes_content_collisions ... ok
+test trace_v2::tests::i06_tool_call_text_is_truncated_at_limit_and_flagged ... ok
+test sqlite_repository::tests::duplicate_event_key_does_not_advance_issue ... ok
+test sqlite_repository::tests::environment_scopes_issue_rows ... ok
+test sqlite_repository::tests::migrate_is_idempotent_three_times ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/pg_repository_test.rs (target/debug/deps/pg_repository_test-0c3618459ecbb324)
+
+running 4 tests
+test duplicate_event_key_is_idempotent_on_pg ... ok
+test environment_scopes_issues_on_pg ... ok
+test event_payload_roundtrip_on_pg ... ok
+test trace_payload_roundtrip_on_pg ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/storage_test.rs (target/debug/deps/storage_test-b8af6f21d0d38dbf)
+
+running 2 tests
+test test_project_dimension_persists_and_filters ... ok
+test test_issue_lifecycle_and_regression_flow ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/trace_repository_test.rs (target/debug/deps/trace_repository_test-6189b44286790aa5)
+
+running 8 tests
+test test_trace_eval_status_state_machine_roundtrip ... ok
+test test_trace_record_serialization_contract ... ok
+test test_trace_repository_contract_and_lifecycle ... ok
+test test_trace_incremental_merge_upsert_dedup ... ok
+test test_trace_filter_by_project ... ok
+test test_trace_upsert_on_same_session_id ... ok
+test test_migrate_upgrades_existing_traces_table_with_project_column ... ok
+test test_trace_not_found_and_adversarial_payload ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running tests/trace_v2_ext_test.rs (target/debug/deps/trace_v2_ext_test-560b88d890927796)
+
+running 6 tests
+test w04_turn_run_id_column_and_filter_matches_turn_or_trace ... ok
+test i06_long_tool_call_text_is_truncated_persisted_with_flag ... ok
+test i02_invalid_turns_are_dropped_and_warnings_persisted ... ok
+test i04_count_traces_matches_filter_and_order_by_switches ... ok
+test pg::w04_pg_run_id_filter_and_0006_schema ... ok
+test pg::i04_pg_count_and_order_by ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests/trace_v2_repository_test.rs (target/debug/deps/trace_v2_repository_test-87d7730cf902111a)
+
+running 25 tests
+test v2_legacy_payload_is_hydrated_on_next_ingest ... ok
+test pg::v2_pg_schema_ensure_is_idempotent_and_restart_light ... ok
+test v2_new_turn_is_appended_with_monotonic_seq ... ok
+test v2_hydration_fills_when_coverage_is_partial ... ok
+test v2_list_supports_run_id_turn_status_and_time_window ... ok
+test pg::v2_pg_backfill_generates_runtime_keys_for_missing_turn_ids ... ok
+test v2_diagnostics_are_generated_by_server ... ok
+test pg::v2_pg_retention_never_deletes_turns_of_surviving_sessions ... ok
+test pg::v2_pg_migration_backfills_legacy_payload ... ok
+test v2_migration_backfills_trace_turns_from_legacy_payload ... ok
+test v2_backfill_does_not_collapse_identical_legacy_turns ... ok
+test v2_backfill_missing_turn_ids_use_runtime_sha256_keys ... ok
+test v2_migration_twice_keeps_turn_store_stable ... ok
+test pg::v2_pg_terminal_merge_and_concurrency ... ok
+test pg::v2_pg_retention_and_ingest_interleaving_stays_consistent ... ok
+test v2_note_patch_persists_and_survives_reingest ... ok
+test v2_thread_id_fallback_marks_session_id_source ... ok
+test v2_totals_are_null_when_no_turn_carries_token_fields ... ok
+test v2_terminal_status_wins_and_tool_calls_merge_by_id ... ok
+test v2_totals_overflow_marks_stats_incomplete_instead_of_panicking ... ok
+test v2_totals_sum_turns_and_top_level_fields_merge ... ok
+test v2_retention_judges_by_updated_at ... ok
+test v2_retention_never_deletes_turns_of_surviving_sessions ... ok
+test v2_concurrent_ingest_loses_no_turn_on_sqlite ... ok
+test v2_sqlite_retention_and_ingest_interleaving_stays_consistent ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_ingest-51b8fb827d438f5b)
+
+running 34 tests
+test fingerprint::tests::missing_environment_falls_back_to_unknown ... ok
+test fingerprint::tests::error_kind_and_model_always_participate ... ok
+test fingerprint::tests::model_alias_converges ... ok
+test fingerprint::tests::environment_scopes_fingerprint ... ok
+test fingerprint::tests::synthesizes_culprit_from_command_or_endpoint_when_stacktrace_absent ... ok
+test fingerprint::tests::rate_limit_debug_format_converges ... ok
+test fingerprint::tests::synthesizes_culprit_from_title_when_no_tags_available ... ok
+test fingerprint::tests::top_level_error_type_wins_over_exception ... ok
+test parser::tests::frame_array_shape_is_preserved ... ok
+test fingerprint::tests::title_and_project_surfaced ... ok
+test project::tests::does_not_blindly_infer_project_from_tauri_or_ipc_without_explicit_project ... ok
+test project::tests::extracts_basename_of_posix_workspace ... ok
+test project::tests::extracts_explicit_project_or_project_name ... ok
+test project::tests::handles_trailing_separators_and_windows_paths ... ok
+test project::tests::infers_project_from_service_or_app_synonyms ... ok
+test project::tests::survives_sanitization_masking_the_home_prefix ... ok
+test validate::tests::level_defaults_to_error_and_degrades_invalid ... ok
+test project::tests::infers_ponyllm_from_stream_failure_error ... ok
+test validate::tests::grafana_url_scheme_whitelist ... ok
+test project::tests::returns_none_when_workspace_is_absent_or_degenerate ... ok
+test validate::tests::dimensions_trim_and_truncate ... ok
+test validate::tests::event_id_rejects_overlong_and_non_graphic ... ok
+test validate::tests::loki_query_structure ... ok
+test validate::tests::extra_over_limit_is_replaced ... ok
+test validate::tests::timestamp_requires_rfc3339 ... ok
+test validate::tests::tags_truncated_deterministically ... ok
+test parser::tests::parses_colon_in_form ... ok
+test parser::tests::unparsable_text_yields_no_frame_without_error ... ok
+test parser::tests::string_stacktrace_becomes_extra_text_and_single_frame ... ok
+test fingerprint::tests::string_stacktrace_normalized_before_fingerprint ... ok
+test parser::tests::parses_python_traceback_form ... ok
+test sanitizer::tests::m04_token_metrics_are_not_redacted ... ok
+test sanitizer::tests::m04_redacts_five_secret_spellings ... ok
+test sanitizer::tests::m04_sanitize_trace_value_counts_secrets_and_paths ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/sanitizer_test.rs (target/debug/deps/sanitizer_test-436d706c042a131d)
+
+running 2 tests
+test test_string_stacktrace_is_sanitized ... ok
+test test_deep_zero_trust_sanitization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+   Doc-tests pony_sentry_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_ingest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+TEST_EXIT=0
+
+=== GATE2: cargo clippy -p pony-sentry-core -p pony-sentry-ingest --all-targets -- -D warnings
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.62s
+CLIPPY_EXIT=0

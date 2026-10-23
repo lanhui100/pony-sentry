@@ -199,6 +199,27 @@ pub struct IssueStatusEnvironmentCount {
     pub count: i64,
 }
 
+/// `amend v1.5-2`（I-04/W-05）：列表排序维度；`None` 时按 `ReportedAt`（契约默认）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceOrder {
+    /// 按上报时间倒序（契约默认）。
+    #[default]
+    ReportedAt,
+    /// 按入库时间倒序（历史行为）。
+    CreatedAt,
+}
+
+impl TraceOrder {
+    /// SQL 排序片段（两列均为 DESC，避免调用方再拼）。
+    pub fn order_clause(&self) -> &'static str {
+        match self {
+            TraceOrder::ReportedAt => "ORDER BY reported_at DESC, created_at DESC",
+            TraceOrder::CreatedAt => "ORDER BY created_at DESC",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TraceFilter {
     pub session_id: Option<String>,
@@ -214,6 +235,9 @@ pub struct TraceFilter {
     pub from: Option<DateTime<Utc>>,
     /// `C5`：按 `reported_at` 时间窗上限（含）过滤。
     pub to: Option<DateTime<Utc>>,
+    /// `amend v1.5-2`：排序维度（`None` ⇒ `ReportedAt`）。
+    #[serde(default)]
+    pub order_by: Option<TraceOrder>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

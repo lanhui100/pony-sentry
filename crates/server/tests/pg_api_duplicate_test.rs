@@ -55,6 +55,7 @@ async fn server() -> Option<TestServer> {
         webhook_url: None,
         metrics: std::sync::Arc::default(),
         metrics_token: None,
+        notifier: std::sync::Arc::default(),
         sessions: Default::default(),
     };
     Some(TestServer::new(create_app_with_state(state)).unwrap())

@@ -1,0 +1,104 @@
+# trace v2 amend v1.5 红相收据（Test Agent 冻结）
+契约真源：.dev-team/trace-fix-contract.md §C9 + **amend v1.5**（M-04/W-05/I-01/I-02/I-07/W-04/I-04/I-06/I-09/M-03）
+被测二进制（快照，避免与并发实施者抢 cargo 锁）：
+  /tmp/red-ext-bin/pony-sentry-server  sha256=9aa1f0d5f5bc3b8b5abbbd91e20220485e42c03ea515ee54d33c53e5c11cf87b
+  来源：target/debug/pony-sentry-server（mtime 2026-10-23 22:18，sha256=9aa1f0d5f5bc3b8b5abbbd91e20220485e42c03ea515ee54d33c53e5c11cf87b，即 amend v1.5 落地前产物）
+运行时间：2026-10-23 22:5x（Asia/Shanghai）
+
+## 一、命令与真实结果
+
+命令：
+  PONY_SENTRY_BIN=/tmp/red-ext-bin/pony-sentry-server \
+    cargo test --manifest-path tests/Cargo.toml --test acceptance_trace_v2_ext --offline
+
+编译状态：PASS（测试二进制正常构建；红相是断言失败，不是编译错误）
+  → Finished `test` profile [unoptimized + debuginfo] / Executable acceptance_trace_v2_ext-9d111ad77983ea4a
+
+真实输出尾部：
+----
+
+
+failures:
+    i_01_unknown_top_level_fields_kept_in_unmapped
+    i_02_invalid_turns_normalized_with_warnings
+    i_04_summary_projection_and_total_count_header
+    i_06_large_tool_output_truncated_and_metrics
+    i_07_redaction_counts_are_exposed
+    m_03_webhook_fires_once_and_dedups
+    m_04_secrets_in_tool_output_are_redacted
+    w_04_run_id_matches_any_turn
+    w_05_reported_at_range_and_default_ordering
+
+test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.80s
+
+error: test failed, to rerun pass `--test acceptance_trace_v2_ext`
+----
+Exit code: 101
+
+结果：**FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.80s**（10 条用例：9 红 + 1 绿守卫）
+
+## 二、逐条判定（用例 ↔ 契约条目 ↔ 红相原因）
+
+  - [RED]  w_05_reported_at_range_and_default_ordering
+      契约条目：W-05 reported_at 偏差 400 + 默认按 reported_at 排序
+      assertion `left == right` failed: [W-05] reported_at_ms 偏差 > 24h 必须 400：{"id":"d918c4b6-d1ab-4ac7-bfc0-d6d91edd2606","session_id":"w5-old-975139-0","run_id":null,"turn_id":null,"environment":"default","release":"unknown","project"
+  - [RED]  m_04_secrets_in_tool_output_are_redacted
+      契约条目：M-04 凭证遮蔽（单引号 key / 裸 token=）
+      [M-04] 单引号写法 `'password': 'x'` 的值必须遮蔽：cfg: 'password': 'hunter2' and token=abc123 end
+  - [RED]  i_07_redaction_counts_are_exposed
+      契约条目：I-07 payload._redactions{secrets,paths} 计数
+      [I-07] payload._redactions.paths 必须 >= 1（实际 0，_redactions=null）
+  - [RED]  i_01_unknown_top_level_fields_kept_in_unmapped
+      契约条目：I-01 未知顶层字段 → payload._unmapped
+      assertion `left == right` failed: [I-01] 未知顶层字段必须保留到 payload._unmapped（payload 现有键：Some(["environment", "extra", "project", "release", "reported_at_ms", "run_id", "session_id", "session_id_source", "tags", "thread_id", "total_dura
+  - [RED]  i_02_invalid_turns_normalized_with_warnings
+      契约条目：I-02 非法 turn 归一 + payload._warnings
+      [I-02] 非对象 turn 必须记入 payload._warnings（当前 payload 键：Some(["environment", "extra", "project", "release", "reported_at_ms", "run_id", "session_id", "session_id_source", "tags", "thread_id", "total_duration_ms", "total_input_tokens",
+  - [RED]  i_06_large_tool_output_truncated_and_metrics
+      契约条目：I-06 tool_call.output 截断 + 三个新指标
+      assertion `left == right` failed: [I-06] 超过 20000 字符的 tool_call.output 必须置 truncated:true（实际 Null，长度 22000）
+  - [RED]  w_04_run_id_matches_any_turn
+      契约条目：W-04 ?run_id 匹配任一轮次 run_id
+      [W-04] `?run_id=run-old` 必须命中含该 run 的 session（旧 run 也不能丢）：[]
+  - [RED]  i_04_summary_projection_and_total_count_header
+      契约条目：I-04 ?fields=summary + X-Total-Count
+      [I-04] ?fields=summary 记录不得含 payload 字段（实际键：Some(["created_at", "environment", "eval_status", "id", "note", "payload", "project", "release", "reported_at", "run_id", "session_id", "total_duration_ms", "total_input_tokens", "total_
+  - [RED]  m_03_webhook_fires_once_and_dedups
+      契约条目：M-03 TRACE_WEBHOOK_URL 触发 + 10 分钟去重
+      assertion `left == right` failed: [M-03] 失败 trace 必须触发 1 次 webhook POST（实际 0 次，日志 []）
+
+## 三、唯一非红项：I-09（[GUARD-GREEN]，非能力缺失）
+
+  - [GREEN] i_09_optional_turn_fields_absent_is_fine — I-09 可选生产者字段缺失不报错（守卫）
+      `test i_09_optional_turn_fields_absent_is_fine ... ok`
+      原因（客观）：I-09 是「可选性守卫」——契约要求 `phase/sequence/node/attempt_index/degraded/
+      stats_incomplete` 缺失时不得报错、不得臆造占位。该能力在 amend 前已成立（turn JSON 原样
+      存取），故本条在红相必然为绿；价值在于**防止 v1.5 实施引入回归**（误判 invalid_turn 或补
+      null 占位）。断言仍为真实断言：200/201 + `phase/sequence/node` 键不存在 + `_warnings` 为空。
+      处置建议：接受为守卫项；若必须「10/10 全红」，需 Lead 给 I-09 追加一条当前确实缺失的
+      server 侧可观测要求（如 `stats_incomplete` 语义化输出），我按新口径补断言。
+
+## 四、M-03 不是 [PARTIAL-ENV]：stub 为真实收包
+
+  - python3 `http.server` 起本地 stub（`do_POST` 落盘 body→日志文件，返回 200），端口随机；
+    启动后 TCP 探活再拉起被测服务；`TRACE_WEBHOOK_URL=http://127.0.0.1:<port>/hook` 经 `Proc`
+    （独立 env 注入）传入。stub 为 RAII（断言 panic 也回收子进程，无孤儿）。
+  - 断言：失败 trace 触发时 10s 内必须收到 **1** 次 POST 且报文含 project；随后同一
+    `project+tool_name+last_turn_status`（不同 session）第二次上报在 3s 内**不得**再发。
+  - 实测：`失败 trace 必须触发 1 次 webhook POST（实际 0 次，日志 []）` → 能力缺失（无 webhook
+    实现），stub 本身工作正常（未收包即未实现），无需降级到 PARTIAL 口径。
+
+## 五、运行环境与并发注意事项（物理事实）
+
+  - 首次直接 `cargo test` 时，另一实施者正在改 `crates/core/src/pg_repository.rs` 并持有
+    workspace cargo 锁，harness 内 `cargo build -p pony-sentry-server` 阻塞 >10min（未产出）。
+    处置：终止该次运行 → 用 22:18 的 amend 前二进制快照 → `PONY_SENTRY_BIN` 注入运行
+    （ext 文件 `binary()` 支持该 env；harness 原生亦支持）。收据中二进制 sha256 可复核。
+  - 每用例独立端口 + 独立临时 SQLite 库；`Proc`/stub 子进程随用例 Drop 回收；未触生产库。
+
+## 六、写域核对
+
+  ?? tests/acceptance_trace_v2_ext.rs              （新增，10 个 #[test]）
+   M tests/Cargo.toml                              （新增 [[test]] acceptance_trace_v2_ext）
+  ?? .dev-team/trace-fix-redphase/red-phase-ext.txt（本收据）
+未触碰：crates/**、migrations/**、web/src/**、.dev-team/trace-fix-contract.md

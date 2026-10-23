@@ -609,7 +609,7 @@
               >&times;</button>
             </div>
 
-            <Select v-model="filterTraceStatus" aria-label="Trace 评估状态筛选">
+            <Select v-model="filterTraceStatus" aria-label="Trace 评估状态筛选" @change="traceFailurePreset = false">
               <option value="">全部状态</option>
               <option value="unreviewed">待评估</option>
               <option value="triage_good">标杆样本</option>
@@ -623,6 +623,19 @@
               <option value="">全部项目</option>
               <option v-for="p in traceProjectOptions" :key="p" :value="p">{{ p }}</option>
             </Select>
+
+            <!-- M-03「待评审失败」预设：eval_status=unreviewed + turn_status ∈ 失败终态集（纯前端过滤） -->
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="trace-failed-preset"
+              :aria-pressed="traceFailurePreset"
+              :class="{ 'bg-rose-950/50 border-rose-800 text-rose-300': traceFailurePreset }"
+              @click="toggleTraceFailurePreset"
+            >
+              <AlertTriangle class="w-3 h-3" />
+              待评审失败
+            </Button>
           </div>
 
           <div class="text-xs text-stone-400 font-mono">
@@ -667,7 +680,7 @@
                   <span class="text-[11px] font-mono text-stone-500">{{ trace.release }}</span>
                 </div>
                 <div class="flex items-center gap-4 text-[11px] text-stone-400 font-mono">
-                  <span>Turns: <strong class="text-stone-300 font-medium">{{ getTraceTurns(trace).length }}</strong></span>
+                  <span>Turns: <strong class="text-stone-300 font-medium">{{ getTraceTurns(trace).length || trace.turns_count || 0 }}</strong></span>
                   <span>Tokens: <strong class="text-stone-300 font-medium">{{ (trace.total_input_tokens || 0) + (trace.total_output_tokens || 0) }}</strong></span>
                   <span>耗时: <strong class="text-stone-300 font-medium">{{ formatDuration(trace.total_duration_ms) }}</strong></span>
                 </div>
@@ -773,9 +786,9 @@
                       <Badge :variant="turnStatusBadgeVariant(turn.status)">{{ normalizeTurnStatus(turn.status) }}</Badge>
                       <span v-if="hasSpanValue(turn.attempt_index)" class="text-stone-400 font-normal">attempt #{{ turn.attempt_index }}</span>
                       <Badge v-if="hasDegradedFlag(turn)" variant="warning">降级 {{ formatDegradedLabel(turn.degraded) }}</Badge>
-                      <span v-if="turn.phase" class="text-stone-500 font-normal">({{ turn.phase }})</span>
+                      <span v-if="turnPhaseLabel(turn)" class="text-stone-500 font-normal">({{ turnPhaseLabel(turn) }})</span>
                     </span>
-                    <span class="text-stone-500">seq {{ turn.sequence ?? '-' }} · {{ turn.model || turn.node || turn.step || '-' }} · {{ formatDuration(turn.duration_ms) }}</span>
+                    <span class="text-stone-500">seq {{ turnSeqLabel(turn) }} · {{ turnNodeLabel(turn) }} · {{ formatDuration(turn.duration_ms) }}</span>
                   </div>
                   <div v-if="turn.input_tokens || turn.output_tokens || turn.cache_hit_tokens" class="flex items-center gap-3 text-stone-400 font-mono text-[11px]">
                     <span v-if="turn.input_tokens">输入: {{ turn.input_tokens }}</span>
@@ -913,7 +926,8 @@
 
                 <div class="pt-2">
                   <div class="text-[11px] font-mono uppercase text-stone-400 mb-1">Payload 详情</div>
-                  <pre class="bg-stone-950/70 p-2.5 rounded border border-stone-800/80 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto no-scrollbar">{{ payloadPreview.text }}</pre>
+                  <pre v-if="payloadPreview.text" class="bg-stone-950/70 p-2.5 rounded border border-stone-800/80 font-mono text-[11px] text-stone-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto no-scrollbar">{{ payloadPreview.text }}</pre>
+                  <div v-else class="font-mono text-[10px] text-stone-500">无 payload 详情（summary 模式）</div>
                   <div v-if="payloadPreview.truncated" class="mt-1 font-mono text-[10px] text-amber-400">
                     已截断：仅渲染前 {{ PAYLOAD_PREVIEW_LIMIT / 1024 }}KB（原始 {{ payloadPreview.total }} 字符）
                   </div>
@@ -1283,6 +1297,14 @@ const selectedTrace = ref(null)
 const filterTraceStatus = ref('')
 const traceProjectFilter = ref('')
 const traceSearchKeyword = ref('')
+// M-03「待评审失败」预设开关：与 eval_status 筛选叠加，只留失败终态的轮次
+const traceFailurePreset = ref(false)
+const TRACE_FAILURE_TURN_STATUSES = ['failed', 'error', 'cancelled', 'timed_out']
+
+const toggleTraceFailurePreset = () => {
+  traceFailurePreset.value = !traceFailurePreset.value
+  if (traceFailurePreset.value) filterTraceStatus.value = 'unreviewed'
+}
 
 const traceUnreviewedCount = computed(() => traces.value.filter(t => t.eval_status === 'unreviewed').length)
 const traceGoodCount = computed(() => traces.value.filter(t => t.eval_status === 'triage_good').length)
@@ -1305,6 +1327,9 @@ const filteredTraces = computed(() => {
   let list = traces.value
   if (filterTraceStatus.value) {
     list = list.filter(t => t.eval_status === filterTraceStatus.value)
+  }
+  if (traceFailurePreset.value) {
+    list = list.filter(t => TRACE_FAILURE_TURN_STATUSES.includes(normalizeTurnStatus(t?.turn_status)))
   }
   if (traceProjectFilter.value) {
     list = list.filter(t => (t.project || t.payload?.project) === traceProjectFilter.value)
@@ -1475,6 +1500,19 @@ const hasDegradedFlag = (turn) => {
   const value = turn && typeof turn === 'object' ? turn.degraded : undefined
   if (value === false || !hasSpanValue(value)) return false
   return true
+}
+
+// ---- I-09 phase/sequence/node 属可选生产者字段：缺失回退占位，已有值原样保留 ----
+const turnPhaseLabel = (turn) => (hasSpanValue(turn?.phase) ? String(turn.phase) : '')
+
+const turnSeqLabel = (turn) => {
+  const seq = turn?.sequence ?? turn?.seq
+  return hasSpanValue(seq) ? String(seq) : '-'
+}
+
+const turnNodeLabel = (turn) => {
+  const node = turn?.model || turn?.node || turn?.step
+  return hasSpanValue(node) ? String(node) : '-'
 }
 
 // C8 失败原因区：diagnostics 缺失或无任何命中标志时不渲染
