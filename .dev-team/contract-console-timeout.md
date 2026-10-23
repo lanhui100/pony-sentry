@@ -1,0 +1,49 @@
+# 契约：控制台 API 读超时跨层不变量（R1–R7）
+
+**Status: FROZEN (ver 2)** · Owner protocol-agent（task-1）· 执行方 T3 Executor · 验收 T2 Test Agent（本表只读；改任何一行 = 破冻结，须 Lead 裁决并升 ver）。ver 2 = Lead 对 AMB-1/2/3 裁决后回写（覆盖 ver 1），裁决记录见 §4。
+
+**Binds**：`.dev-team/nfr-baseline.json#console_api_timeout_ms` · `web/src/lib/apiTimeout.js` · `web/src/App.vue`（import 与 `/healthz` 探活）· `crates/server/src/main.rs:152`
+**适用范围**：控制台**入站**读请求的浏览器侧超时（`apiFetchJson`、`/healthz` 探活）与服务端 PostgreSQL 连接池等待（`acquire_timeout`）。不含 SSE/流式、上传，以及本服务**对外发起**的 webhook/通知（后者归 `external_call_timeout_ms=3000`）。
+
+## 0. 竞态成因：为何前端超时反而必须大于服务端超时
+
+1. DB 不可达时服务端先耗满 3s 池等待，再由 axum 生成 500（事故实测 ~3.003s）。
+2. 若前端同为 3000ms，浏览器在 500 到达前抢先 abort；`apiFetchJson` 把 `AbortError` 改写为 `TimeoutError`（`web/src/App.vue:1078-1082`），`classifyLoadFailure` 归为 `timeout`。
+3. 于是「DB 不可达」被译成「请求超时：服务响应过慢或网络不稳定」，真实原因被掩盖 12 小时。前端超时 = 服务端池等待 + 网络/解析余量，必须更晚到期。
+
+## 1. 规则表（冻结）
+
+| 规则 | 判据（机器可查） | 反例 |
+| --- | --- | --- |
+| **R1 单一来源**：控制台所有 API 读取超时只能取自 `web/src/lib/apiTimeout.js` 的 `export const API_TIMEOUT_MS`；`App.vue` 内不得再出现裸数字 `3000` 充当 API 超时；`/healthz` 探活复用同一常量。 | `grep -c "export const API_TIMEOUT_MS" web/src/lib/apiTimeout.js` == 1；`grep -nE "\b3000\b" web/src/App.vue` 零命中（`\b` 不误伤 `30000`）；`grep -n "API_TIMEOUT_MS" web/src/App.vue` 恰三处用途：`import`、`apiFetchJson` 默认值（现 :1041）、healthz `setTimeout`（现 :1234）。 | `App.vue:918 const API_TIMEOUT_MS = 3000` 残留；healthz 里写死字面量 `3000`。 |
+| **R2 下界（ver 2）**：`API_TIMEOUT_MS` 必须严格大于 `acquire`（R4 的 max 值），且余量 **> 2000ms**（预算下限 2000，判定严格；余量须覆盖池等待之后的网络 RTT 与 JSON 解析）；基准取值 **8000ms**，即 `acquire=3000` 时最小合法 **5001**。 | 断言 `API_TIMEOUT_MS > A + min_margin_over_acquire_ms`（严格 `>`，等价余量 > 2000，不接受 =2000）；`nfr-baseline.json#console_api_timeout_ms.value == 8000`、`min_margin_over_acquire_ms == 2000`（仅声明预算下限）。 | `value=5000`（余量恰 2000，判负）；`value=3000`（== acquire，余量 0，事故原型）；`value=4999`。 |
+| **R3 上界**：`API_TIMEOUT_MS` ≤ 15000ms，防止单请求挂死拖住 UI 与刷新队列。 | `nfr-baseline.json#console_api_timeout_ms.max_ms == 15000`；断言 `API_TIMEOUT_MS <= 15000`。 | `20000`；`Infinity`/`0`（0 会让 `setTimeout` 立即 abort）。 |
+| **R4 服务端真值来源（ver 2）**：真值 = `crates/**/*.rs` 全集内所有 `acquire_timeout(Duration::from_millis(N))` 的 **max**（当前 `crates/server/src/main.rs:152` 与 `crates/core/src/db.rs:9` 均为 3000 → A=3000）；零匹配 / 解析失败 / 文件不可读时契约测试必须 **fail-closed**（非零退出），禁止静默通过或 skip。 | 递归 glob `crates/**/*.rs`，正则取全部 `acquire_timeout\(Duration::from_millis\((\d+)\)\)`，`A = max(...)`；`A` 为空、任一候选非十进制整数、目录/文件不可读 → `process.exit(1)`；`grep -nE "\.skip\(|test\.skip|describe\.skip" web/tests/` 零命中；变异收据：把 `db.rs` 值改为 `4000` 后 A=4000 且下界判定随之失败、清空全部来源后测试非零退出。 | 只读 `main.rs`（漏掉 `db.rs`，或两处分叉时取错值）；`false`/`return true` 兜底；`t.skip()` 或 catch 后 `console.warn` 放行。 |
+| **R5 归因语义**：DB 不可达（服务端 500 先到，R2/R3 保证前端尚未 abort）时 `loadFailureDetail` 必须给出「服务端错误：PonySentry 返回 5xx，请查看服务日志」，不得为「请求超时」；既有 auth > timeout > server > network 优先级与 `web/tests/load-error.test.js` 断言语义保持不变。 | `node --test web/tests/load-error.test.js` 退出 0 且该文件 `git diff` 为空；新增用例：`{issues:'server'}` → 精确匹配 `服务端错误：PonySentry 返回 5xx，请查看服务日志`；`{issues:'server',traces:'timeout'}` → `/请求超时/`；`{issues:'server',projects:'auth'}` → `/鉴权失败/`。 | 把 `status>=500` 分支提到 `timeout` 之前（改优先级）；把 500 文案改成「请求超时」。 |
+| **R6 最小闭包**：本次实现只允许 ① 新增 `web/src/lib/apiTimeout.js` ② `App.vue` 改 import 与引用 ③ Rust 侧一行注释。禁止重试、退避、新 fetch 封装或任何额外行为变更。 | `git status --porcelain` 仅含上述三项 + 本契约 + `nfr-baseline.json`；`grep -nE "retry|backoff|sleep" web/src/lib/apiTimeout.js` 零命中；`git diff crates/` 的 `+` 行数 == 1（注释行）。语义最小性机器到不了 → **靠 review**。 | 顺手加重试/指数退避；抽 `request()` 封装；顺手改 `apiFetchJson` 默认值以外的逻辑。 |
+| **R7 对抗判据**：三类夹具（边界 / 解析器缺失 / 畸形输入）必须被测试逐值判定真假——违规值判负且测试进程非零退出，合法边界值判正；测试必须确定性，禁止 sleep/概率等待。 | ① 边界（ver 2，四值全覆盖）：`5000`（= A+2000）判负、`5001`（= A+2001）判正、`15000` 判正、`15001` 判负；② 解析器缺失：`crates/**/*.rs` 零匹配、目录/文件不可读 → 判负；③ 畸形输入：`from_millis(abc)`、`from_millis()`、`from_millis(-1)` → 判负；`grep -nE "sleep\(|setTimeout|Math\.random" web/tests/` 零命中。 | 用 `await sleep(3000)` 模拟服务端 500；把边界夹具写成 `4000` 等非边界值；畸形输入「跳过即可」。 |
+
+## 2. 校验收据（物理收据）
+
+- 命令：`cd /home/dm/pony-sentry && python3 /home/dm/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline.json`
+- 退出码：`0`（2026-10-23，执行方 protocol-agent）
+- stdout 原文：
+
+```text
+[PASS] dev-nfr-lint 校验通过: .dev-team/nfr-baseline.json
+```
+
+- **ver 2 复跑（2026-10-23，裁决回写后）**：同一命令，退出码 `0`，stdout 原文 `[PASS] dev-nfr-lint 校验通过: .dev-team/nfr-baseline.json`。
+- 本收据只证明 NFR 基准表格式与取值合规（既有 6 个顶层键零改动，`git diff` 为 8 行纯插入）；R1–R7 的契约测试由 T2 实现，其实施后收据另附。
+
+## 3. 历史歧义（ver 2 已全部裁决，正文规则已按裁决回写，条目见 §4）
+
+- AMB-1 判定边界互斥 → 已裁决：严格不等式（见 §4.1）。
+- AMB-2 `=15000` 判定归属 → 已裁决：15000 判正、15001 判负（见 §4.2）。
+- AMB-3 第二处 `acquire_timeout` → 已裁决：纳入绑定、取 max（见 §4.3）。
+
+## 4. Lead 裁决记录（ver 2）
+
+- **4.1 AMB-1 — 取严格不等式（R7 优先）**：余量必须 `> 2000`，即 `API_TIMEOUT_MS > acquire + 2000`；acquire=3000 时最小合法 **5001**；`nfr-baseline.json#min_margin_over_acquire_ms=2000` 保留为「声明预算下限」，下界判定用严格不等式；夹具 `5000` 判负 / `5001` 判正。*理由*：落地事故的余量是安全垫，等号落在垫子边缘即失去容错，且边界必须可机械判定唯一真假。
+- **4.2 AMB-2 — 批准原判**：`=15000` 判正、`15001` 判负，R3 闭区间成立，上界不改。*理由*：15000 是 R3 明文允许的闭合上界，误判为负会让合法基准无法通过自检。
+- **4.3 AMB-3 — 纳入绑定**：真值 = `crates/**/*.rs` 中所有 `acquire_timeout(Duration::from_millis(N))` 的 **max**（实测 `crates/server/src/main.rs:152` 与 `crates/core/src/db.rs:9` 均为 3000 → A=3000）；零匹配 / 解析失败 / 文件不可读 → fail-closed 非零退出。*理由*：SQLite 是默认部署路径，只绑 PG 那一行会让最常见部署的超时不变式失去守卫。

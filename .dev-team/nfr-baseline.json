@@ -1,5 +1,13 @@
 {
   "external_call_timeout_ms": 3000,
+  "console_api_timeout_ms": {
+    "contract": ".dev-team/contract-console-timeout.md",
+    "value": 8000,
+    "min_margin_over_acquire_ms": 2000,
+    "max_ms": 15000,
+    "source_of_acquire_timeout": "crates/server/src/main.rs",
+    "rationale": "external_call_timeout_ms=3000 约束的是本服务对外发起的调用（webhook/通知）；console_api_timeout_ms 约束的是控制台入站读请求（浏览器 -> 本服务），其超时必须大于服务端自身 PostgreSQL 池等待（acquire_timeout 3000ms，见 crates/server/src/main.rs:152）并留出网络/JSON 解析余量，否则浏览器 abort 会先于服务端 500 到达，把 DB 不可达误判为请求超时。两者适用边界不同，不可合并取值。"
+  },
   "retry": {
     "max_attempts": 3,
     "backoff_ms": 500
