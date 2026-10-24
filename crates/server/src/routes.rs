@@ -2,6 +2,7 @@ use crate::session::{
     csrf_token_from_header, session_token_from_bearer, session_token_from_cookie, SessionOrigin,
     SessionStore,
 };
+use crate::trace_ingest::TraceIngestSwitch;
 use crate::trace_webhook::TraceNotifier;
 use crate::trust::{is_proxied, normalize_peer, TrustConfig, TrustDecision};
 use axum::{
@@ -806,11 +807,26 @@ pub fn create_app_with_state(state: AppState) -> Router {
     create_app_with_trust(state, TrustConfig::from_env())
 }
 
-/// 构建应用并显式注入 tailnet 信任配置（`main.rs` 使用，故 `from_env` 的启动日志只打一次）。
+/// 构建应用并显式注入 tailnet 信任配置（开关取进程环境）。
+///
+/// 保留本入口是为了不打破既有调用方（`main.rs` 之外的进程内测试）；tracing 接收开关
+/// 由 [`create_app_with_options`] 显式注入，未注入时按 [`TraceIngestSwitch::from_env`] 取值。
+pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
+    create_app_with_options(state, trust, TraceIngestSwitch::from_env())
+}
+
+/// 构建应用并显式注入 tailnet 信任配置 + tracing 接收开关（`main.rs` 使用，故两个
+/// `from_env` 的启动日志各只打一次）。
 ///
 /// `trust` 经 `Extension` 层下发：`admin_auth_middleware` 与 `handle_get_session` 各取一份
-/// `Arc<TrustConfig>`。不往 `AppState` 增字段，是因为进程内既有测试以结构体字面量构造它。
-pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
+/// `Arc<TrustConfig>`。`trace_ingest` 以 **state 形式**注入 4 个 trace 路由的门口中间件：
+/// 关闭时在处理器之前返回 `410 Gone`（不写库、不递增指标）。两者都不往 `AppState` 增字段，
+/// 是因为进程内既有测试以结构体字面量构造它。
+pub fn create_app_with_options(
+    state: AppState,
+    trust: TrustConfig,
+    trace_ingest: TraceIngestSwitch,
+) -> Router {
     let trust = Arc::new(trust);
 
     // 1. Ingest 专用 CORS：仅开放 POST，收敛跨域能力
@@ -828,7 +844,13 @@ pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
     // 2. 遥测上报路由 (强制挂载 2MB 请求体硬限制与专有 CORS)
     let ingest_routes = Router::new()
         .route("/api/v1/ingest", post(handle_ingest))
-        .route("/api/v1/traces", post(handle_ingest_trace))
+        .route(
+            "/api/v1/traces",
+            post(handle_ingest_trace).layer(middleware::from_fn_with_state(
+                trace_ingest,
+                trace_ingest_gate,
+            )),
+        )
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(ingest_cors);
 
@@ -854,6 +876,15 @@ pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
             patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/v1/issues/:id/events", get(handle_get_issue_events))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin_auth_middleware,
+        ));
+
+    // 4b. trace 管理路由独立成组：**停收门在最外层**（先于 admin 鉴权），
+    //     故关闭时无论是否携带凭证一律 410 —— 这是「入口已关闭」对调用方的确定答复，
+    //     而不是 401 让人误以为补个 token 就能继续上报。
+    let trace_admin_routes = Router::new()
         .route("/api/v1/traces", get(handle_list_traces))
         .route("/api/v1/traces/:id", get(handle_get_trace))
         .route(
@@ -863,6 +894,10 @@ pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            trace_ingest,
+            trace_ingest_gate,
         ));
 
     let html_content = include_str!("../../../web/dist/index.html");
@@ -877,6 +912,7 @@ pub fn create_app_with_trust(state: AppState, trust: TrustConfig) -> Router {
         .merge(ingest_routes)
         .merge(auth_routes)
         .merge(admin_routes)
+        .merge(trace_admin_routes)
         // 信任配置：Extension 层置于所有路由之外，鉴权中间件与处理器均可读取。
         .layer(Extension(trust))
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
@@ -936,6 +972,31 @@ impl TrustContext {
             "tailnet 可信对端放行只读请求"
         );
     }
+}
+
+/// tracing 停收门：只挂在 4 个 trace 路由上（`POST/GET/PATCH /api/v1/traces`、
+/// `GET /api/v1/traces/:id`）。
+///
+/// 关闭时在**处理器之前**返回 `410 Gone` + 固定响应体：处理器与鉴权后的业务分支都不执行
+/// ⇒ 不写库、不递增 `pony_sentry_trace_*` 指标、不触发 webhook。开启时原样放行（`next.run`），
+/// 不改变任何既有语义。
+///
+/// 为什么用中间件而不是在 4 个处理器里各加一个 if：一处接线即覆盖全部方法，且「不写库」
+/// 由「处理器根本不执行」从结构上保证，不依赖每个处理器的自觉。
+async fn trace_ingest_gate(
+    State(switch): State<TraceIngestSwitch>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if switch.enabled() {
+        return next.run(request).await;
+    }
+    info!(
+        method = %request.method(),
+        path = request.uri().path(),
+        "tracing 已停收：返回 410（处理器未执行，不写库、不计数）"
+    );
+    TraceIngestSwitch::disabled_response()
 }
 
 /// 管理侧鉴权中间件：读接口与 PATCH 一律先过 token 校验（契约 R10 / R10.1）；

@@ -4,6 +4,20 @@
 > `crates/core/src/{pg,sqlite}_repository.rs`、`migrations/0005_trace_turns.sql`。
 > 变更本契约的行为必须 same-commit 更新本文件（根 AGENTS.md 命约 4）。
 
+## 0. 停收开关：`PONY_TRACE_INGEST_ENABLED`
+
+- 默认 `1`（开启）。`0`/`false`/`off`（大小写不敏感、去首尾空白）⇒ 停收；空白串视同未设置（保持开启）；
+  其它任何值按开启处理（只有显式关闭值才关闭，避免拼写错误导致静默停收）。
+- 停收时下列 4 个路由一律 `410 Gone`，响应体固定
+  `{"error":"trace_ingest_disabled","message":"tracing moved to tempo+langfuse"}`：
+  `POST /api/v1/traces`、`GET /api/v1/traces`、`GET /api/v1/traces/:id`、`PATCH /api/v1/traces/:id`。
+- 拦截点在**路由层中间件**（处理器之前）：不写库、不递增 `pony_sentry_trace_*` 指标、不触发 webhook；
+  对 trace 管理路由而言它先于 admin 鉴权，因此**携带与不携带凭证都得到 410**（停收是确定答复，
+  而非「补 token 可继续上报」）。
+- `GET /healthz`、`POST /api/v1/ingest`、`GET/PATCH /api/v1/issues*`、`GET /metrics` 不受影响。
+- 回滚 = 去掉该 env（或置 `1`）并重启；本开关**不删表、不删迁移、不删 tracing 代码**，
+  `traces`/`trace_turns` 历史数据原样保留。
+
 ## 1. ingest：`POST /api/v1/traces`
 
 - 鉴权：`x-client-token` / `Authorization: Bearer`（未配置 `CLIENT_TOKEN` 时放行；先鉴权后解析体）。

@@ -3,7 +3,8 @@ use pony_sentry_core::{
     create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository,
 };
 use pony_sentry_server::{
-    create_app_with_trust, session::SessionStore, trust::TrustConfig, AppState,
+    create_app_with_options, session::SessionStore, trace_ingest::TraceIngestSwitch,
+    trust::TrustConfig, AppState,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
@@ -258,7 +259,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_enabled = trust.enabled,
         "tailnet 信任判定已接入管理读路由与会话自动签发（变更请求仍需会话 Cookie + CSRF）"
     );
-    let app = create_app_with_trust(state, trust);
+    // tracing 接收开关（`PONY_TRACE_INGEST_ENABLED`，默认开启）：停收时 4 个 trace 路由
+    // 返回 410，Issue 采集 / 探针 / 指标语义不变。启动日志在本函数内只打一次。
+    let trace_ingest = TraceIngestSwitch::from_env();
+    let app = create_app_with_options(state, trust, trace_ingest);
 
     let port: u16 = std::env::var("PORT")
         .ok()

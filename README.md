@@ -39,6 +39,7 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `RETENTION_DISABLED` | 未设置 | `=1` 关闭每日清理任务 |
 | `RETENTION_DRY_RUN` | 未设置 | `=1` 只打印清理计划不删除（首次上线观察用） |
 | `PONY_REINDEX_FINGERPRINTS` | 未设置 | `=1` 执行一次全量指纹重索引后退出。**会重塑 issue 分组，仅运维手动执行** |
+| `PONY_TRACE_INGEST_ENABLED` | `1`（开启） | tracing 接收开关（kill switch）：`0`/`false`/`off`（大小写不敏感、去空白）关闭后，`POST /api/v1/traces`、`GET /api/v1/traces`、`GET /api/v1/traces/:id`、`PATCH /api/v1/traces/:id` 一律返回 `410 Gone` + `{"error":"trace_ingest_disabled","message":"tracing moved to tempo+langfuse"}`，且在处理器之前拦截（不写库、不递增 trace 指标）；`/healthz`、`POST /api/v1/ingest`、`GET/PATCH /api/v1/issues*`、`/metrics` 行为不变。未设置/空值/其它值 = 开启 |
 | `RUST_LOG` | — | tracing 过滤（结构化日志带 `request_id`/`issue_id` 关联字段） |
 
 ### Web 控制台会话
