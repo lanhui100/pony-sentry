@@ -1,0 +1,100 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-issue-governance.md",
+    "crates/core/src/models.rs",
+    "crates/core/src/repository.rs",
+    "crates/server/src/routes.rs",
+    ".dev-team/nfr-baseline.json"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 466,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && grep -n 'X-Total-Count' .dev-team/contract-issue-governance.md | tail -2; sed -n '279,285p' .dev-team/contract-issue-governance.md; sed -n '361,367p' crates/core/src/models.rs",
+      "detail": "A4(:466) 要求用 `GET /issues/:id/events` 的 X-Total-Count（或信封 total）做归档前后相等断言，但 C4.3(:279-285) 只定义 X-Next-Cursor/X-Has-More/X-Limit，信封只有 {items,next_cursor,has_more,limit}，空桩 IssueEventsEnvelope(models.rs:361-367) 亦无 total。反例输出：C4.3 表 3 项无 X-Total-Count、信封 4 字段无 total。故 A4 不可机器编码：executor 加 total 违反「字段名写死」，不加则 A4 红相必红 → 冻结测试与冻结契约互斥。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 187,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && sed -n '163p;187p;467p' .dev-team/contract-issue-governance.md",
+      "detail": "C2.4(:187) 判据 criteria.statuses=「实际生效白名单」；A5 补判据(:467) 要求「ids 与 statuses 同给时 criteria.statuses 恒为 [\"ignored\",\"resolved\"]」。请求 {\"ids\":[...],\"statuses\":[\"ignored\"]} 时前者⇒[\"ignored\"]、后者⇒[\"ignored\",\"resolved\"]，两条冻结判据不可能同时通过；且 C2.3(:163) 已声明 ids 优先时 statuses 被忽略，「生效白名单」本身无定义。空桩 IssueArchiveCriteria.statuses 为 Vec<String>（非 Option），无法表达「被忽略/null」。"
+    },
+    {
+      "file": "crates/server/src/routes.rs",
+      "line": 884,
+      "rule": "SECURITY",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && python3 -c 'import json;print(\"body_bytes_for_52000_ids=\",len(json.dumps({\"ids\":[\"01234567-89ab-cdef-0123-456789abcdef\"]*52000}).encode()))'; grep -n 'define SQLITE_MAX_VARIABLE_NUMBER 32766' ~/.cargo/registry/src/*/libsqlite3-sys-0.30.1/sqlite3/sqlite3.c; grep -n 'DefaultBodyLimit' crates/server/src/routes.rs | head -4",
+      "detail": "C2.3/C2.4 对 ids/statuses 仅规定「非字符串数组→400」，**无长度上限、无单元素长度/字符集约束、未要求绑定参数**；新 POST 路由未挂 DefaultBodyLimit（对比 :id PATCH 的 64KB，:877-880），走 axum 默认 2MB → 实测 52000 个 UUID id 仅 2080009 字节，可整体通过；而 sqlx 内置 sqlite 的 SQLITE_MAX_VARIABLE_NUMBER=32766(libsqlite3-sys-0.30.1/sqlite3.c:13893) → 朴素 `IN (?,?,...)` 直接 500（契约承诺 400）；statuses 重复 \"ignored\" 同样绕过白名单校验。叠加为单请求超大规模匹配 → 5xx/DoS 面。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 149,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && (grep -n 'Internal error' .dev-team/contract-issue-governance.md || echo '0 occurrences: contract never pins the 5xx body'); sed -n '176,182p;1719,1726p' crates/server/src/routes.rs; sed -n '1443,1449p' crates/server/tests/api_test.rs",
+      "detail": "既有口径由 internal_error()(routes.rs:176-182) 把任何 DB 错误收口为固定体 \"Internal error\"，并由 test_issue_endpoints_hide_db_error_text(api_test.rs:1425-1465) 锁死 3 条旧路径。契约对 5 个新端点只写失败码「400/401/500」，全文 'Internal error' 出现 **0** 次，也未要求复用 internal_error；空桩签名 `Result<Response,(StatusCode,String)>`（routes.rs:1719-1762）天然允许把 SQLite/PG 原文塞进 String → executor 可「完全合规」地泄露 DB/schema 文本，既有泄露测试不覆盖新路径。需在契约补「5xx 响应体恒为 Internal error，复用 internal_error」。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 43,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && python3 -c 'import sqlite3;d=sqlite3.connect(\":memory:\");d.executescript(\"CREATE TABLE issues(id TEXT PRIMARY KEY,first_seen_at TEXT,last_seen_at TEXT,archived_at TEXT);CREATE TABLE events(id TEXT PRIMARY KEY,issue_id TEXT,created_at TEXT);CREATE INDEX idx_events_issue_id ON events(issue_id);CREATE INDEX idx_issues_archived_at ON issues(archived_at);CREATE INDEX idx_issues_last_seen_at ON issues(last_seen_at);\");d.executemany(\"INSERT INTO events VALUES(?,?,?)\",[(str(i),\"i1\",\"2026-01-%02d\"%(i%28+1)) for i in range(200000)]);[print(\"C4.2 page:\",r[-1]) for r in d.execute(\"EXPLAIN QUERY PLAN SELECT id FROM events WHERE issue_id=? ORDER BY created_at DESC,id DESC LIMIT 21\",(\"i1\",))];[print(\"C5 series:\",r[-1]) for r in d.execute(\"EXPLAIN QUERY PLAN SELECT substr(created_at,1,10),count(*) FROM events GROUP BY 1\")]'",
+      "detail": "C1 只建 idx_issues_archived_at / idx_issues_project_status_archived(+ingest_metrics)，未为 C4.2 keyset（events: issue_id=? AND (created_at,id)<… ORDER BY created_at DESC,id DESC）与 C5 series（按 events.created_at / issues.first_seen_at 落桶）提供索引；events 现有索引只有 idx_events_issue_id。200k 行 EXPLAIN 实测：keyset 页 `USE TEMP B-TREE FOR ORDER BY`（全 issue 行排序，翻页 O(n²)），series `SCAN events` + TEMP B-TREE。10^6 级线性放大；744 点上限不等于成本上限——若按桶逐点聚合即 744 次扫描。建议 C1 补 events(issue_id,created_at,id)/events(created_at)/issues(first_seen_at) 或明确禁止逐桶查询。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 168,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && grep -n 'higher priority' ~/.cargo/registry/src/*/matchit-0.7.3/README.md; sed -n '748,752p' ~/.cargo/registry/src/*/axum-0.7.9/src/routing/method_routing.rs; sed -n '876,888p' crates/server/src/routes.rs",
+      "detail": "静态段 /api/v1/issues/archive shadow `:id` 的**所有方法**：matchit 静态段优先(README:59)，axum 路径命中而方法缺失即 405(method_routing.rs:748-752)。故 GET→405（契约已写 ✓），但 **PATCH→405**（此前落到 handle_update_issue 的 :id 分支，未知 id 返回 404 \"Issue not found\"），PUT/DELETE→405。C2.3(:168) 只登记 GET 的 405，「PATCH 由 404 变 405」的语义漂移未进 C7.3 破变表 → 未登记契约漂移（无安全影响，可观测契约有影响）。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 213,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && sed -n '213p;262p' .dev-team/contract-issue-governance.md; sed -n '436,441p' .dev-team/contract-issue-governance.md",
+      "detail": "同一参数名 limit 语义相反：C3.2(:213) `0 → clamp 到 1`；C4.1(:262) `0 → 400 invalid limit`。C7.3 breaking 表(:436-441) 只有列表侧 B4（limit<0→400），未把「跨接口 limit=0 行为相反」显式登记为不一致 → 客户端复用同一参数封装必踩坑，测试也无法从契约推断统一策略。要求：显式登记为 breaking/不一致（或统一策略）。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 223,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && sed -n '223p;279,285p;295p' .dev-team/contract-issue-governance.md",
+      "detail": "C3.3 是**列表**响应头表，却写「除 X-Next-Cursor 外每次 200 都带」——列表侧从不下发 X-Next-Cursor（该头只在 C4.3/C4.4 的 events 侧裁决），括注把表格作用域扩成跨接口：字面阅读会要求 events 的 200 也带 X-Total-Count/X-Archived-Mode 等，与 C4.3 仅三项头冲突。结论：与 C4.3「无下一页不得出现 X-Next-Cursor」在**结果**上不矛盾（同一事实、两者都要求无下一页时缺失），但 C3.3 的作用域表述自相矛盾，须改为「本接口每次 200 都带」。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 149,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && sed -n '436,438p;569,574p;1026,1036p' crates/server/src/routes.rs; sed -n '149,151p' .dev-team/contract-issue-governance.md",
+      "detail": "失败码列只写 400/401/500，但落 admin_auth_middleware 后实际可达 **403**（Cookie 会话缺/错 CSRF，routes.rs:444-450 → csrf_invalid）与 **503**（admin/client token 均未配置 → NotConfigured，routes.rs:436-438 + 569-574 + 1038）。故「匿名 POST archive 期望 401」仅在 token 已配置时成立，未配置环境实测语义是 503。另 GET /stats、/ingest/stats 对 Trusted tailnet 对端可**无凭证**放行（routes.rs:1026-1036 + nfr tailnet_trust.trust_grants=read_only_get），C5/C6.1 的「沿用 admin 口径」正文未描述该旁路 → 鉴权矩阵描述不闭合（写操作 POST 不受该旁路影响：grants_read 仅 GET/HEAD）。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 443,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && python3 -c 'import sqlite3;d=sqlite3.connect(\":memory:\");d.execute(\"CREATE TABLE issues(id TEXT PRIMARY KEY,archived_at TEXT)\");print(\"with column:\",d.execute(\"SELECT id,archived_at FROM issues\").fetchall());d.execute(\"ALTER TABLE issues DROP COLUMN archived_at\");print(d.execute(\"SELECT id,archived_at FROM issues\").fetchall())'; grep -n 'const ISSUE_COLUMNS' -A 3 crates/core/src/pg_repository.rs",
+      "detail": "C1.3/C7.3(:443) 把回滚定义为「执行 down.sql + 全量 unarchive」，**未规定 down.sql 与二进制版本的先后序**。down 后 archived_at 列消失，而 C1.4 要求 executor 把它并入 ISSUE_COLUMNS（pg_repository.rs:15-18，`SELECT {ISSUE_COLUMNS} FROM issues` 共 5 处）→ 任何含该投影的二进制在 down 后所有 issue 查询 500（反例：DROP COLUMN 后同投影抛 `no such column: archived_at`）。回滚顺序是必需项（expand/contract 两阶段或「先停读该列的二进制再 down」），当前是缺口。附：C1.1 的 `CREATE INDEX`（非 CONCURRENTLY）在 111 issues 下可接受，但仅在 C1.4 指定的 ensure_schema 路径下会被改写为 CONCURRENTLY(pg_repository.rs:139-141)；若按 C1.1 判据「全文件二次执行」用 raw_sql 执行，则整段进单事务并取 ACCESS EXCLUSIVE（0005 注释已因同类问题改造）。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 2,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-sentry && grep -n 'external_call_timeout_ms\\|failure_policy\\|ingest' .dev-team/nfr-baseline.json; sed -n '398,410p' .dev-team/contract-issue-governance.md; grep -n 'acquire_timeout' crates/server/src/main.rs",
+      "detail": "external_call_timeout_ms=3000 按其自身 rationale(nfr:9) 只约束对外调用（webhook/通知），**不覆盖 DB 写**；nfr 无「ingest 新增延迟」预算，而池 acquire_timeout=3000ms(main.rs:153)。C6.2 在 ingest 同步路径每事件一次 UPSERT，且单请求实际最多 3 条（received + created/duplicate + suppressed_ignored，C1.5/:398-402 与 :406「每事件一次」自述不一致）；failure_policy=warn_only 只拦**错误**不拦**慢**：DB 慢 → ingest 响应变慢 → 调用方超时/重投（重投再触发 duplicate 计数），形成未登记的 TIMEOUT/放大回路。建议登记 ingest P99 增量预算与 statement timeout，或把计数写下移为批量/异步（C6.2 已列为遗留风险，但未进 NFR 基准）。"
+    }
+  ]
+}

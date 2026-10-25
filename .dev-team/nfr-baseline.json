@@ -72,10 +72,22 @@
     "auto_archive_statuses": ["ignored", "resolved"],
     "never_auto_archive_statuses": ["unresolved", "in_progress", "regression"],
     "non_blocking": true,
-    "failure_policy": "warn_only"
+    "failure_policy": "warn_only",
+    "restore_persistence": "archive_restored_at >= last_seen_at blocks auto-archive",
+    "restored_at_column": "archive_restored_at",
+    "active_unarchive_statuses": ["unresolved", "in_progress", "regression"],
+    "batch_ids_max": 1000,
+    "batch_id_max_chars": 128,
+    "batch_statuses_max": 2,
+    "archive_body_limit_bytes": 65536
   },
   "issue_events_page_limit_max": 100,
   "issue_list_limit_max": 100,
   "ingest_metrics_failure_policy": "warn_only_no_ingest_impact",
-  "stats_series_max_points": 744
+  "stats_series_max_points": 744,
+  "ingest_metrics_write_timeout_ms": 1000,
+  "ingest_metrics_max_added_latency_ms": 3000,
+  "archive_job_first_run_after_migrate": true,
+  "archive_job_failure_backoff_secs": 60,
+  "archive_restore_persistence": "archive_restored_at >= last_seen_at blocks auto-archive"
 }

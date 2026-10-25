@@ -275,12 +275,17 @@ pub struct IssueArchiveRequest {
     #[serde(default)]
     pub project: Option<String>,
     /// 归档目标状态白名单；缺省 `["ignored","resolved"]`，越界（含 `unresolved`/`in_progress`/`regression`）→ 400。
+    ///
+    /// 上限（`amend v1.1 / B-5`）：最多 2 项且不得重复，否则 → 400 `Bad request: invalid statuses`。
     #[serde(default)]
     pub statuses: Option<Vec<String>>,
     /// 仅归档 `last_seen_at < now - older_than_days` 的行；缺省不限。
     #[serde(default)]
     pub older_than_days: Option<i64>,
     /// 显式 id 列表；给出即优先于 `statuses`/`project`。
+    ///
+    /// 上限（`amend v1.1 / B-5`）：`dedup(ids).len() <= 1000`（超出 → 400 `Bad request: too many ids`），
+    /// 单 id 长度 `<= 128` 字符。
     #[serde(default)]
     pub ids: Option<Vec<String>>,
     /// `true` 只统计不改库（`archived` 恒为 0）。
@@ -303,17 +308,24 @@ pub struct IssueArchiveCriteria {
 
 /// `C2.4`：批量归档结果（字段名与类型写死）。
 ///
-/// 不变式：`matched == archived + skipped_already_archived + skipped_not_archivable`（非 dry_run）。
+/// 计数口径（`amend v1.1 / A-3`）：
+/// - `statuses` 模式：`matched ≡ archived`，`skipped_*` 恒 0；
+/// - `ids` 模式：`matched = dedup(ids).len()`，其余三项为分桶结果。
+///
+/// 不变式（单写者/无并发）：`archived + skipped_not_archivable + skipped_already_archived
+/// + skipped_missing == matched`；并发下只保证 `archived <= matched` 且 `archived + skipped_* <= matched`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueArchiveOutcome {
     pub dry_run: bool,
-    /// 满足条件的总命中数（含已归档与不可归档）。
+    /// 按模式的命中总数（见类型级文档）。
     pub matched: i64,
     /// 本次实际置 `archived_at` 的行数；`dry_run=true` 时恒为 0。
     pub archived: i64,
     pub skipped_already_archived: i64,
-    /// 命中但 `status ∉ {ignored, resolved}` 或 id 不存在的行数。
+    /// 命中但 `status ∉ 生效白名单`（含 `unresolved`/`in_progress`/`regression`）。
     pub skipped_not_archivable: i64,
+    /// `ids` 在库中不存在（`amend v1.1 / A-3`；仅 `ids` 模式非零）。
+    pub skipped_missing: i64,
     pub criteria: IssueArchiveCriteria,
 }
 
@@ -330,12 +342,15 @@ pub enum IssueEventsOrder {
 
 /// `C4.2`：事件分页游标载荷（解码后形态）。
 ///
-/// 编码：UTF-8 JSON `{"created_at_micros": <int>, "id": "<string>"}` → base64url（无 padding），
-/// 即为不透明 `cursor` 串；解码失败/字段不符/超 512 字符 → 400 `Bad request: invalid cursor`。
+/// 编码（`amend v1.1 / B-2`）：UTF-8 JSON `{"created_at": "<原始 RFC3339 串>", "id": "<string>"}`
+/// → base64url（无 padding），即为不透明 `cursor` 串；
+/// 解码失败/字段不符/长度 > 512 字符 → 400 `Bad request: invalid cursor`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueEventsCursor {
-    /// `created_at` 的 Unix 微秒时间戳（keyset 第一键）。
-    pub created_at_micros: i64,
+    /// `created_at` 的**原始 RFC3339 序列化串**（库内该行原值，禁止截断到微秒）。
+    ///
+    /// 方言比较：SQLite 对 TEXT 做字典序比较、PG 对 `timestamptz` 做时间比较，故必须原样携带。
+    pub created_at: String,
     /// 事件 id（keyset 第二键，破同 `created_at` 平局）。
     pub id: String,
 }
@@ -364,6 +379,9 @@ pub struct IssueEventsEnvelope {
     pub next_cursor: Option<String>,
     pub has_more: bool,
     pub limit: i64,
+    /// 该 issue 的事件**总行数**，与 `cursor`/`limit` 无关（`amend v1.1 / B-4`），
+    /// 与响应头 `X-Total-Count` 相等。
+    pub total: i64,
 }
 
 /// `C3.4`：`?envelope=1` 时回显的生效过滤条件（缺省 `null`，空串归一 `null`）。

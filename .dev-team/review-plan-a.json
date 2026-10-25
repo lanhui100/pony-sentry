@@ -1,0 +1,84 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".dev-team/contract-issue-governance.md",
+    "crates/core/src/models.rs",
+    "crates/core/src/repository.rs",
+    "crates/server/src/routes.rs",
+    ".dev-team/nfr-baseline.json"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 167,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3\nc=sqlite3.connect(\":memory:\")\nc.executescript(\"CREATE TABLE issues(id TEXT PRIMARY KEY,status TEXT,archived_at TEXT,last_seen_at TEXT)\")\nc.execute(\"INSERT INTO issues VALUES(?,?,?,?)\",(\"i1\",\"ignored\",None,\"2020-01-01T00:00:00+00:00\"))\njob=\"UPDATE issues SET archived_at=? WHERE status IN (?,?) AND archived_at IS NULL AND last_seen_at < ?\"\ncur=\"2026-09-25T00:00:00+00:00\"\nprint(\"round1 archived\", c.execute(job,(\"2026-10-25T19:00:00+00:00\",\"ignored\",\"resolved\",cur)).rowcount)\nc.execute(\"UPDATE issues SET archived_at=NULL WHERE id=?\",(\"i1\",))\nprint(\"after unarchive\", c.execute(\"SELECT archived_at FROM issues\").fetchone())\nprint(\"round2 archived\", c.execute(job,(\"2026-10-25T19:00:01+00:00\",\"ignored\",\"resolved\",cur)).rowcount)\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "C2.3 只冻结「重复归档 archived_at 不变」的单向幂等，没有 unarchive 的持久性/抑制规则：TTL 判据仍是 status∈{ignored,resolved} AND archived_at IS NULL AND last_seen_at<cutoff，手动 unarchive 后下一轮（生产 3600s）即被重新归档，恢复语义被作业静默覆盖。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 191,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3,tempfile,os\np=tempfile.mktemp(suffix=\".db\")\na=sqlite3.connect(p,timeout=0); b=sqlite3.connect(p,timeout=0)\na.executescript(\"CREATE TABLE issues(id TEXT PRIMARY KEY,status TEXT,archived_at TEXT,last_seen_at TEXT)\")\na.execute(\"INSERT INTO issues VALUES(?,?,?,?)\",(\"i1\",\"ignored\",None,\"2020-01-01T00:00:00+00:00\")); a.commit()\nsel=\"SELECT id FROM issues WHERE status IN (?,?) AND archived_at IS NULL\"\nupd=\"UPDATE issues SET archived_at=? WHERE status IN (?,?) AND archived_at IS NULL\"\nmatched=len(a.execute(sel,(\"ignored\",\"resolved\")).fetchall()); print(\"A matched\",matched)\nnb=b.execute(upd,(\"2026-10-25T19:00:00+00:00\",\"ignored\",\"resolved\")).rowcount; b.commit(); print(\"B archived\",nb)\nna=a.execute(upd,(\"2026-10-25T19:00:00+00:00\",\"ignored\",\"resolved\")).rowcount\nprint(\"A archived\",na,\"skipped_already\",0,\"invariant_holds\",matched==na+0+0)\nos.unlink(p)\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "C2.4 把 matched==archived+skipped_already_archived+skipped_not_archivable 定为硬不变式，却未要求计数与 UPDATE 同语句/同快照产生：TTL 作业与手动批量（或两路手动）并发时 READ COMMITTED 下必然出现 matched=1、archived=0、skipped_*=0。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 126,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3\nc=sqlite3.connect(\":memory:\")\nc.executescript(\"CREATE TABLE issues(id TEXT PRIMARY KEY,status TEXT,count INT,archived_at TEXT,last_seen_at TEXT); CREATE TABLE events(id TEXT PRIMARY KEY,issue_id TEXT,created_at TEXT)\")\nc.execute(\"INSERT INTO issues VALUES(?,?,?,?,?)\",(\"i1\",\"resolved\",3,\"2026-10-01T00:00:00+00:00\",\"2026-10-01T00:00:00+00:00\"))\nc.execute(\"UPDATE issues SET count=count+1, status=CASE WHEN status=? THEN ? ELSE status END, last_seen_at=? WHERE id=?\",(\"resolved\",\"regression\",\"2026-10-25T19:00:00+00:00\",\"i1\"))\nc.execute(\"INSERT INTO events VALUES(?,?,?)\",(\"e1\",\"i1\",\"2026-10-25T19:00:00+00:00\"))\nprint(\"row\",c.execute(\"SELECT status,count,archived_at,last_seen_at FROM issues\").fetchone())\nprint(\"default list rows\",c.execute(\"SELECT count(*) FROM issues WHERE archived_at IS NULL\").fetchone()[0])\nprint(\"ttl re-archive candidates\",c.execute(\"SELECT count(*) FROM issues WHERE status IN (?,?) AND archived_at IS NULL\",(\"ignored\",\"resolved\")).fetchone()[0])\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "归档只写 archived_at，而 ingest 对已归档 issue 仍 count+1、last_seen_at 前移并做 resolved→regression 跃迁（F17）：产出 archived_at 非空 + status=regression 的活跃僵尸且被默认列表/统计隐藏，契约既无「新事件自动 unarchive」也无「归档 issue 停收/跳过 events」条款，属未显式化的设计缺口。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 336,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3\nc=sqlite3.connect(\":memory:\")\nc.executescript(\"CREATE TABLE issues(id TEXT PRIMARY KEY,count INT,archived_at TEXT); CREATE TABLE events(id TEXT PRIMARY KEY,issue_id TEXT)\")\nc.execute(\"INSERT INTO issues VALUES(?,?,?)\",(\"i1\",3,\"2026-10-02T00:00:00+00:00\"))\nc.execute(\"INSERT INTO issues VALUES(?,?,?)\",(\"i2\",2,None))\nfor e in [\"e1\",\"e2\",\"e3\"]: c.execute(\"INSERT INTO events VALUES(?,?)\",(e,\"i1\"))\nfor e in [\"e4\",\"e5\"]: c.execute(\"INSERT INTO events VALUES(?,?)\",(e,\"i2\"))\nq=lambda s: c.execute(s).fetchone()[0]\nprint(\"issues.total(exclude archived)\",q(\"SELECT count(*) FROM issues WHERE archived_at IS NULL\"))\nprint(\"events.total=SUM(count) under issue filter\",q(\"SELECT COALESCE(SUM(count),0) FROM issues WHERE archived_at IS NULL\"))\nprint(\"events.stored_rows(archived rule unstated)\",q(\"SELECT count(*) FROM events\"))\nprint(\"sum(series.events) row-scoped\",q(\"SELECT count(*) FROM events\"))\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "C5 只对 issues.by_* 闭合了 ==total，events.total(SUM count, issue 维度)/stored_rows(COUNT(*))/by_level|by_release(行口径)/series[].events 的 from-to 与 archived 作用域未定义：归档瞬间 issues.total 与 events.total 同步下降，而 stored_rows/series 是否下降无判据，同一响应内三套口径无法互相校验。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 270,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3\nc=sqlite3.connect(\":memory:\")\nc.executescript(\"CREATE TABLE events(id TEXT PRIMARY KEY,issue_id TEXT,created_at TEXT NOT NULL)\")\nc.execute(\"INSERT INTO events VALUES(?,?,?)\",(\"idA\",\"i1\",\"2026-10-25T19:00:00.123456789+00:00\"))\nc.execute(\"INSERT INTO events VALUES(?,?,?)\",(\"idB\",\"i1\",\"2026-10-25T19:00:00.123456500+00:00\"))\nprint(\"page1(limit=1)\",c.execute(\"SELECT id FROM events WHERE issue_id=? ORDER BY created_at DESC,id DESC LIMIT 1\",(\"i1\",)).fetchall())\ncur=\"2026-10-25T19:00:00.123456+00:00\"\nprint(\"page2(cursor from truncated micros)\",c.execute(\"SELECT id FROM events WHERE issue_id=? AND created_at < ? ORDER BY created_at DESC,id DESC\",(\"i1\",cur)).fetchall())\nprint(\"total rows\",c.execute(\"SELECT count(*) FROM events\").fetchone()[0])\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "游标只携带 created_at_micros，但 SQLite 侧 events.created_at 由 to_rfc3339() 落 TEXT 且保留纳秒（crates/core/src/sqlite_repository.rs:451 未做 to_micros，PG :396 做了），同微秒地板内更早的行会被 created_at < cursor 排除——C4.2「翻页不重不漏」在 SQLite 上确定失效。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 407,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport sqlite3,tempfile,os\np=tempfile.mktemp(suffix=\".db\")\nc1=sqlite3.connect(p,timeout=0,isolation_level=None)\nc2=sqlite3.connect(p,timeout=0,isolation_level=None)\nc1.executescript(\"CREATE TABLE ingest_metrics(bucket_date TEXT NOT NULL, project TEXT NOT NULL, outcome TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(bucket_date,project,outcome))\")\nups=\"INSERT INTO ingest_metrics (bucket_date,project,outcome,count,updated_at) VALUES (?,?,?,1,?) ON CONFLICT (bucket_date,project,outcome) DO UPDATE SET count = ingest_metrics.count + 1, updated_at = excluded.updated_at\"\nc1.execute(\"BEGIN IMMEDIATE\")\ntry:\n    c2.execute(ups,(\"2026-10-25\",\"\",\"received\",\"2026-10-25T19:00:00Z\")); print(\"second writer ok\")\nexcept sqlite3.OperationalError as e:\n    print(\"second writer dropped under warn_only ->\",e)\nc1.execute(\"COMMIT\")\nc2.execute(ups,(\"2026-10-25\",\"\",\"received\",\"2026-10-25T19:00:00Z\"))\nc2.execute(ups,(\"2026-10-25\",\"\",\"received\",\"2026-10-25T19:00:00Z\"))\nprint(\"count after two accepted upserts\",c2.execute(\"SELECT count FROM ingest_metrics\").fetchone()[0])\nos.unlink(p)\nPY' ",
+      "severity": "BLOCKING",
+      "detail": "C6.2 把 UPSERT SQL 冻结成 PG 方言（$1..$4/now()）且未给 SQLite 等价语句（C1.2 只给 DDL）；SQLite 并发写触发 SQLITE_BUSY 时按 warn_only 丢弃计数，A9「上报后 received+1」不确定，且全文没有 received >= created+duplicate 不变式。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 269,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "bash -c 'grep -rn \"CREATE.*INDEX.*events\" migrations/ | sort' ",
+      "severity": "ADVISORY",
+      "detail": "events 仅有 idx_events_issue_id（migrations/0001_init.sql:29、postgres/0001_init.sql:28），C4 未要求 (issue_id, created_at, id) 索引、也未固定 id 的 text 比较 collation（PG 默认排序规则 vs SQLite BINARY），keyset「全局唯一且与索引一致」只在逻辑上成立，跨方言顺序与代价无判据。"
+    },
+    {
+      "file": ".dev-team/contract-issue-governance.md",
+      "line": 140,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "bash -c 'grep -nE \"退避|backoff|重试|retry|首轮失败|归档作业.*迁移.*(之后|完成)\" .dev-team/contract-issue-governance.md; echo \"grep_exit=$? (1 = 无退避/无首轮顺序条款)\"' ",
+      "severity": "ADVISORY",
+      "detail": "C2.2 只说「启动后立即跑首轮」，未规定必须在 migrate() 成功返回之后、也无失败退避/立即重试：首轮若撞上 0007 未生效（archived_at 缺列）或 SQLITE_BUSY，warn 后要等一整个 INTERVAL（生产 3600s）才重试，形成静默空窗。"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 79,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "bash -c 'python3 - <<PY\nimport json\nd=json.load(open(\".dev-team/nfr-baseline.json\"))\nprint(\"ingest timeout keys:\",[k for k in d if \"ingest\" in k and \"timeout\" in k])\nprint(\"sibling bounds:\",d.get(\"trace_write_tx_timeout_ms\"),d.get(\"trace_lock_timeout_ms\"))\nprint(\"missing ingest_metrics write bound:\", not any(\"ingest\" in k and \"timeout\" in k for k in d))\nPY' ",
+      "severity": "ADVISORY",
+      "detail": "每事件 UPSERT 是 ingest 同步路径上的写且 PK(bucket_date,project,outcome) 是单热行，基线只登记 failure_policy，没有 ingest_metrics 的 write tx/lock 超时档（兄弟 trace 写有 trace_write_tx_timeout_ms=3000/trace_lock_timeout_ms=2000），external_call_timeout_ms 不覆盖 DB，ingest 延迟上界无判据。"
+    }
+  ]
+}

@@ -879,9 +879,13 @@ pub fn create_app_with_options(
             patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/v1/issues/:id/events", get(handle_get_issue_events))
-        // issue 治理（契约 `.dev-team/contract-issue-governance.md` FROZEN v1）：
+        // issue 治理（契约 `.dev-team/contract-issue-governance.md` FROZEN v1.1）：
         // 路由注册占位；handler 均为空桩，由 Wave-9 executor 落地业务体。
-        .route("/api/v1/issues/archive", post(handle_archive_issues))
+        // 批量归档体上限 64KB（`amend v1.1 / B-5`：超出 → 413）。
+        .route(
+            "/api/v1/issues/archive",
+            post(handle_archive_issues).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/v1/issues/:id/archive", post(handle_archive_issue))
         .route("/api/v1/issues/:id/unarchive", post(handle_unarchive_issue))
         .route("/api/v1/stats", get(handle_get_issue_stats))

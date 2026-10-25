@@ -182,6 +182,8 @@ pub trait IssueGovernanceRepository: Send + Sync {
 
     /// `C2.3`：单条归档（置 `archived_at`）。已归档 → 幂等返回既有行（`archived_at` 不变）；
     /// 不存在 → `RepositoryError::NotFound`（路由层映射 404）。
+    ///
+    /// `amend v1.1 / A-1`：**不覆盖** `archive_restored_at`（保持原值），只写 `archived_at`。
     async fn archive_issue(
         &self,
         _id: &str,
@@ -191,6 +193,9 @@ pub trait IssueGovernanceRepository: Send + Sync {
     }
 
     /// `C2.3`：单条恢复（`archived_at = NULL`）。未归档 → 幂等返回既有行；不存在 → `NotFound`。
+    ///
+    /// `amend v1.1 / A-1`：恢复**必须**同语句写入 `archive_restored_at = now()`（自动 TTL 归档的抑制依据）；
+    /// 对已处于未归档状态的行同样刷新 `archive_restored_at`（单调前移）。
     async fn unarchive_issue(&self, _id: &str) -> Result<Issue, RepositoryError> {
         unimplemented!("implemented by wave-9 executor")
     }
@@ -199,6 +204,11 @@ pub trait IssueGovernanceRepository: Send + Sync {
     ///
     /// `ids` 非空时只按 `ids` 处理（`statuses`/`project` 被忽略）；`dry_run=true` 只统计不改库
     /// （`archived == 0`）。`now` 由调用方注入（便于测试确定性）。
+    ///
+    /// 计数口径（`amend v1.1 / A-3`）：`statuses` 模式 `matched ≡ archived`（`skipped_*` 恒 0）；
+    /// `ids` 模式 `matched = dedup(ids).len()`，并在**同一事务内**先分桶
+    /// `skipped_not_archivable` / `skipped_already_archived` / `skipped_missing` 再批量 `UPDATE`。
+    /// 上限（`B-5`）：`dedup(ids).len() <= 1000`、单 id `<= 128` 字符，校验归属 handler。
     async fn archive_issues(
         &self,
         _request: &IssueArchiveRequest,
@@ -224,6 +234,9 @@ pub trait IssueGovernanceRepository: Send + Sync {
     /// `C4.2`：keyset 事件分页（`ORDER BY created_at DESC, id DESC`，`Asc` 时升序）。
     ///
     /// `cursor` 为解码后的 [`IssueEventsCursor`]（首页为 `None`）；issue 不存在 → 空 Vec（非错误）。
+    ///
+    /// `amend v1.1 / B-2`：游标的 `created_at` 是**库内原始 RFC3339 串**，比较按方言原生类型
+    /// （SQLite TEXT 字典序 / PG timestamptz），**禁止**截断到微秒或重新格式化。
     async fn list_issue_events_page(
         &self,
         _issue_id: &str,
@@ -234,7 +247,8 @@ pub trait IssueGovernanceRepository: Send + Sync {
         unimplemented!("implemented by wave-9 executor")
     }
 
-    /// `C4.4`：该 issue 的事件总行数（翻页不重不漏的断言基准）。
+    /// `C4.4`：该 issue 的事件总行数（`amend v1.1 / B-4`：`X-Total-Count` 与信封 `total` 的数据源，
+    /// 翻页不重不漏的断言基准）。
     async fn count_events_for_issue(&self, _issue_id: &str) -> Result<i64, RepositoryError> {
         unimplemented!("implemented by wave-9 executor")
     }
@@ -255,9 +269,11 @@ pub trait IssueGovernanceRepository: Send + Sync {
         unimplemented!("implemented by wave-9 executor")
     }
 
-    /// `C6.2`：治理计数单事件 UPSERT（`bucket_date` = UTC 日期；无 project 维度传 `""`）。
+    /// `C6.2`：治理计数单事件 UPSERT（`bucket_date` = UTC 日期；无 project 维度传空串）。
     ///
     /// 失败只 `warn` 不阻断 ingest（`warn_only_no_ingest_impact`）：调用方不得 `?` 传播该错误。
+    /// 单次写入超时 `ingest_metrics_write_timeout_ms = 1000`；`SQLITE_BUSY` 等丢计数允许，
+    /// 但必须 `warn!` 带上 `outcome` 与丢失计数（`amend v1.1 / B-3`）。
     async fn record_ingest_metric(
         &self,
         _bucket_date: NaiveDate,
