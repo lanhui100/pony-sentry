@@ -36,6 +36,14 @@
 
 ---
 
+## C0 全局响应约定（`amend v1.3`，作用于 C2.3 / C3.2 / C4.1 / C5 / C6.1 的全部治理接口）
+
+- **400 响应体** = 该接口表中固定文案串的 **JSON 字符串编码**（`Content-Type: application/json`，体形如 `"Bad request: invalid cursor"`，**带引号**）；语义文案即各表所列串本身，**不改字**。
+- **5xx 响应体** = **纯文本** `Internal error`（`Content-Type: text/plain`，无 JSON 引号）。
+- 与既有接口的差异（一致性说明）：旧接口（`POST /api/v1/ingest`、issues 列表/单条、traces 全部）的 400 体是既有 `(StatusCode, String)` 的 text/plain 裸串——**零变更**；治理接口是新接口集合，内部一致地统一为「400 = JSON 字符串 / 5xx = 纯文本」。
+
+---
+
 ## C1 数据模型与迁移
 
 ### C1.1 PG 迁移 `migrations/postgres/0007_issue_archive.sql`（幂等，逐句执行）
@@ -182,7 +190,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | POST | `/api/v1/issues/:id/archive` | 无体 | 200 issue JSON（含 `archived_at`，additive） | 400 / 401 / 403 / 404（issue 不存在）/ 500 / 503 |
 | POST | `/api/v1/issues/:id/unarchive` | 无体 | 200 issue JSON（`archived_at: null`、`archive_restored_at` 非空） | 400 / 401 / 403 / 404 / 500 / 503 |
 
-- **5xx 响应体统一 `Internal error`**（`amend v1.1 / B-6`）：复用既有 `internal_error()`，DB 原文只进日志，**禁止回吐**到响应体（PG/SQLite 错误文本、SQL 片段、表名/列名均不得出现）。
+- **5xx 响应体统一 `Internal error`**（`amend v1.1 / B-6`）：复用既有 `internal_error()`，DB 原文只进日志，**禁止回吐**到响应体（PG/SQLite 错误文本、SQL 片段、表名/列名均不得出现）；**400 体编码见 §C0**（= 表中文案的 JSON 字符串编码）。
 - 失败码语义（`amend v1.1 / B-8`）：`401` 无/错 token；`403` 会话 Cookie 缺/错 CSRF；`503` 未配置任何 admin/client token（fail-closed，既有语义）。
 
 `IssueArchiveRequest` 字段表：
@@ -191,7 +199,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | :--- | :--- | :--- | :--- |
 | `project` | string? | 缺省 = 全项目 | 空串视同缺省 |
 | `statuses` | string[]? | **`["ignored","resolved"]`** | 白名单仅 `ignored`/`resolved`；任一越界（含 `unresolved`/`in_progress`/`regression`/未知串）→ `Bad request: invalid statuses`；**元素数 > 2 或含重复元素** → `Bad request: invalid statuses` |
-| `older_than_days` | int? | 缺省 = 不按时间限 | `<0` → `Bad request` |
+| `older_than_days` | int? | 缺省 = 不按时间限 | `<0` → **`Bad request`**（无后缀，文案写死；`amend v1.3 / 4`） |
 | `ids` | string[]? | 缺省 = 不按 id 限 | 非字符串数组 → `Bad request`；**`dedup(ids).len() > 1000`** → **`Bad request: too many ids`**；任一 id 长度 **> 128 字符** → `Bad request: invalid ids` |
 | `dry_run` | bool? | `false` | 非 bool → 400；`true` 只统计不改库 |
 
@@ -269,6 +277,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
   - `only`：`archived_at IS NOT NULL`；
   - `include`：不加归档条件。
 - 排序不变：`ORDER BY last_seen_at DESC`（F4 既有）。
+- 错误编码见 §C0（400 体 = 上表固定文案的 JSON 字符串编码）。
 
 ### C3.3 响应头（**作用域：仅本列表接口**；events 侧响应头见 C4.3。全部小写名，值为 ASCII；每次 200 都带）
 
@@ -282,6 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `X-Project-Filter` | `all`\|`<project>` | 缺省/空串 → **`all`**；给定值 → 原值 |
 
 - **GET 侧失败码（`amend v1.1 / B-8`）**：`401` 无/错 token；`503` 未配置任何 admin/client token（fail-closed）；GET 不设 CSRF，故无 403。
+- **非 ASCII 头值降级（`amend v1.3 / 5`）**：响应头值**只允许 ASCII**；当 `project` 含非 ASCII 字符时，实现**跳过该头**（本表对应的 `X-Project-Filter` 不下发）并 `warn!`，**响应体不受影响**（列表/信封内容不变）；`X-Archived-Mode`/`X-Limit`/`X-Offset`/`X-Has-More`/`X-Total-Count` 恒为 ASCII，不受此规则影响。
 - **tailnet read-grant 旁路（既有语义，不新增）**：启用 `CONSOLE_TAILNET_TRUST` 时，受信网段/受信 Host 的 **GET 读请求**可按既有 `read_only_get` 语义匿名通过——该旁路天然覆盖本期新增的 `GET /api/v1/stats` 与 `GET /api/v1/ingest/stats`（不改 trust 实现、不放宽任何写接口，见 `.dev-team/contract-tailnet-trust.md`）。
 
 ### C3.4 `envelope=1` 响应结构
@@ -316,6 +326,8 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `cursor` | base64url 串 | 缺省（首页） | 解码失败 / 非 UTF-8 / 非 JSON / 缺字段 / 字段类型不符 / 多出未知字段 / 长度 > 512 字符 → **400 `Bad request: invalid cursor`**（篡改必 400） |
 | `order` | enum | **`desc`** | 非 `desc|asc` → 400 `Bad request: invalid order` |
 | `envelope` | 0\|1 | 缺省（裸数组） | 其他 → 400 `Bad request: invalid envelope` |
+
+- 错误编码见 §C0（400 体 = 上表固定文案的 JSON 字符串编码）。
 
 ### C4.2 排序与游标（keyset，**不是 offset**）
 
@@ -366,10 +378,10 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `level` | string | 缺省 | 非 `fatal|error|warning|info` → 400 `Bad request: invalid level` |
 | `from` | RFC3339 | `to - 30d` | 非法 → 400 `Bad request: invalid from` |
 | `to` | RFC3339 | `now` | 非法 → 400 `Bad request: invalid to`；`from > to` → **400 `Bad request: invalid range`** |
-| `bucket` | enum | `day` | 非 `day|hour` → 400 `Bad request: invalid bucket`；`hour` 且 `to-from > 7d` → **400 `Bad request: range too large for hour bucket`** |
+| `bucket` | enum | `day` | 非 `day|hour` → 400 `Bad request: invalid bucket`；`hour` 且 `to-from > 7d` → **400 `Bad request: range too large for hour bucket`**（逐字；`amend v1.3 / 3`，实现 `routes.rs:1914`、冻结用例 `tests/acceptance_issue_governance.rs:1544`） |
 | `include_archived` | 0\|1 | `0` | 其他 → 400 `Bad request: invalid include_archived` |
 
-- 失败码（`amend v1.1 / B-6`+`B-8`）：`400`（非法 query）/ `401` / `503`（未配置 token）；`500` 响应体**固定 `Internal error`**（DB 原文只进日志，禁止回吐）；GET 无 CSRF 故无 403；tailnet read-grant 匿名读旁路见 C3.3（既有语义，不新增）。
+- 失败码（`amend v1.1 / B-6`+`B-8`）：`400`（非法 query）/ `401` / `503`（未配置 token）；`500` 响应体**固定 `Internal error`**（DB 原文只进日志，禁止回吐）；GET 无 CSRF 故无 403；tailnet read-grant 匿名读旁路见 C3.3（既有语义，不新增）；**400 体编码见 §C0**。
 
 - 200 响应（字段名与类型**写死**）：
 
@@ -400,6 +412,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `events.by_environment` | `{string:int}` | events 行口径 + `from`/`to`，按 `events.environment`（NULL 归 `unknown`） |
 | `events.by_release` | `{string:int}` | events 行口径 + `from`/`to`，按 `events.release`（NULL 归 `unknown`） |
 | `series` | 数组 | 见下条（受 `from`/`to`） |
+| `totals` | object（`IngestGovernanceTotals`） | **additive 字段（`amend v1.3 / 1`）**：`{received, accepted, created, duplicate, suppressed_ignored, rejected_invalid}`（结构与 `/api/v1/ingest/stats` 的 `totals` 同集合），数据源 = **`ingest_metrics`**；`accepted = created + duplicate`；`project` **参与**（取本接口 `project` 参数）；时间窗由 `range` 跨度**折算为治理窗口** `24h`（≤24h）/`7d`（≤7d）/`30d`（否则），终点 = `now`，`bucket` 固定 `day`（**不逐字采用** stats 的 `from`/`to`）；**与 issue/event 口径无关**（不参与 C5.0 作用域）；读失败 → `warn!` 并**回落全零**（200，不得 500、不得省略该字段） |
 
 #### C5.0 作用域表（`amend v1.1 / B-1`，逐字段写死；与上表冲突时以本表为准）
 
@@ -418,6 +431,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
   1. `sum(series[].events) == events.stored_rows`（两者同受 `from`/`to` 约束，**恒等**；宽窗口时等于 events 全表行数）；
   2. `sum(series[].issues) <= issues.total`（前者限时间窗，后者全时段）；
   3. `sum(issues.by_status.values()) == issues.total`、同 `by_level`、`by_environment`。
+- `totals`（`amend v1.3`）的 additive 语义：它不是 issue/event 口径，而是 **`ingest_metrics` 的窗口聚合**——`project` 参与过滤；`environment`/`level`/`include_archived` **不参与**；窗口按 `range` 跨度折算为 `24h|7d|30d`（终点 `now`、`bucket=day`），故与 `/api/v1/ingest/stats?window=…&project=…` 的同名 `totals` 同口径（需要逐字对照时用该端点）。
 - **生产验收硬值（固定）**：`project=pony-agent`、默认参数（`include_archived=0`、`from=to-30d`、`bucket=day`）→ `issues.total=11`、`events.total=185`、`events.stored_rows=196`、`by_status={ignored:7,resolved:2,unresolved:2}`、`by_level={error:11}`、`by_environment={dev:11}`。
 
 - **口径差异必须显式保留，禁止混用**：`events.total`（聚合口径 = `SUM(issues.count)`）与 `events.stored_rows`（行口径 = `COUNT(*)`）在生产库分别为 **185** 与 **196**；差 11 行的成因是**历史重放写入的 events 行数 > 聚合计数**（重复/补投写行不递增 count）。两者不得相加、不得互相替代、不得用其中一个"修正"另一个。
@@ -426,7 +440,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
   - 桶区间：`[from, to]` 闭区间对齐到桶起点，**空桶补 0**，桶数 == `series.len()`；
   - `series[].issues`：按 **`issues.first_seen_at`** 落桶计数（F15：issues 无 created_at）；
   - `series[].events`：按 **`events.created_at`** 落桶计数（行口径）；
-  - 点数上限 `stats_series_max_points = 744`（见 NFR 基准表）：day 桶 30 天默认 → 31 点；hour 桶 7 天 → 168 点；任何情况下超 744 点 → 400。
+  - 点数上限 `stats_series_max_points = 744`（见 NFR 基准表）：day 桶 30 天默认 → 31 点；hour 桶 7 天 → 168 点；任何情况下超 744 点 → **400 `Bad request: range too large`**（`amend v1.3 / 3`，实现 `routes.rs:1924`）。**注意**：本文案与上表 `hour`+`>7d` 的文案**不是同一串**（后者为 `...for hour bucket`），测试须分别逐字断言。
 - 不变式（Test Agent 必须断言）：`sum(issues.by_status.values()) == issues.total`、同 `by_level`、`by_environment`；`series.len() >= 1`；每个 `series[].bucket` 可被 `%Y-%m-%d`（day）或 RFC3339（hour）解析。
 
 ---
@@ -436,7 +450,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 ### C6.1 查询与响应
 
 - 鉴权：挂 `admin_routes`（沿用 admin 口径：静态 `admin_token`，未设则回退 `client_token`；会话 Cookie/Bearer + CSRF）。
-- 失败码（`amend v1.1 / B-6`+`B-8`）：`400`（非法 query）/ `401` / `503`（未配置 token）；`500` 响应体**固定 `Internal error`**（DB 原文只进日志）；GET 不设 CSRF 故无 403；tailnet read-grant 匿名读旁路见 C3.3（既有语义，不新增）。
+- 失败码（`amend v1.1 / B-6`+`B-8`）：`400`（非法 query）/ `401` / `503`（未配置 token）；`500` 响应体**固定 `Internal error`**（DB 原文只进日志）；GET 不设 CSRF 故无 403；tailnet read-grant 匿名读旁路见 C3.3（既有语义，不新增）；**400 体编码见 §C0**。
 - Query：
 
 | 参数 | 类型 | 默认 | 非法值判定 |
@@ -532,6 +546,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | B4 | 列表 `limit`/`offset` 非法值 | 静默 clamp/忽略 | `limit<0`、`offset<0` → 400 | 控制台不传 `limit/offset`（F20）→ 无影响 |
 | B5 | `/api/v1/issues/archive` 静态段抢占（`amend v1.1 / B-8`） | 该路径不存在 → `PATCH/GET /api/v1/issues/archive` 落入 `:id` 分支（404/405 语义混乱） | **`PATCH` 与 `GET` 均 405**（静态段优先，只有 `POST` 已注册）；列表/单条 PATCH 路径不受影响 | 控制台单条 PATCH 用真实 UUID（`web/src/App.vue:1704`），不撞保留字 `archive`；测试不得据此判红 |
 | B6 | 新增接口失败码面（`amend v1.1 / B-8`） | 新接口此前 404 | 归档三接口：400/401/403/404/413/500/503；`GET /stats`、`GET /ingest/stats`：400/401/500/503（GET 无 403）；**5xx 响应体固定 `Internal error`** | 全新接口，无存量调用方；tailnet read-grant（`read_only_get`）对两个新 GET 同样生效（不新增旁路） |
+| B7 | 治理接口 400 体编码（`amend v1.3 / 2`） | 既有接口 400 体是 `(StatusCode, String)` 的 **text/plain 裸串** | 治理接口 400 体 = 该固定文案的 **JSON 字符串编码**（`Content-Type: application/json`，带引号）；5xx 体 = 纯文本 `Internal error`（§C0） | 全新接口集合，**内部一致**；旧接口（ingest/issues/traces）**零变更**；web 仅 3 处调用点（`web/src/App.vue:1664`、`:1704`、`:1734`）均不解析错误体文本 → 无消费者影响 |
 
 - 回滚面与**回滚顺序**（`amend v1.1 / B-9`，契约必需项，见 C1.3）：`停止服务 → 恢复上一版二进制 → 执行 down.sql → 启动 → 验证`。归档**不删数据**，数据面无不可逆操作；SQLite 无 down，回滚走 C1.3 的重建表流程。**顺序反了会让旧二进制全量 500，属门禁失败。**
 
@@ -631,3 +646,16 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
   2. `criteria.statuses` = 生效白名单（未给 → `["ignored","resolved"]`；给了 → 原值**去重后**）；`criteria.ids_take_priority=true` 的语义改为「候选集由 `ids` 决定（`project`/`older_than_days` 被忽略）」，**不再表述为 `statuses` 被忽略**。
   3. `ids` 模式单写者等式不变：`archived + skipped_not_archivable + skipped_already_archived + skipped_missing == matched`，其中 `archived` 只计「status ∈ 生效白名单 且未归档」的行。
   改动范围：仅 C2.3（优先级 bullet + `ids` 模式第 2 步说明）、C2.4（`criteria.statuses` / `criteria.ids_take_priority` 两行）、A 条款补充判据 A5 行、本 amend 记录；**未改**任何代码、NFR 基准与其它段落。
+
+- **v1.3（2026-10-25，Lead 裁决；来源 = 实现阶段与**已冻结**对抗/验收用例冲突时的裁决，非自行变更设计）**：
+  背景：实现（功能 12/12、对抗 9/9、workspace 22 套件、clippy 0 全绿）在 4 处与 v1.2 存在「文案/附加字段」级漂移，Lead 裁决**接受实现并补契约**（不回改实现）。
+
+  | 裁决 | 条款 | 漂移 → 冻结为新判据 |
+  | :--- | :--- | :--- |
+  | 1 | C5（断言来源：红相套件 `fresh_empty_database_stats_are_zero`，L2-AT 冻结） | `GET /api/v1/stats` 响应顶层**新增 additive `totals`**（结构 = `IngestGovernanceTotals`，即 `/ingest/stats` 同名字段集合），数据源 `ingest_metrics`，`accepted = created + duplicate`，`project` 参与、`environment`/`level`/`include_archived` 不参与；读失败只 `warn!` 并**回落全零**（不得 500、不得省略字段）；不参与 C5.0 作用域。**与裁决原文的差异（按实测冻结）**：裁决写「时间窗取 stats 的 `from/to`」，实现为「按 `range` 跨度折算为 `24h/7d/30d`，终点 `now`、`bucket=day`」——因 `ingest_metrics` 只按日桶存储，逐字采用任意 `from/to` 不可实现；此处冻结实测语义 |
+  | 2 | §C0（作用于 C2.3 / C3.2 / C4.1 / C5 / C6.1）+ C7.3 B7 | **400 响应体 = 该接口固定文案串的 JSON 字符串编码**（`Content-Type: application/json`，体形如 `"Bad request: invalid cursor"`，带引号）；**5xx 体 = 纯文本 `Internal error`**；语义文案仍为各表所列串本身。与既有 `(StatusCode, String)` text/plain 400 **不同属新接口内部一致**，旧接口零变更 |
+  | 3 | C5 参数表 `bucket` 行 + series 点数上限 bullet | **两段文案分别写死**：`hour` 且 `to-from > 7d` → `Bad request: range too large for hour bucket`（实现 `routes.rs:1914` 与冻结用例逐字断言）；点数 > 744 → `Bad request: range too large`（`routes.rs:1924`）。**与裁决原文的差异**：裁决写「同一文案」，实现与冻结用例为两串；按实测冻结（统一文案需同时改实现 + 冻结用例），实现风险登记见本条 |
+  | 4 | C2.3 `older_than_days` 行 | `<0` → **`Bad request`**（无后缀，与实现一致；写死以消歧义） |
+  | 5 | C3.3 表下新增降级规则 | 响应头值**只允许 ASCII**；`project` 含非 ASCII 时**跳过该头**（`X-Project-Filter` 不下发）并 `warn!`，响应体不受影响；其余头恒 ASCII、不受影响 |
+
+  改动范围：仅本契约（§C0 新增、C2.3、C3.2、C3.3、C4.1、C5、C6.1、C7.3 新增 B7、本 amend 记录）；**未改**任何代码、NFR 基准与其它段落。
