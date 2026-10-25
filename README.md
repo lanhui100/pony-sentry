@@ -33,6 +33,10 @@ DATABASE_URL="sqlite:/tmp/ponysentry.db?mode=rwc" PORT=3000 \
 | `CONSOLE_TAILNET_CIDRS` | `100.64.0.0/10,fd7a:115c:a1e0::/48` | 可信对端网段（逗号分隔 CIDR，IPv4/IPv6）；未设置用默认（Tailscale CGNAT + ULA）；含任一非法段 → 不崩溃、信任关闭 + 回退默认 + 启动 WARN |
 | `CONSOLE_TRUSTED_HOSTS` | 空（无白名单） | Host 白名单（逗号分隔 `host` / `host:port`，比较忽略大小写与端口）；**空 = 信任恒不生效**（fail-closed）+ 开启状态下启动 WARN |
 | `WEBHOOK_URL` | 空（关闭通知） | issue 新建/回归时的旁路通知（5s 超时，失败不重试） |
+| `PONY_ISSUE_ARCHIVE_ENABLED` | `1`（开启） | issue 自动归档作业开关：`0`/`false`/`off` 关闭（手动归档接口仍可用） |
+| `PONY_ISSUE_ARCHIVE_TTL_DAYS` | `30` | `ignored`/`resolved` 的 `last_seen_at` 早于 `now()-TTL` 即自动归档；`unresolved`/`in_progress`/`regression` 永不自动归档 |
+| `PONY_ISSUE_ARCHIVE_TTL_SECS` | 未设置 | 设置后**优先于** `_TTL_DAYS`（测试/精细控制用） |
+| `PONY_ISSUE_ARCHIVE_INTERVAL_SECS` | `3600`（最小 1） | 归档扫描周期；启动后在 schema 迁移成功后立即跑首轮，失败按 `min(interval,60s)` 退避 |
 | `RETENTION_DAYS_EVENTS` | `180` | events 保留天数 |
 | `RETENTION_DAYS_TRACES` | `90` | traces 保留天数 |
 | `METRICS_TOKEN` | 空（不鉴权） | 设置后 `/metrics` 需 `x-metrics-token` 或 `Authorization: Bearer`；空值保持探针免鉴权 |
@@ -126,6 +130,23 @@ Web 产物**不再内嵌 ADMIN_TOKEN**，也不使用 localStorage 保存静态�
 （`path:line[:col] in func` 或 Python `File "x", line N, in f`）生成单元素 `Frame[]` 供 culprit 与指纹使用；
 解析失败不报错。
 
+**issue 治理与分析（人读契约：`docs/issue-governance.md`）**：
+
+- **归档 ≠ 删除**：归档只写 `issues.archived_at`（`status`/`count`/`events` 不变），默认从列表与统计中排除，
+  可查询（`GET /api/v1/issues?archived=only|include`）、可恢复（`POST /api/v1/issues/:id/unarchive`）；
+  自动 TTL 归档只作用于 `ignored`/`resolved`，重新收到事件且状态回升到活跃态时**自动解档**。
+- **列表 `GET /api/v1/issues`**：响应体仍是裸数组（控制台按数组消费），分页/总数走响应头
+  `X-Total-Count`/`X-Limit`/`X-Offset`/`X-Has-More`/`X-Archived-Mode`/`X-Project-Filter`；
+  `project` 缺省 = 不过滤（全部项目，头里显式回 `all`），不再有「只回 50 条 = 总共 50 条」的歧义；
+  `status`/`level`/`limit`/`offset`/`archived` 非法值一律 `400`（旧行为是静默忽略/钳制）。
+- **事件分页 `GET /api/v1/issues/:id/events`**：`limit`（默认 20、上限 100）生效，`cursor` 为 keyset 游标
+  （base64url 的 `{"created_at","id"}`），有下一页时才回 `X-Next-Cursor`；`order=desc|asc`。
+- **统计 `GET /api/v1/stats`**：`issues.total/by_status/by_level/by_environment` 与
+  `events.total`（= `SUM(issues.count)`，聚合口径）分开于 `events.stored_rows`（= `COUNT(*)`，行口径）；
+  时间窗与 `include_archived` 的作用范围逐字段固定，见 `docs/issue-governance.md` §5。
+- **治理指标 `GET /api/v1/ingest/stats`**：`received`/`accepted`/`created`/`duplicate`/`suppressed_ignored`/
+  `rejected_invalid` 按日与按 project 可查（DB 表 `ingest_metrics`）；计数失败只 WARN，**不影响 ingest 响应**。
+
 **鉴权矩阵（契约 R10）**：
 
 | 端点 | 无凭证 | 仅配 `CLIENT_TOKEN` | 配了 `ADMIN_TOKEN` |
@@ -208,5 +229,15 @@ PG `pg_advisory_xact_lock` / SQLite `BEGIN IMMEDIATE` 串行化。指标见 `/me
   控制台会话存在进程内存中，服务重启即全部失效；多副本需改为共享会话存储并加过期清理。
   `migrate()` 也按单进程启动设计：多副本并发首次迁移可能撞 PG 目录表竞态
   （`CREATE TABLE IF NOT EXISTS` 不是原子 DDL），多副本场景需先加 advisory lock。
+- **治理计数的写放大**：`ingest_metrics` 每个 ingest 请求最多 3 次 UPSERT（`received` + `created|duplicate` +
+  可选 `suppressed_ignored`），落在 `(bucket_date, project, outcome)` 单热行上；当前量级（万级/日）无碍，
+  高吞吐场景需要批量聚合（未实现）。计数写失败只 WARN，不会阻断 ingest，但会让治理指标偏低。
+- **归档语义的单进程假设**：TTL 归档作业随进程启停，无分布式租约；多副本会重复扫描（归档操作幂等，故只浪费扫描）。
+  新事件到达时「活跃即解档」发生在 ingest 事务内，因此 `archived_at` 的最终归属以最后一次写入为准。
+- **事件游标依赖时间文本格式**：SQLite 侧 `events.created_at` 以 RFC3339 文本落库，keyset 游标按文本字典序比较；
+  若人为写入异构格式（不同小数位/时区偏移），分页顺序可能偏离时间序。
+- **`GET /api/v1/events`（全局事件列表）不提供**：事件只能按 issue 分页读取
+  （`GET /api/v1/issues/:id/events`），跨 issue 的明细检索走统计与归档接口。这是本期刻意保留的非目标，
+  避免再开一个无鉴权面与索引成本。
 - **备份**：`pg_dump -Fc | age`，每日 03:30 由 timer 触发；恢复演练（`age -d` + `pg_restore`）
   需人工按 runbook 执行，未纳入自动化。

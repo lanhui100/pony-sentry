@@ -1,0 +1,23 @@
+# green-functional — issue 治理功能验收套件（红相转绿）
+# 生成时间: 2026-10-25T20:08:13+08:00
+# 命令原文: cargo test --manifest-path tests/Cargo.toml --offline --test acceptance_issue_governance
+# Exit Code: 0
+# 套件: tests/acceptance_issue_governance（12 用例；测试文件只读，未做任何修改）
+
+running 12 tests
+test a10_ingest_idempotency_zero_regression ... ok
+test a4_single_archive_and_unarchive ... ok
+test a3_list_archived_filter_modes ... ok
+test a9_ingest_governance_metrics ... ok
+test a2_list_total_semantics_and_envelope ... ok
+test a11_ingest_unarchives_active_issue ... ok
+test a1_list_filter_project_and_status ... ok
+test a8_stats_bucket_invariants ... ok
+test a5_batch_archive_dry_run_and_skips ... ok
+test a7_event_pagination_cursor ... ok
+test a6b_restore_suppresses_ttl_rearchive ... ok
+test a6_ttl_auto_archive_job ... ok
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.54s
+
+# 红相测试文件零改动确认（git status --porcelain 无输出即未改）:
+  （以上无输出）

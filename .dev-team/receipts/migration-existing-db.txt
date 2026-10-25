@@ -1,0 +1,106 @@
+== 现有库副本迁移实证（连接串不落盘/不回显）
+== 生产库仅作**只读**源：全程只执行 SELECT / COPY TO STDOUT，未在生产库执行任何 DDL
+NOTICE:  database "ponysentry_migcopy" does not exist, skipping
+psql:migrations/postgres/0003_add_traces.sql:21: NOTICE:  column "project" of relation "traces" already exists, skipping
+-- 副本 schema（0001→0006）就绪；开始 COPY 生产数据（只读）
+-- 行数校验：生产 issues=112 events=1256 / 副本 issues=112 events=1256
+
+-- 副本基线：0007 之前归档列不存在
+ has_archive_columns 
+---------------------
+                   0
+(1 row)
+
+
+   [ok] 副本上 0007 第 1 轮 exit=0
+   [ok] 副本上 0007 第 2 轮 exit=0
+
+-- 0007 落地后校验（现有库副本）
+ issues_rows 
+-------------
+         112
+(1 row)
+
+ archived_not_null | archived_set | restored_set 
+-------------------+--------------+--------------
+               112 |            0 |            0
+(1 row)
+
+             indexname              
+------------------------------------
+ idx_events_created_at
+ idx_events_issue_created_id
+ idx_ingest_metrics_bucket
+ idx_issues_archived_at
+ idx_issues_first_seen_at
+ idx_issues_project_status_archived
+(6 rows)
+
+ ingest_metrics_table 
+----------------------
+ ingest_metrics
+(1 row)
+
+
+-- 回滚：0007_issue_archive.down.sql 连跑两次
+   [ok] down.sql 第 1 轮 exit=0
+   [ok] down.sql 第 2 轮 exit=0
+
+-- 回滚后校验：列/表/索引消失，issues 行数不变
+ remaining_archive_columns 
+---------------------------
+                         0
+(1 row)
+
+ ingest_metrics_after_down 
+---------------------------
+ 
+(1 row)
+
+ remaining_0007_indexes 
+------------------------
+                      0
+(1 row)
+
+ issues_rows_after_down 
+------------------------
+                    112
+(1 row)
+
+
+-- 回滚后可再次 up（可逆性复验）
+ archive_columns_after_reup 
+----------------------------
+                          2
+(1 row)
+
+-- 已清理副本库 ponysentry_migcopy
+EXISTING-DB RECEIPT: ALL EXIT 0
+
+================ 附录：现有库副本走**应用真实迁移路径**（PgIssueRepository::migrate）================
+== 生产库全程只读（SELECT / COPY TO STDOUT），副本库: ponysentry_migcopy_app
+NOTICE:  database "ponysentry_migcopy_app" does not exist, skipping
+-- 副本 issues 行数（迁移前）: 112
+   [ok] PgIssueRepository::migrate() 第 1 轮 exit=0
+        round=1 archive_columns=2 0007_indexes=6 invalid_indexes=0 archived_set=0
+   [ok] PgIssueRepository::migrate() 第 2 轮 exit=0
+        round=2 archive_columns=2 0007_indexes=6 invalid_indexes=0 archived_set=0
+-- 副本 issues 行数（迁移后）: 112（未变）
+EXISTING-DB-APP-MIGRATE: ALL EXIT 0
+             indexname              
+------------------------------------
+ idx_events_created_at
+ idx_events_issue_created_id
+ idx_ingest_metrics_bucket
+ idx_issues_archived_at
+ idx_issues_first_seen_at
+ idx_issues_project_status_archived
+(6 rows)
+
+ ingest_metrics_after_app_migrate 
+----------------------------------
+ ingest_metrics
+(1 row)
+
+-- 已清理副本库 ponysentry_migcopy_app
+EXISTING-DB-APP-MIGRATE RECEIPT: ALL EXIT 0

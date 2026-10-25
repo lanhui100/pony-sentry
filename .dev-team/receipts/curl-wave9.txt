@@ -1,0 +1,157 @@
+# 游标脱敏说明：分页游标是 base64url(JSON{created_at,id})，形如 eyJ… 会被 .meta/gates/pre-commit 的
+# JWT 形态正则误判为凭证；本收据只保留前缀，完整串可由任意一次 events 请求的 X-Next-Cursor 头重建。
+
+
+### 0. 服务与版本面 [2026-10-25T20:16:27+08:00]
+{"db":"up","status":"ok"}
+pid=2382590 bin_mtime=2026-10-25 20:16:21.605636571 +0800
+systemd: active / 自启: enabled
+
+### 1. 验收 1：列表不再被 ignored 噪声淹没（project=pony-agent&status=unresolved → 只应 2 条 unresolved） [2026-10-25T20:16:27+08:00]
+--- issues?project=pony-agent&status=unresolved -> HTTP 200
+    rows = 2
+    status 分布 = {'unresolved': 2}
+    ignored 泄漏 = 0
+
+### 2. 列表：project 过滤显式语义 + total 头（缺省 project 不再是「50 = 总数」的误读） [2026-10-25T20:16:27+08:00]
+--- issues?project=pony-agent（含 6 个响应头） -> HTTP 200
+    x-total-count: 11
+    x-limit: 50
+    x-offset: 0
+    x-has-more: false
+    x-archived-mode: exclude
+    x-project-filter: pony-agent
+    body: [{"app":null,"archive_restored_at":null,"archived_at":null,"assigned_to":null,"component":null,"count":3,"culprit":"pony_agent_core::agent::ponysentry::client::PonySentryClient::capture_error","environment":"dev","fingerprint":"e446dd4c6fa35d63fbf25a3600346674579f30e919ba748205c61dd728031ed1","first_seen_at":"2026-10-25T07:04:57.133983Z","id":"11e8ab79-1432-4366-bf63-90fea4a5c17f","last_release":"
+--- issues?limit=5（X-Total-Count 不应随 limit 变化） -> HTTP 200
+    x-total-count: 112
+    x-limit: 5
+    x-offset: 0
+    x-has-more: true
+    x-archived-mode: exclude
+    x-project-filter: all
+    body: [{"app":null,"archive_restored_at":null,"archived_at":null,"assigned_to":null,"component":"alertmanager","count":1,"culprit":null,"environment":"production","fingerprint":"922f9148e2a17bcffc035d0518a53c114a12926a67618c547c61bc66cd8b3d53","first_seen_at":"2026-10-25T11:25:31.678Z","id":"c8a7ecab-214f-48d4-8bc2-a81b1e1cfdc2","last_release":"0.24.41","last_seen_at":"2026-10-25T11:25:31.678Z","level":
+--- issues?limit=5&envelope=1 -> HTTP 200
+    x-total-count: 112
+    x-limit: 5
+    x-offset: 0
+    x-has-more: true
+    x-archived-mode: exclude
+    x-project-filter: all
+    body: {"archived":"exclude","filters":{"environment":null,"level":null,"platform":null,"project":null,"release":null,"status":null},"has_more":true,"items":[{"app":null,"archive_restored_at":null,"archived_at":null,"assigned_to":null,"component":"alertmanager","count":1,"culprit":null,"environment":"production","fingerprint":"922f9148e2a17bcffc035d0518a53c114a12926a67618c547c61bc66cd8b3d53","first_seen_
+--- issues?archived=only -> HTTP 200
+    x-total-count: 0
+    x-limit: 50
+    x-offset: 0
+    x-has-more: false
+    x-archived-mode: only
+    x-project-filter: all
+    body: []
+--- issues?status=bogus（应为 400，旧行为是静默忽略） -> HTTP 400
+    body: "Bad request: invalid status"
+--- issues?limit=-5&offset=-10（B4：应为 400） -> HTTP 400
+    body: "Bad request: invalid limit"
+
+### 3. 验收 2：stats 返回 11 / 185 与分组值（含 stored_rows 行口径 196） [2026-10-25T20:16:27+08:00]
+--- stats?project=pony-agent -> HTTP 200
+    issues.total = 11
+    events.total = 185 basis = sum_issues_count stored_rows = 196
+    by_status = {'ignored': 7, 'resolved': 2, 'unresolved': 2}
+    by_level = {'error': 11}
+    by_environment = {'dev': 11}
+    series.len = 31
+    sum(series.events) = 196
+    totals(附加) = {'accepted': 0, 'created': 0, 'duplicate': 0, 'received': 0, 'rejected_invalid': 0, 'suppressed_ignored': 0}
+
+### 4. 验收 3：单 issue 事件分页（limit 生效 + cursor） [2026-10-25T20:16:27+08:00]
+ignored issue id = 0663b203-e265-4fa0-afaa-318d167b9288
+--- issues/0663b203-e265-4fa0-afaa-318d167b9288/events?limit=5（必须恰好 5 行） -> HTTP 200
+    rows = 5
+    ids = ['f1f3c470', 'd8126168', 'c874cfce', '1966612e', 'f30f2209']
+--- issues/0663b203-e265-4fa0-afaa-318d167b9288/events?limit=5&envelope=1（cursor 翻页） -> HTTP 200
+    rows = 5 has_more = True next_cursor = eyJjcmVh…<base64url 游标，含 created_at+id，非凭证；完整串见响应> total = 46
+--- events?limit=5&cursor=<第 1 页游标>（第 2 页，无重叠） -> HTTP 200
+    rows = 5 ids = ['b54067aa', 'd6397658', '80633776', '09fe5da5', 'a1dbd896']
+--- events?limit=0（应为 400） -> HTTP 400
+    body: "Bad request: invalid limit"
+--- events?limit=99999（应为 200 且 X-Limit=100） -> HTTP 200
+    x-total-count: 46
+    x-limit: 100
+    x-has-more: false
+    body: [{"created_at":"2026-10-14T05:43:31.630596Z","environment":"dev","event_key":null,"id":"f1f3c470-0895-4276-a243-56ca3a4ad430","issue_id":"0663b203-e265-4fa0-afaa-318d167b9288","level":null,"payload":{"breadcrumbs":[{"category":"ipc","message":"safeInvoke:list_sessions","timestamp":1791956609276},{"category":"ipc","message":"safeInvoke:load_session_runtime_view","timestamp":1791956609289},{"categor
+--- events?cursor=!!!bad!!!（应为 400 invalid cursor） -> HTTP 400
+    body: "Bad request: invalid cursor"
+
+### 5. 验收 4：归档不是删除（dry_run + 单条归档/恢复往返） [2026-10-25T20:16:27+08:00]
+--- POST /issues/archive dry_run=1（project=pony-agent statuses=[ignored,resolved] older_than_days=1） -> HTTP 200
+    dry_run = True matched = 9 archived = 0 criteria = {'project': 'pony-agent', 'statuses': ['ignored', 'resolved'], 'older_than_days': 1, 'ids': None, 'ids_take_priority': False}
+dry_run 后 archived_at 非空行数（应仍为 0）：0
+归档前: count= 46 status= ignored archived_at= None
+--- POST /issues/0663b203-e265-4fa0-afaa-318d167b9288/archive -> HTTP 200
+    archived_at = 2026-10-25T12:16:28.086052Z count = 46 status = ignored archive_restored_at = None
+--- POST /issues/0663b203-e265-4fa0-afaa-318d167b9288/archive（重复幂等：archived_at 不变） -> HTTP 200
+    archived_at = 2026-10-25T12:16:28.086052Z
+--- archived=only&project=pony-agent（归档项可查询） -> HTTP 200
+    x-total-count: 1
+    x-limit: 50
+    x-offset: 0
+    x-has-more: false
+    x-archived-mode: only
+    x-project-filter: pony-agent
+    body: [{"app":null,"archive_restored_at":null,"archived_at":"2026-10-25T12:16:28.086052Z","assigned_to":null,"component":null,"count":46,"culprit":"tauri_safe_invoke in ask_list_pending","environment":"dev","fingerprint":"cf5d5686e23235505e8a22de192984badb118ea4827355e3396d27f453ce79e6","first_seen_at":"2026-10-14T05:25:27.403247Z","id":"0663b203-e265-4fa0-afaa-318d167b9288","last_release":"0.1.136","la
+--- 归档后事件总数（应仍为 20 条，归档不删事件） -> HTTP 200
+    rows = 46
+--- POST /issues/0663b203-e265-4fa0-afaa-318d167b9288/unarchive（可恢复） -> HTTP 200
+    archived_at = None archive_restored_at = 2026-10-25T12:16:28.291823Z
+恢复后 archived=only 行数（应回到 0）：0
+
+### 6. 验收 5：治理指标（ingest 收到/接受/抑制）可查询 [2026-10-25T20:16:28+08:00]
+--- GET /api/v1/ingest/stats?window=24h -> HTTP 200
+    window = 24h from = 2026-10-24T12:16:28.374198Z to = 2026-10-25T12:16:28.374198Z
+    totals = {'received': 0, 'accepted': 0, 'created': 0, 'duplicate': 0, 'suppressed_ignored': 0, 'rejected_invalid': 0}
+    by_project = []
+    series = [{'bucket': '2026-10-24', 'received': 0, 'accepted': 0, 'suppressed_ignored': 0}, {'bucket': '2026-10-25', 'received': 0, 'accepted': 0, 'suppressed_ignored': 0}]
+--- GET /api/v1/ingest/stats?window=bogus（应为 400） -> HTTP 400
+    body: "Bad request: invalid window"
+--- GET /api/v1/issues/archive（静态段优先 → 405） -> HTTP 405
+    body: 
+--- PATCH /api/v1/issues/archive（405） -> HTTP 405
+    body: 
+
+### 7. 验收 6：重启后 ingest 冒烟 —— event_id 幂等（created → duplicate） [2026-10-25T20:16:28+08:00]
+--- POST /api/v1/ingest（首次，应 201 created） -> HTTP 201
+    result = created duplicate = False status = unresolved event_id = wave9-smoke-1792930588 count = 1 issue_id = 8803bb28-4921-433c-bf24-d2b272e8a0a9
+--- POST /api/v1/ingest（同 event_id 重放，应 200 duplicate 且 count 不增） -> HTTP 200
+    result = duplicate duplicate = True count = 1
+--- 治理指标：created/duplicate/received 应各 +1（冒烟实证旁路计数生效） -> HTTP 200
+    totals = {'received': 2, 'accepted': 2, 'created': 1, 'duplicate': 1, 'suppressed_ignored': 0, 'rejected_invalid': 0}
+    by_project(smoke) = []
+
+### 8. 冒烟产物清理（避免污染列表）：PATCH ignored → 归档 [2026-10-25T20:16:28+08:00]
+    （未找到冒烟 issue，跳过清理）
+
+### 9. 收尾：pony-agent 仍在列表且统计未变（归档/恢复往返无副作用） [2026-10-25T20:16:28+08:00]
+--- stats?project=pony-agent（收尾复核） -> HTTP 200
+    issues.total = 11 events.total = 185 stored_rows = 196 by_status = {'ignored': 7, 'resolved': 2, 'unresolved': 2}
+# 收据结束 2026-10-25T20:16:28+08:00
+
+### 7b. 治理指标 project 维度实证（ingest project 由 tags.project 解析，见 crates/ingest/src/project.rs） [2026-10-25T20:16:53+08:00]
+--- ingest(created) ->
+   result= created issue_id= 40e41fa7-4c26-4a41-bd92-9a6df7e4850c count= 1 event_id= wave9-smoke-tags-1792930613
+--- ingest(duplicate) ->
+   result= duplicate duplicate= True count= 1
+--- ingest/stats by_project ->
+   totals= {'received': 4, 'accepted': 4, 'created': 2, 'duplicate': 2, 'suppressed_ignored': 0, 'rejected_invalid': 0}
+   by_project= [{'project': 'pony-sentry-governance-smoke', 'received': 2, 'accepted': 2, 'suppressed_ignored': 0}, {'project': None, 'received': 2, 'accepted': 2, 'suppressed_ignored': 0}]
+
+### 8b. 冒烟产物清理（把两条 smoke issue 置 ignored 并归档，列表恢复干净） [2026-10-25T20:16:53+08:00]
+   tags.project 命中的 smoke issue: 40e41fa7-4c26-4a41-bd92-9a6df7e4850c
+   PATCH 40e41fa7-4c26-4a41-bd92-9a6df7e4850c status=ignored -> 200
+   archived_at= 2026-10-25T12:16:53.274404Z status= ignored
+   PATCH 8803bb28-4921-433c-bf24-d2b272e8a0a9 status=ignored -> 200
+   archived_at= 2026-10-25T12:16:53.334588Z status= ignored
+
+### 9b. 清理后复核：默认列表不再含 smoke 项；pony-agent 统计不变 [2026-10-25T20:16:53+08:00]
+   default rows= 100 含 smoke: 0
+   archived rows= 2 -> [('Wave9GovernanceSmokeTags: ', 'ignored'), ('Wave9GovernanceSmoke: ', 'ignored')]
+   pony-agent issues.total= 11 events.total= 185 stored_rows= 196 by_status= {'ignored': 7, 'resolved': 2, 'unresolved': 2}
+# part2 结束 2026-10-25T20:16:53+08:00

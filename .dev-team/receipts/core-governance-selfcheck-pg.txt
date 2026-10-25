@@ -1,0 +1,52 @@
+== PG 方言数据层自验（临时库 ponysentry_govcheck_1792930174）
+   Compiling gov-verify v0.0.0 (/tmp/gov-verify)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.48s
+     Running `target/debug/pg_verify`
+[1] migrate 幂等（连跑两次）
+  ok  issues 归档两列落地
+  ok  ingest_metrics 表落地
+[2] 归档 / 恢复 / 三态 / count_issues
+  ok  新建 issue archived_at 为 None
+  ok  archive_issue 写入 archived_at
+  ok  重复 archive 幂等
+  ok  archive 不存在 → NotFound
+  ok  unarchive 清空 + 留痕
+  ok  archived 三态过滤正确（exclude=2 / only=1）
+  ok  count_issues == list 长度
+[3] 批量归档（statuses / ids / dry_run）
+  ok  dry_run：matched=1 archived=0
+  ok  statuses 模式 matched ≡ archived ≡ 1
+  ok  ids 模式 matched == 3
+  ok  ids 模式分桶（unresolved 1 / missing 1）
+  ok  四桶之和 == matched
+[4] C2.5 活跃即解档
+  ok  resolved → regression
+  ok  活跃态同事务解档
+  ok  库内两列均已清空
+[5] keyset 分页 + 计数
+  ok  count_events_for_issue == 12
+  ok  游标前进（翻页次数受限）
+  ok  游标前进（翻页次数受限）
+  ok  游标前进（翻页次数受限）
+  ok  翻页不重不漏（12 条）
+  ok  asc 是 desc 的严格反序
+[6] stats 口径
+  ok  sum(by_status) == total
+  ok  sum(by_level) == total
+  ok  sum(by_environment) == total
+  ok  basis 常量
+  ok  sum(series.events) == stored_rows
+  ok  sum(series.issues) <= issues.total
+  ok  day 桶键 YYYY-MM-DD
+  ok  hour 桶键 RFC3339 整点
+[7] ingest_metrics UPSERT + 读侧
+  ok  received == 3
+  ok  accepted == created + duplicate
+  ok  received == created + duplicate + rejected_invalid
+  ok  by_project 两组
+  ok  project='' → null 且排最后
+  ok  series.received 之和 == totals.received
+
+PG ALL CHECKS PASSED
+-- 已清理临时库 ponysentry_govcheck_1792930174
+PG-SELFCHECK exit=0

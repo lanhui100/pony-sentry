@@ -1,0 +1,146 @@
+# 生产库迁移收据 2026-10-25T20:13:30+08:00
+# 库名: ponysentry
+# 迁移前 issues 行数: 112
+# 迁移前 events 行数: 1256
+== 第一遍 psql -v ON_ERROR_STOP=1 -f migrations/postgres/0007_issue_archive.sql ==
+ALTER TABLE
+ALTER TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+EXIT_1=0
+== 第二遍（幂等复跑）==
+CREATE INDEX
+psql:migrations/postgres/0007_issue_archive.sql:26: NOTICE:  relation "ingest_metrics" already exists, skipping
+CREATE TABLE
+psql:migrations/postgres/0007_issue_archive.sql:28: NOTICE:  relation "idx_ingest_metrics_bucket" already exists, skipping
+CREATE INDEX
+EXIT_2=0
+== 结构校验 ==
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archive_restored_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+archived_at:timestamp with time zone
+ingest_metrics=0
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_created_at
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_events_issue_created_id
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_ingest_metrics_bucket
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_archived_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_first_seen_at
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+idx_issues_project_status_archived
+# 迁移后 issues 行数: 112
+# 归档列非空行数: 0

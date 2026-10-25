@@ -1,0 +1,17 @@
+# green-adversarial — issue 治理 L2-AT 对抗套件（红相转绿）
+# 生成时间: 2026-10-25T20:08:13+08:00
+# 命令原文: cargo test --manifest-path tests/Cargo.toml --offline --test acceptance_issue_governance_adversarial
+# Exit Code: 0
+# 套件: tests/acceptance_issue_governance_adversarial（9 用例；测试文件只读，未做任何修改）
+
+running 9 tests
+test fresh_empty_database_stats_are_zero ... ok
+test malformed_archive_batch_matrix ... ok
+test malformed_event_limit_matrix ... ok
+test malformed_event_cursor_matrix ... ok
+test oversized_payload_rejected_without_killing_process ... ok
+test concurrent_read_and_toggle_never_5xx ... ok
+test concurrent_duplicate_ingest_is_exactly_once ... ok
+test concurrent_single_archive_is_idempotent ... ok
+test sustained_ingest_burst_survives_metrics_path_degradation ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.91s

@@ -281,5 +281,126 @@
       "874dc9e95",
       "8917533ff"
     ]
+  },
+  "wave_9_issue_governance": {
+    "branch": "feat/issue-governance",
+    "status": "green-deployed",
+    "grading": {
+      "level": "B",
+      "upgraded_to_C_gates": false,
+      "reason": "跨 4 层（迁移/core 仓储/server 路由/后台作业）+ 生产数据面变更（归档列 + 计数表），但无协议编号变更、无鉴权语义变更；按 B 级执行并追加 C 级动作（L2-AT 三族对抗、L3-P 六问、生产态注入冒烟、双路 L3 审查）"
+    },
+    "commits": {
+      "protocol_freeze_v1": "e88e9f2",
+      "protocol_amend_v1_1": "cd9f0fd",
+      "protocol_amend_v1_2": "20a8f3a",
+      "red_anchor": "a71a15c",
+      "protocol_amend_v1_3": "pending-commit",
+      "implementation": "pending-commit"
+    },
+    "contract": ".dev-team/contract-issue-governance.md (FROZEN v1.3, C0-C8 + A1-A11)",
+    "nfr_baseline": ".dev-team/nfr-baseline.json (issue_archive / issue_list_limit_max / issue_events_page_limit_max / ingest_metrics_* / stats_series_max_points)",
+    "tasks": {
+      "T1_protocol": "completed (protocol-agent; contract v1.0->v1.3 + nfr + stubs)",
+      "T2_red_functional": "completed (test-agent + test-agent-2; 12 用例 A1-A11; 红相 EXIT 101, dev-red-purity 0)",
+      "T2b_red_adversarial": "completed (L2-AT subagent; 9 用例三族; 红相 EXIT 101)",
+      "T3_executor_core": "completed (executor-core; 迁移+core 数据层+SQLite 锁竞态修复)",
+      "T4_executor_server": "completed (executor-server; 5 handler+列表/事件改造+治理计数+TTL 作业)",
+      "T5_gate1_plan_review": "completed (L3-A 6 BLOCKING + L3-B 4 BLOCKING -> 全部裁决并入 v1.1/v1.2)",
+      "T6_deploy_receipts": "completed (lead; 生产迁移 + 部署 + curl 收据)",
+      "T7_code_review": "in_progress (L3-A/L3-B/L3-P 三路)",
+      "T8_docs_meta": "in_progress (lead)"
+    },
+    "dag": {
+      "write_scopes": {
+        "protocol-agent": [
+          ".dev-team/contract-issue-governance.md",
+          ".dev-team/nfr-baseline.json",
+          "crates/core/src/{models,repository}.rs",
+          "crates/server/src/routes.rs(空桩)"
+        ],
+        "test-agent-2": [
+          "tests/acceptance_issue_governance.rs",
+          "tests/Cargo.toml"
+        ],
+        "l2at": [
+          "tests/acceptance_issue_governance_adversarial.rs"
+        ],
+        "executor-core": [
+          "migrations/",
+          "crates/core/src/"
+        ],
+        "executor-server": [
+          "crates/server/src/",
+          "crates/server/tests/api_test.rs(Lead 授权单断言)"
+        ],
+        "lead": [
+          "docs/",
+          "README.md",
+          ".agents/notes/",
+          "deploy/",
+          ".dev-team/"
+        ]
+      },
+      "plan_review_receipts": [
+        ".dev-team/review-plan-a.json",
+        ".dev-team/review-plan-b.json"
+      ],
+      "blast_radius": "union diff ~3000 行 > 100 行 -> 触发 ≥2 路互补 L3（并发/状态 + 安全/契约）+ L3-P 六问"
+    },
+    "gates": {
+      "clippy": "Exit 0 (-D warnings)",
+      "workspace_tests": "Exit 0, 22 套件与基线逐项对齐",
+      "acceptance_functional": "12/12 Exit 0",
+      "acceptance_adversarial": "9/9 Exit 0",
+      "migration_empty_db": "0001->0007 两轮 + 0007 第三轮 Exit 0",
+      "migration_existing_db": "副本 0007 x2 Exit 0；down x2 Exit 0；副本走应用 migrate() 两轮 invalid_indexes=0",
+      "prod_migration": "psql -f 0007 两遍 Exit 0（issues 112 行、归档列全 NULL、ingest_metrics 建表）",
+      "prod_deploy": "deploy-console.sh Exit 0（含 trace 自检按 PONY_TRACE_INGEST_ENABLED 取 410 的修复）",
+      "prod_curl_acceptance": "issues?project=pony-agent&status=unresolved -> 2 行 0 ignored；X-Total-Count=11；stats 11/185/196 分组正确；events?limit=5 -> 5 行且游标翻页无重无漏；归档/恢复往返 count/status/事件数不变；ingest 冒烟 created->duplicate count 不增；ingest/stats received=4/created=2/duplicate=2"
+    },
+    "circuit_breaker": {
+      "functional_attempts": 1,
+      "nfr_attempts": 1,
+      "nfr_degraded": 0,
+      "notes": "L2-AT 并发用例暴露 SQLite deferred 事务锁升级 500（非本波引入，属路径强化）：core 以 BEGIN IMMEDIATE + busy_timeout + 仅 code 5 整事务重试修复，连跑 3 轮全绿；旧 API 测试对 B4 的过时断言经 Lead 授权由 server executor 单断言同步（越域凭据已入收据）"
+    },
+    "artifacts": {
+      "contract": ".dev-team/contract-issue-governance.md",
+      "nfr": ".dev-team/nfr-baseline.json",
+      "red_phase": [
+        ".dev-team/red-phase-issue-governance.txt",
+        ".dev-team/l2at-red-wave-9.txt",
+        ".dev-team/red-purity-issue-governance.json"
+      ],
+      "green": [
+        ".dev-team/receipts/green-functional.txt",
+        ".dev-team/receipts/green-adversarial.txt",
+        ".dev-team/receipts/green-workspace.txt",
+        ".dev-team/receipts/lead-gates.txt"
+      ],
+      "migrations": [
+        ".dev-team/receipts/migration-empty-db.txt",
+        ".dev-team/receipts/migration-existing-db.txt",
+        ".dev-team/receipts/prod-migration.txt"
+      ],
+      "deploy": [
+        ".dev-team/receipts/deploy-wave9.log",
+        ".dev-team/receipts/curl-wave9.txt"
+      ],
+      "sqlite_lock_fix": ".dev-team/receipts/sqlite-concurrency-fix.txt",
+      "reviews": [
+        ".dev-team/review-plan-a.json",
+        ".dev-team/review-plan-b.json",
+        ".dev-team/review-l3a-issue.json",
+        ".dev-team/review-l3b-issue.json",
+        ".dev-team/review-l3p-issue.json"
+      ],
+      "docs": [
+        "docs/issue-governance.md",
+        "README.md",
+        ".agents/notes/implemented/feature/2026-10-25-issue-governance-archive-and-analytics.md"
+      ]
+    }
   }
 }

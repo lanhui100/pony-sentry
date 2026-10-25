@@ -1,0 +1,34 @@
+===== 并发重复上报 round 1（8 线程 × 5 次 = 40 请求，同一 event_id）=====
+total=40 created=1 duplicate=39 5xx_or_transport=0
+status histogram={200: 39, 201: 1}
+healthz 200
+issues: 1 count: [1]
+events rows: 1
+RESULT: PASS
+===== 并发重复上报 round 2（8 线程 × 5 次 = 40 请求，同一 event_id）=====
+total=40 created=1 duplicate=39 5xx_or_transport=0
+status histogram={200: 39, 201: 1}
+healthz 200
+issues: 1 count: [1]
+events rows: 1
+RESULT: PASS
+===== 并发重复上报 round 3（8 线程 × 5 次 = 40 请求，同一 event_id）=====
+total=40 created=1 duplicate=39 5xx_or_transport=0
+status histogram={200: 39, 201: 1}
+healthz 200
+issues: 1 count: [1]
+events rows: 1
+RESULT: PASS
+ALL ROUNDS PASS
+total=160 ok=160 bad=0 elapsed=2.65s
+worst latencies: []
+healthz 200
+RESULT: PASS
+
+=== 连接级 PRAGMA 证据 ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running `target/debug/pragma_check`
+PRAGMA busy_timeout = 5000 (期望 5000)
+PRAGMA journal_mode = delete
+Pool 第二连接 PRAGMA busy_timeout = 5000
+PRAGMA CHECK PASSED

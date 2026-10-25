@@ -1,0 +1,20 @@
+   Compiling pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+   Compiling pony-sentry-fingerprint v0.1.0 (/home/dm/pony-sentry/crates/fingerprint)
+   Compiling pony-sentry-ingest v0.1.0 (/home/dm/pony-sentry/crates/ingest)
+   Compiling pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 05s
+ok
+test a11_ingest_unarchives_active_issue ... ok
+test a1_list_filter_project_and_status ... ok
+test a2_list_total_semantics_and_envelope ... ok
+test a3_list_archived_filter_modes ... ok
+test a4_single_archive_and_unarchive ... ok
+test a5_batch_archive_dry_run_and_skips ... ok
+test a6_ttl_auto_archive_job ... ok
+test a6b_restore_suppresses_ttl_rearchive ... ok
+test a7_event_pagination_cursor ... ok
+test a8_stats_bucket_invariants ... ok
+test a9_ingest_governance_metrics ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 85.94s
+

@@ -1,0 +1,97 @@
+warning: unused variable: `p3`
+   --> src/main.rs:187:9
+    |
+187 |     let p3 = repo
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_p3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gov-verify` (bin "gov-verify") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running `target/debug/gov-verify`
+[1] 0007 迁移幂等
+  ok  issues.archived_at 列存在
+  ok  issues.archive_restored_at 列存在
+  ok  ingest_metrics 表存在
+  ok  索引 idx_issues_archived_at 存在
+  ok  索引 idx_issues_project_status_archived 存在
+  ok  索引 idx_issues_first_seen_at 存在
+  ok  索引 idx_events_issue_created_id 存在
+  ok  索引 idx_events_created_at 存在
+  ok  索引 idx_ingest_metrics_bucket 存在
+[2] 归档单条 / 幂等 / 恢复留痕
+  ok  新建 issue archived_at 为 None
+  ok  序列化 archived_at 为 null（不省略字段）
+  ok  archive_issue 写入 archived_at
+  ok  重复 archive 不改 archived_at（幂等）
+  ok  archive 不存在 → NotFound
+  ok  unarchive 清空 archived_at
+  ok  unarchive 写入 archive_restored_at
+  ok  未归档行再次 unarchive → restored_at 单调前移
+[3] 列表三态与 count_issues
+  ok  重新归档成功
+  ok  archive 不覆盖 archive_restored_at（A-1）
+  ok  三态条目数 exclude=2/include=3/only=1
+  ok  count_issues(Exclude) == list 长度 2
+  ok  count_issues(Include) == list 长度 3
+  ok  count_issues(Only) == list 长度 1
+[4] 批量归档
+  ok  statuses 模式 dry_run：matched=1, archived=0
+  ok  dry_run 不改库
+  ok  statuses 模式 matched ≡ archived ≡ 1，skipped_* 恒 0
+  ok  ids 模式 matched == dedup(ids).len() == 3
+  ok  ids 模式归档 1 条（白名单内未归档）
+  ok  ids 模式 skipped_not_archivable == 1（unresolved）
+  ok  ids 模式 skipped_missing == 1（ghost）
+  ok  ids 模式本批无已归档 id
+  ok  单写者不变式：四桶之和 == matched
+  ok  ids 模式真实归档白名单内的行
+  ok  ids 模式的 unresolved 行不得被归档
+  ok  ids+statuses：matched=2, archived=0, 已归档 1 + 白名单外 1
+  ok  criteria 回显生效白名单与 ids_take_priority
+[5] C2.5 活跃即解档
+  ok  ignored 状态上报不解档（归档保持）
+  ok  resolved → regression 跃迁保持
+  ok  活跃态写入同事务解档（两列清空）
+  ok  count 语义零变更（仍为 2）
+  ok  库内归档标记已清空
+[6] 自动 TTL 归档条件
+  ok  last_seen_at 未过 cutoff → 不归档
+  ok  restored_at 已写入
+  ok  archive_restored_at 晚于 last_seen_at → 抑制自动归档（A-1）
+  ok  unresolved 永不自动归档
+[7] 事件 keyset 分页
+  ok  count_events_for_issue == 12
+  ok  翻页次数受限（游标必须前进）
+  ok  翻页次数受限（游标必须前进）
+  ok  翻页次数受限（游标必须前进）
+  ok  翻页并集 12 条（无重：后续断言去重后长度一致）
+  ok  翻页无重复（id 集合两两不相交）
+  ok  order=asc 是 desc 的严格反序
+  ok  不存在 issue 的事件数 0
+[8] stats 聚合口径
+  ok  sum(by_status) == issues.total
+  ok  sum(by_level) == issues.total
+  ok  sum(by_environment) == issues.total
+  ok  events.basis 恒为 sum_issues_count
+  ok  sum(series.events) == events.stored_rows
+  ok  sum(series.issues) <= issues.total
+  ok  series.len() >= 1
+  ok  day 桶键为 YYYY-MM-DD
+  ok  range.bucket 缺省 day
+  ok  include_archived 缺省 false
+  ok  include_archived=1 时 issues.total 变大（归档行计入）
+  ok  hour 桶键为 RFC3339 整点
+[9] 治理计数
+  ok  window/bucket 缺省回显
+  ok  received == 3（含无 project 的 1 次）
+  ok  created/duplicate 各 1
+  ok  accepted == created + duplicate（派生）
+  ok  suppressed_ignored == 1
+  ok  rejected_invalid == 1
+  ok  received == created + duplicate + rejected_invalid（B-3 不变式，suppressed 为 accepted 子集不参与）
+  ok  by_project 两个分组（p1 + 空 project）
+  ok  project='' 映射为 null 且排最后
+  ok  series.received 之和 == totals.received
+
+ALL CHECKS PASSED

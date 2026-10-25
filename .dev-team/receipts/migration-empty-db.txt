@@ -1,0 +1,103 @@
+== 目标库名: ponysentry_migtest_1792930148（连接串不落盘、不回显）
+-- 空库第 1 轮：按 0001→0007 顺序全跑
+   [ok]   round=1 file=migrations/postgres/0001_init.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0002_add_project.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0003_add_traces.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0004_add_issue_dimensions.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0005_trace_turns.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0006_trace_turn_run_id.sql exit=0
+   [ok]   round=1 file=migrations/postgres/0007_issue_archive.sql exit=0
+-- 空库第 2 轮：按 0001→0007 顺序全跑
+   [ok]   round=2 file=migrations/postgres/0001_init.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0002_add_project.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0003_add_traces.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0004_add_issue_dimensions.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0005_trace_turns.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0006_trace_turn_run_id.sql exit=0
+   [ok]   round=2 file=migrations/postgres/0007_issue_archive.sql exit=0
+
+-- \d issues（空库）
+                                   Table "public.issues"
+       Column        |           Type           | Collation | Nullable |      Default       
+---------------------+--------------------------+-----------+----------+--------------------
+ id                  | text                     |           | not null | 
+ fingerprint         | text                     |           | not null | 
+ title               | text                     |           | not null | 
+ culprit             | text                     |           |          | 
+ platform            | text                     |           | not null | 
+ status              | text                     |           | not null | 'unresolved'::text
+ assigned_to         | text                     |           |          | 
+ count               | bigint                   |           | not null | 1
+ last_release        | text                     |           |          | 
+ first_seen_at       | timestamp with time zone |           | not null | 
+ last_seen_at        | timestamp with time zone |           | not null | 
+ project             | text                     |           |          | 
+ environment         | text                     |           | not null | 'unknown'::text
+ app                 | text                     |           |          | 
+ namespace           | text                     |           |          | 
+ component           | text                     |           |          | 
+ level               | text                     |           | not null | 'error'::text
+ source_kind         | text                     |           |          | 
+ archived_at         | timestamp with time zone |           |          | 
+ archive_restored_at | timestamp with time zone |           |          | 
+Indexes:
+    "issues_pkey" PRIMARY KEY, btree (id)
+    "idx_issues_app_environment" btree (app, environment)
+    "idx_issues_archived_at" btree (archived_at)
+    "idx_issues_environment_status" btree (environment, status)
+    "idx_issues_fingerprint" btree (fingerprint)
+    "idx_issues_first_seen_at" btree (first_seen_at)
+    "idx_issues_last_seen_at" btree (last_seen_at)
+    "idx_issues_platform" btree (platform)
+    "idx_issues_project" btree (project)
+    "idx_issues_project_status_archived" btree (project, status, archived_at)
+    "idx_issues_status" btree (status)
+    "uq_issues_fingerprint_env" UNIQUE, btree (fingerprint, environment)
+Referenced by:
+    TABLE "events" CONSTRAINT "events_issue_id_fkey" FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+
+-- \d ingest_metrics（空库）
+                      Table "public.ingest_metrics"
+   Column    |           Type           | Collation | Nullable | Default  
+-------------+--------------------------+-----------+----------+----------
+ bucket_date | date                     |           | not null | 
+ project     | text                     |           | not null | ''::text
+ outcome     | text                     |           | not null | 
+ count       | bigint                   |           | not null | 0
+ updated_at  | timestamp with time zone |           | not null | now()
+Indexes:
+    "ingest_metrics_pkey" PRIMARY KEY, btree (bucket_date, project, outcome)
+    "idx_ingest_metrics_bucket" btree (bucket_date)
+
+-- 0007 索引落地校验
+             indexname              
+------------------------------------
+ idx_events_created_at
+ idx_events_issue_created_id
+ idx_ingest_metrics_bucket
+ idx_issues_archived_at
+ idx_issues_first_seen_at
+ idx_issues_project_status_archived
+(6 rows)
+
+-- 归档列类型/可空性
+     column_name     |        data_type         | is_nullable | column_default 
+---------------------+--------------------------+-------------+----------------
+ archive_restored_at | timestamp with time zone | YES         | 
+ archived_at         | timestamp with time zone | YES         | 
+(2 rows)
+
+
+-- 第三轮：仅重跑 0007（幂等复验）
+psql:migrations/postgres/0007_issue_archive.sql:10: NOTICE:  column "archived_at" of relation "issues" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:11: NOTICE:  column "archive_restored_at" of relation "issues" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:13: NOTICE:  relation "idx_issues_archived_at" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:14: NOTICE:  relation "idx_issues_project_status_archived" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:15: NOTICE:  relation "idx_issues_first_seen_at" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:16: NOTICE:  relation "idx_events_issue_created_id" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:17: NOTICE:  relation "idx_events_created_at" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:26: NOTICE:  relation "ingest_metrics" already exists, skipping
+psql:migrations/postgres/0007_issue_archive.sql:28: NOTICE:  relation "idx_ingest_metrics_bucket" already exists, skipping
+   [ok] 0007 第三次执行 exit=0
+-- 已清理临时库 ponysentry_migtest_1792930148
+EMPTY-DB RECEIPT: ALL EXIT 0

@@ -1,0 +1,14 @@
+test concurrent_duplicate_ingest_is_exactly_once ...     Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.78s
+ok
+test concurrent_read_and_toggle_never_5xx ... ok
+test concurrent_single_archive_is_idempotent ... ok
+test fresh_empty_database_stats_are_zero ... ok
+test malformed_archive_batch_matrix ... ok
+test malformed_event_cursor_matrix ... ok
+test malformed_event_limit_matrix ... ok
+test oversized_payload_rejected_without_killing_process ... ok
+test sustained_ingest_burst_survives_metrics_path_degradation ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.77s
+

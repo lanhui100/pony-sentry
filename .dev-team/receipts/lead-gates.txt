@@ -1,0 +1,43 @@
+== clippy ==
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.45
+    Checking rustls-webpki v0.103.15
+    Checking sqlx-core v0.8.6
+    Checking tokio-rustls v0.26.6
+    Checking hyper-rustls v0.27.10
+    Checking reqwest v0.12.28
+    Checking sqlx-sqlite v0.8.6
+    Checking sqlx-postgres v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+    Checking sqlx v0.8.6
+    Checking pony-sentry-core v0.1.0 (/home/dm/pony-sentry/crates/core)
+    Checking pony-sentry-fingerprint v0.1.0 (/home/dm/pony-sentry/crates/fingerprint)
+    Checking pony-sentry-ingest v0.1.0 (/home/dm/pony-sentry/crates/ingest)
+    Checking pony-sentry-server v0.1.0 (/home/dm/pony-sentry/crates/server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 45.54s
+CLIPPY_EXIT=0
+== workspace test ==
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+WORKSPACE_EXIT=0
+== functional ==
+test a6_ttl_auto_archive_job has been running for over 60 seconds
+test a6_ttl_auto_archive_job ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 60.51s
+
+FUNC_EXIT=0
+== adversarial ==
+test concurrent_single_archive_is_idempotent ... ok
+test sustained_ingest_burst_survives_metrics_path_degradation ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 87.30s
+
+ADV_EXIT=0
