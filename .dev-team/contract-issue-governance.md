@@ -196,11 +196,11 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `dry_run` | bool? | `false` | 非 bool → 400；`true` 只统计不改库 |
 
 - **硬上限（`amend v1.1 / B-5`）**：`ids` 去重后最多 **1000** 个；单 id ≤ **128** 字符；`statuses` 最多 **2** 项且不得重复。全部绑定参数（`= ANY($1)` 形态，禁止字符串拼接）。
-- **优先级写死（裁决 D）**：`ids` 给出时**只**按 `ids` 处理，`statuses` 与 `project` 被**忽略**。
+- **候选集与白名单（`amend v1.2`，改写 v1.1 的「statuses 被忽略」表述）**：`ids` 决定**候选集**——只处理这些 id，`project` 与 `older_than_days` **不参与筛选**；`statuses` **仍然作为归档白名单约束**（缺省 `["ignored","resolved"]`）。即 `{"ids":[A,B],"statuses":["ignored"]}` **只归档其中 `status='ignored'` 的行**，其余（含 `resolved`）计入 `skipped_not_archivable`。
 - **`statuses`/`project` 模式**（`amend v1.1 / A-3`）：单条 `UPDATE issues SET archived_at = now() WHERE status = ANY($1) AND archived_at IS NULL [AND project = $2] [AND last_seen_at < now() - older_than_days] RETURNING id`；`matched ≡ archived ≡ RETURNING 行数`，`skipped_*` 恒 0（`archive_restored_at` 不参与条件、不被覆盖）。
 - **`ids` 模式**（`amend v1.1 / A-3`，同一事务内两步）：
   1. `SELECT id, status, archived_at FROM issues WHERE id = ANY($1)` 分桶：`status ∉ 生效白名单` → `skipped_not_archivable`；`archived_at IS NOT NULL` → `skipped_already_archived`；库中不存在 → `skipped_missing`；
-  2. `UPDATE issues SET archived_at = now() WHERE id = ANY($1) AND status = ANY($2) AND archived_at IS NULL RETURNING id` → `archived`；
+  2. `UPDATE issues SET archived_at = now() WHERE id = ANY($1) AND status = ANY($2) AND archived_at IS NULL RETURNING id` → `archived`；其中 `$2` = **生效白名单**（请求未给 `statuses` → `["ignored","resolved"]`，给了 → 原值去重后）；`$1` 只来自 `dedup(ids)`，`project`/`older_than_days` 在本模式**不参与** WHERE；
   3. `matched = dedup(ids).len()`（含不存在与不可归档）。
 - `dry_run=true`：只执行第 1 步分桶与计数，**不执行**第 2 步；`archived == 0`、`matched` 与真实执行一致。
 - 幂等：`/:id/archive` 对已归档 issue 返回 **200 且 `archived_at` 不变、`archive_restored_at` 不变**；`/:id/unarchive` 对未归档 issue 返回 **200 且 `archived_at` 仍为 null**，`archive_restored_at` 置为本次 now（`A-1`：恢复留痕单调前移）。
@@ -225,10 +225,10 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | `skipped_not_archivable` | int ≥ 0 | 命中但 `status ∉ 生效白名单`（含 `unresolved`/`in_progress`/`regression`；仅 `ids` 模式非零） |
 | `skipped_missing` | int ≥ 0 | `ids` 在库中不存在（`amend v1.1 / A-3`；仅 `ids` 模式非零） |
 | `criteria.project` | string\|null | 空串归一为 `null` |
-| `criteria.statuses` | string[] | **实际生效白名单**（`amend v1.1 / A-4`）：`ids` 模式未给 `statuses` → `["ignored","resolved"]`；给了 → **原值**（已过白名单校验） |
+| `criteria.statuses` | string[] | **实际生效白名单**（`amend v1.1 / A-4` + `v1.2`）：未给 `statuses` → `["ignored","resolved"]`；给了 → **原值去重后**（已过白名单校验）；`ids` 模式下**仍是归档约束** |
 | `criteria.older_than_days` | int\|null | 回显 |
 | `criteria.ids` | string[]\|null | 回显 |
-| `criteria.ids_take_priority` | bool | `ids` 非空即 `true` |
+| `criteria.ids_take_priority` | bool | `ids` 非空即 `true`；语义 = **候选集由 `ids` 决定（`project`/`older_than_days` 被忽略）**，**不表示** `statuses` 被忽略（`statuses` 恒为白名单约束，`amend v1.2`） |
 | 不变式（**单写者/无并发**） | — | `archived + skipped_not_archivable + skipped_already_archived + skipped_missing == matched`；`dry_run=true` 时 `archived == 0` 且其余计数与真实执行一致 |
 | 不变式（**并发下**） | — | 只保证 `archived <= matched` 且 `archived + skipped_* <= matched`（并发归档/恢复会改变分桶）；L2-AT 并发用例**只断言无 5xx 与归档幂等**，不得断言等式 |
 
@@ -558,7 +558,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 | A2 | 同一过滤条件下 `limit=1` 与 `limit=100` 两次请求的 `X-Total-Count` 相等；`X-Has-More` 与 `offset+len<total` 一致 | C3.3 |
 | A3 | `archived=only` 结果每项 `archived_at != null`；`archived=include` 结果数 == `archived=exclude` 数 + `archived=only` 数 | C3.2 |
 | A4 | 归档前后两次 `GET /issues/:id/events?limit=100` 的 **`X-Total-Count`**、`envelope=1` 的 `total`、以及翻页并集大小三者相等（B-4） | C2.1/C4.3 |
-| A5 | `statuses=["regression"]` → 400；`statuses` 含重复元素或 >2 项 → 400；`ids` 与 `statuses` 同给时 `criteria.ids_take_priority=true` 且 **`criteria.statuses` == 生效值**（未给 → `["ignored","resolved"]`，给了 → 原值；A-4）；单写者下 `archived + skipped_not_archivable + skipped_already_archived + skipped_missing == matched` | C2.3/C2.4 |
+| A5 | `statuses=["regression"]` → 400；`statuses` 含重复元素或 >2 项 → 400；`ids` 与 `statuses` 同给时 `criteria.ids_take_priority=true`（= 候选集由 ids 决定），**`statuses` 仍作白名单**：`{"ids":[A,B],"statuses":["ignored"]}` 只归档 A/B 中 `ignored` 的行、其余计入 `skipped_not_archivable`（v1.2）；`criteria.statuses` == 生效值（未给 → `["ignored","resolved"]`，给了 → 原值去重后；A-4）；单写者下 `archived + skipped_not_archivable + skipped_already_archived + skipped_missing == matched` | C2.3/C2.4 |
 | A6 | `INTERVAL_SECS=1`（最小 1，非 60）可在 ≤10s 窗口内确定性验证；`TTL_DAYS=0` → 回落 30 天且日志含 `warn`；手动 `unarchive` 且期间无新事件 → 自动作业**不再**归档（A-1） | C2.2/C2.1 |
 | A7 | 无下一页时响应**不含** `X-Next-Cursor`；`cursor` 长度 > 512 → 400；`cursor` 载荷为原始 RFC3339 串（B-2），同 `created_at` 多行翻页不重叠 | C4.3 |
 | A8 | `events.basis == "sum_issues_count"`；`sum(by_status)==total`、`sum(by_level)==total`、`sum(by_environment)==total`；`sum(series[].events) == events.stored_rows`（同受 from/to） | C5.0 |
@@ -623,3 +623,11 @@ CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
   3. **B-1（风险中）**：`sum(series[].events) == events.stored_rows` 要求 series 落桶与 `stored_rows` **共用完全相同**的 WHERE（含 `events JOIN issues` 的 archived 过滤与 from/to 边界取舍）；两侧若分别拼 SQL 极易出现 ±1 行差异（闭区间边界）。
   4. **A-2（风险中）**：追加 UPDATE 必须复用 ingest 既有事务；两种方言 repo 的事务边界不同，SQLite 下不得新开事务（会与既有 `BEGIN IMMEDIATE` 冲突）。
   5. **B-3 SQLITE_BUSY 丢计数（风险中）**：该路径难以确定性触发，黑盒不可测 → 靠单测注入 + review 收据，门禁不强制黑盒覆盖。
+
+- **v1.2（2026-10-25，Lead 裁决；来源 = Test Agent 红相阶段发现的 C2.3/C2.4 内部语义冲突，Test Agent 拒绝自行裁决并上报）**：
+  冲突原文：C2.3 写「`ids` 与 `statuses` 同给时 ids 优先、`statuses` 被忽略」，但 `ids` 模式第 2 步 UPDATE 的条件是 `AND status = ANY($2=生效白名单)`——两者在 `{"ids":[A,B],"statuses":["ignored"]}` 下给出不同实现。
+  **裁决（写死）**：
+  1. `ids` 决定**候选集**（只处理这些 id；`project`/`older_than_days` 不参与筛选）；`statuses` **仍然作为归档白名单约束**——`{"ids":[...],"statuses":["ignored"]}` 只归档其中 `status='ignored'` 的行，其余计入 `skipped_not_archivable`。
+  2. `criteria.statuses` = 生效白名单（未给 → `["ignored","resolved"]`；给了 → 原值**去重后**）；`criteria.ids_take_priority=true` 的语义改为「候选集由 `ids` 决定（`project`/`older_than_days` 被忽略）」，**不再表述为 `statuses` 被忽略**。
+  3. `ids` 模式单写者等式不变：`archived + skipped_not_archivable + skipped_already_archived + skipped_missing == matched`，其中 `archived` 只计「status ∈ 生效白名单 且未归档」的行。
+  改动范围：仅 C2.3（优先级 bullet + `ids` 模式第 2 步说明）、C2.4（`criteria.statuses` / `criteria.ids_take_priority` 两行）、A 条款补充判据 A5 行、本 amend 记录；**未改**任何代码、NFR 基准与其它段落。
