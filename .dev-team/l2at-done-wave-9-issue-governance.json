@@ -1,0 +1,29 @@
+{
+  "wave": "wave-9-issue-governance",
+  "l2at": "done",
+  "file": "tests/acceptance_issue_governance_adversarial.rs",
+  "lines": 454,
+  "test_count": 9,
+  "cases": [
+    "malformed_event_limit_matrix",
+    "malformed_event_cursor_matrix",
+    "malformed_archive_batch_matrix",
+    "concurrent_single_archive_is_idempotent",
+    "concurrent_duplicate_ingest_is_exactly_once",
+    "concurrent_read_and_toggle_never_5xx",
+    "fresh_empty_database_stats_are_zero",
+    "sustained_ingest_burst_survives_metrics_path_degradation",
+    "oversized_payload_rejected_without_killing_process"
+  ],
+  "families": [
+    "malformed",
+    "concurrency",
+    "fault_injection"
+  ],
+  "compile_check": "rustc --emit=metadata 语法级 -> 仅 E0432/E0433 外部 crate 未链接错误；随后 /tmp/at-check 镜像 manifest（同 tests/Cargo.toml dev-deps + Cargo.lock）执行 cargo check --offline --test acceptance_issue_governance_adversarial 通过，零 error 零 warning",
+  "red_receipt": ".dev-team/l2at-red-wave-9.txt",
+  "requires_lead_registration": "tests/Cargo.toml 需新增 [[test]] name = \"acceptance_issue_governance_adversarial\" path = \"acceptance_issue_governance_adversarial.rs\"（L2-AT 未改 tests/Cargo.toml）",
+  "notes": "红相未跑：当前实现为空桩（archive/stats 路由 panic），待 Lead 注册 target 后统一跑红相。传输层失败折叠为 status=0 并由断言点名，禁止 panic 掩盖并发红相。故障注入用例 8 标注 [FAULT-INJECTION: DEGRADED-EQUIVALENT]：harness::Server 不暴露 workdir/库路径，无法真 DROP TABLE ingest_metrics，退化为『旁路失败不阻断主链路 + 进程存活』的契约等价断言。契约歧义：① /api/v1/stats 是否含 totals.received 未在 A8 明示（按 Lead 口径断言）；② ingest 响应语义字段名（created/duplicate）按 body 含字符串判定，未绑定具体字段键；③ 3MB body 若被连接层提前断开（无 413）会表现为 status=0，属实现缺陷而非用例缺陷。",
+  "red_result": "EXIT_CODE=101 · 7 FAILED / 2 PASSED（PASSED = 既有 ingest 行为零回归守卫：超大 payload 413 + 200 次 burst 存活）",
+  "registered_in": "tests/Cargo.toml by Lead（L2-AT 写域外，Lead assembly）"
+}

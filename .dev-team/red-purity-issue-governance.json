@@ -1,0 +1,112 @@
+{
+  "status": "RED",
+  "suite": "acceptance_issue_governance",
+  "contract": ".dev-team/contract-issue-governance.md (FROZEN v1.2，A1-A11 + v1.1/v1.2 amend)",
+  "command": "cargo test --manifest-path tests/Cargo.toml --offline --test acceptance_issue_governance",
+  "raw_log": ".dev-team/red-phase-issue-governance.txt",
+  "exit_code": 101,
+  "summary": "12 用例：11 FAILED（全部为 SUT 能力缺失：空桩 unimplemented! panic / 响应头与分页缺失 / TTL 作业缺失 / C3.2 校验缺失）；1 PASSED（A10 为既有行为零回归守卫，绿相即正确姿态）。两次连续运行结果一致。",
+  "harness_timeout": false,
+  "stability": "连续四次运行同样 11 FAILED / 1 PASSED（本轮 v1.2 收据 11.26s）",
+  "amend_v1_1_coverage": {
+    "A4_events_X-Total-Count": "已编码（C4.3 v1.1 / B-4：归档前后 X-Total-Count 与信封 total 相等，双证 + 行数断言）",
+    "A5_criteria_statuses": "已编码（C2.4 v1.2 / A-4：未给 statuses → 默认白名单；给了 → 原值去重后生效值；ids 模式下 statuses 仍是归档白名单约束）",
+    "A5_matched_semantics": "已编码（C2.3/C2.4 / A-3：statuses 模式 matched≡archived 且 skipped_* 恒 0；ids 模式 matched=dedup(ids).len() + 四桶加和含 skipped_missing）",
+    "ids_statuses_hard_limits": "已编码（ids>1000→400 `too many ids`、单 id>128→400、statuses 重复→400、body>64KB→413）",
+    "cursor_format_v1_1": "已编码（C4.2 / B-2：服务端游标解码后恰为 {created_at,id}，created_at 等于本页末行原始串、id 等于末行 id；旧 created_at_micros 载荷 → 400）",
+    "A11_active_unarchive": "已编码（C2.5 / A-2：活跃态解档 + ignored 保持归档且 count+1 + ingest 响应零变更）",
+    "archive_restored_at": "已编码（C2.1/C2.3 / A-1：手动归档不写留痕、unarchive 写留痕、A6b 恢复后 4s 观察窗内不得再归档）",
+    "5xx_body_hygiene": "已编码（C2.3 / B-6：新接口 5xx 体必须恰为 `Internal error`；全局 5xx 体禁含 SQLSTATE/sqlite/panicked/SQL 片段）",
+    "B-12_fingerprint_fact": "已编码为造数约束 + 文件头注释（fingerprint v3 不含 project，seed_distinct 变更 error_type+栈帧）",
+    "A5_ids_statuses_whitelist": "已编码（C2.3/C2.4 v1.2 裁决）：{\"ids\":[<ignored>,<unresolved>],\"statuses\":[\"ignored\"]} → archived==1、skipped_not_archivable==1、skipped_already_archived==0、skipped_missing==0、matched==2、criteria.statuses==[\"ignored\"]、ids_take_priority==true，且 ignored 行真实归档 / unresolved 行不归档"
+  },
+  "scratch_test_defects": [
+    {
+      "test": "a6_ttl_auto_archive_job",
+      "exception": "TEST-DEFECT",
+      "raise_site": "TEST",
+      "detail": "首版 Server::start_with 未显式补 CLIENT_TOKEN/ADMIN_TOKEN（harness 的 start_with 不注入默认 token）→ Arrange PATCH 503 admin_token_not_configured。已修正为显式注入。"
+    },
+    {
+      "test": "a1/a2/a3/a5/a8",
+      "exception": "TEST-DEFECT",
+      "raise_site": "TEST",
+      "detail": "首版造数仅变更 message 期望生成多条 issue，实测 fingerprint 不含 message/project（v1.1 B-12/F23），seed 合并为 1 条导致 Arrange 前提不成立。已改为 seed_distinct*（变更 error_type + 栈帧 filename/function）。"
+    }
+  ],
+  "failures": [
+    {
+      "test": "a1_list_filter_project_and_status",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "C3.2 / C7.3-B1：GET /api/v1/issues?project=p1&status=bogus 期望 400 Bad request: invalid status，实际 200 + 裸数组（非法 status 仍被静默忽略）。A1 主判据（project+status=unresolved 命中集精确、无 ignored、ignored 交叉验证）当前已通过。"
+    },
+    {
+      "test": "a2_list_total_semantics_and_envelope",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "C3.3：响应缺少 X-Total-Count（期望同过滤条件总数 3）；同批缺失 X-Limit/X-Offset/X-Has-More/X-Archived-Mode/X-Project-Filter 与 C3.4 envelope=1 信封。"
+    },
+    {
+      "test": "a3_list_archived_filter_modes",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "POST /api/v1/issues/:id/archive 无 HTTP 响应：handler 内 panic（服务端 stderr 实证 `not implemented: implemented by wave-9 executor`，routes.rs 空桩）导致连接断开；archived 三态过滤无法验证。"
+    },
+    {
+      "test": "a4_single_archive_and_unarchive",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "C4.3 v1.1 判据：GET /issues/:id/events?limit=1 缺少 X-Total-Count（期望该 issue 事件总行数 2），归档前后双证无法成立（后续 archive 亦为空桩 panic）。"
+    },
+    {
+      "test": "a5_batch_archive_dry_run_and_skips",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "POST /api/v1/issues/archive?dry_run=1 空桩 panic（连接断开）；C2.4 计数结构与 v1.1 硬上限（ids>1000 / 单 id>128 / statuses 重复 / 64KB→413）均无法验证。"
+    },
+    {
+      "test": "a6_ttl_auto_archive_job",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "PONY_ISSUE_ARCHIVE_ENABLED=1 + TTL_SECS=1 + INTERVAL_SECS=1 下 10s 观察窗内 ignored issue 的 archived_at 仍为 None（期望非空）：TTL 归档作业未实现。"
+    },
+    {
+      "test": "a6b_restore_suppresses_ttl_rearchive",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "前置 10s 内未发生任何自动归档，说明 C2.1/C2.2 作业缺失，A-1 的 archive_restored_at 抑制项因此不可验证（恢复后 4s 观察窗断言未到达）。"
+    },
+    {
+      "test": "a7_event_pagination_cursor",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "C4.1：GET /issues/:id/events?limit=5 返回 12 条（期望恰好 5 条），limit 未生效；X-Next-Cursor / X-Total-Count / envelope.total / cursor 载荷格式 / limit>100 clamp / C4.4 空页头 / limit=0→400 / 篡改与旧格式 cursor→400 / order=asc 严格反序均无法验证。"
+    },
+    {
+      "test": "a8_stats_bucket_invariants",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "GET /api/v1/stats?project=p1 空桩 panic（连接断开）；issues/events 双口径、木桶不变式、series 桶解析与 400 边界（hour>7d、from>to）无法验证。"
+    },
+    {
+      "test": "a9_ingest_governance_metrics",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "GET /api/v1/ingest/stats?window=24h 空桩 panic（连接断开）；received/created/duplicate/suppressed_ignored/accepted 计数语义、401 不计 received、window 校验无法验证。"
+    },
+    {
+      "test": "a11_ingest_unarchives_active_issue",
+      "exception": "AssertionError",
+      "raise_site": "SUT",
+      "detail": "POST /api/v1/issues/:id/archive 空桩 panic（连接断开）：C2.5 活跃即解档场景（unresolved 解档 / ignored 保持归档且 count+1）无法验证。"
+    }
+  ],
+  "green_guards": [
+    {
+      "test": "a10_ingest_idempotency_zero_regression",
+      "detail": "PASSED：同 event_id 两次 POST = 201 created → 200 duplicate 且 count 不增；同指纹新 event_id = count+1 且 issue 数不变；ingest 响应字段（result/duplicate/event_id/issue_id）与状态码零变更。属既有行为守卫，保持绿相。"
+    }
+  ],
+  "a5_residual_ambiguity": "已由 v1.2 裁决关闭（ids 定候选集 + statuses 作白名单），A5 混合场景已改为精确断言，无残留歧义"
+}

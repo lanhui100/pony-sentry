@@ -44,6 +44,16 @@ path = "acceptance_trace_v2_ext.rs"
 name = "acceptance_trace_v2_ext2"
 path = "acceptance_trace_v2_ext2.rs"
 
+# 契约：.dev-team/contract-issue-governance.md（FROZEN v1.0，A1-A10）
+[[test]]
+name = "acceptance_issue_governance"
+path = "acceptance_issue_governance.rs"
+
 [dev-dependencies]
 serde_json = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# 契约：.dev-team/contract-issue-governance.md FROZEN v1.1（A1-A11 + L2-AT 对抗三族）
+[[test]]
+name = "acceptance_issue_governance_adversarial"
+path = "acceptance_issue_governance_adversarial.rs"

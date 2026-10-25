@@ -1,0 +1,114 @@
+   Compiling pony-sentry-contract-tests v0.1.0 (/home/dm/pony-sentry/tests)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.97s
+     Running acceptance_issue_governance.rs (tests/target/debug/deps/acceptance_issue_governance-dbd4f77793135697)
+
+running 12 tests
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+test a9_ingest_governance_metrics ... FAILED
+test a11_ingest_unarchives_active_issue ... FAILED
+test a2_list_total_semantics_and_envelope ... FAILED
+test a4_single_archive_and_unarchive ... FAILED
+test a10_ingest_idempotency_zero_regression ... ok
+test a3_list_archived_filter_modes ... FAILED
+test a5_batch_archive_dry_run_and_skips ... FAILED
+test a8_stats_bucket_invariants ... FAILED
+test a1_list_filter_project_and_status ... FAILED
+test a7_event_pagination_cursor ... FAILED
+test a6b_restore_suppresses_ttl_rearchive ... FAILED
+test a6_ttl_auto_archive_job ... FAILED
+
+failures:
+
+---- a9_ingest_governance_metrics stdout ----
+
+thread 'a9_ingest_governance_metrics' (1743299) panicked at harness.rs:368:35:
+请求 /api/v1/ingest/stats?window=24h 失败：error sending request for url (http://127.0.0.1:36341/api/v1/ingest/stats?window=24h)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'a9_ingest_governance_metrics' (1743299) panicked at acceptance_issue_governance.rs:320:13:
+[GET /api/v1/ingest/stats] 断言失败：SUT 未实现该能力 —— handler 内 panic 使连接被断开，无 HTTP 响应可供断言（传输层错误：请求 /api/v1/ingest/stats?window=24h 失败：error sending request for url (http://127.0.0.1:36341/api/v1/ingest/stats?window=24h)）
+
+---- a11_ingest_unarchives_active_issue stdout ----
+
+thread 'a11_ingest_unarchives_active_issue' (1743288) panicked at harness.rs:368:35:
+请求 /api/v1/issues/4fe528ed-a640-49ea-b152-11ede076f8ef/archive 失败：error sending request for url (http://127.0.0.1:32833/api/v1/issues/4fe528ed-a640-49ea-b152-11ede076f8ef/archive)
+
+thread 'a11_ingest_unarchives_active_issue' (1743288) panicked at acceptance_issue_governance.rs:320:13:
+[POST /api/v1/issues/:id/archive] 断言失败：SUT 未实现该能力 —— handler 内 panic 使连接被断开，无 HTTP 响应可供断言（传输层错误：请求 /api/v1/issues/4fe528ed-a640-49ea-b152-11ede076f8ef/archive 失败：error sending request for url (http://127.0.0.1:32833/api/v1/issues/4fe528ed-a640-49ea-b152-11ede076f8ef/archive)）
+
+---- a2_list_total_semantics_and_envelope stdout ----
+
+thread 'a2_list_total_semantics_and_envelope' (1743290) panicked at acceptance_issue_governance.rs:333:28:
+[A2] 缺少响应头 `x-total-count`：status=200 body=[{"id":"85da4cd3-884b-45ef-bb87-2f4822b21b19","fingerprint":"fa8d157912232458cb9cffa4f81a604468e825edd037cc42aaef9c53f1a9a1b0","title":"Governancea2aError: governance a2a","culprit":"fixtures/a2a.py in fn_a2a","platform":"python","status":"unresolved","assigned_to":null,"count":1,"last_release":"0.24.35","project":"p1","environment":"production","app":"api_v2","namespace":"production","component":"issue_reporting","level":"error","source_kind":"agent","first_seen_at":"2026-10-21T07:00:00Z","last_seen_at":"2026-10-21T07:00:00Z"}]
+
+---- a4_single_archive_and_unarchive stdout ----
+
+thread 'a4_single_archive_and_unarchive' (1743293) panicked at acceptance_issue_governance.rs:333:28:
+[A4 归档前 events X-Total-Count（limit=1 也必须给总数）] 缺少响应头 `x-total-count`：status=200 body=[{"id":"1dd0add2-1e95-42c5-8967-8f1bfabd07b8","issue_id":"b872e498-82c9-46e6-8f5e-c9f3027003c7","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a4-1","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A4 target"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A4 target","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a4-1","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"7387c1d5-98ac-4e49-9889-d8da4814c026","issue_id":"b872e498-82c9-46e6-8f5e-c9f3027003c7","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a4-2","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A4 target"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A4 target","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a4-2","level":"error","created_at":"2026-10-21T07:00:00Z"}]
+
+---- a3_list_archived_filter_modes stdout ----
+
+thread 'a3_list_archived_filter_modes' (1743291) panicked at harness.rs:368:35:
+请求 /api/v1/issues/a4f2d95c-6061-4567-af31-121f57607955/archive 失败：error sending request for url (http://127.0.0.1:33157/api/v1/issues/a4f2d95c-6061-4567-af31-121f57607955/archive)
+
+thread 'a3_list_archived_filter_modes' (1743291) panicked at acceptance_issue_governance.rs:320:13:
+[POST /api/v1/issues/:id/archive] 断言失败：SUT 未实现该能力 —— handler 内 panic 使连接被断开，无 HTTP 响应可供断言（传输层错误：请求 /api/v1/issues/a4f2d95c-6061-4567-af31-121f57607955/archive 失败：error sending request for url (http://127.0.0.1:33157/api/v1/issues/a4f2d95c-6061-4567-af31-121f57607955/archive)）
+
+---- a5_batch_archive_dry_run_and_skips stdout ----
+
+thread 'a5_batch_archive_dry_run_and_skips' (1743294) panicked at harness.rs:368:35:
+请求 /api/v1/issues/archive?dry_run=1 失败：error sending request for url (http://127.0.0.1:42455/api/v1/issues/archive?dry_run=1)
+
+thread 'a5_batch_archive_dry_run_and_skips' (1743294) panicked at acceptance_issue_governance.rs:320:13:
+[POST /api/v1/issues/archive] 断言失败：SUT 未实现该能力 —— handler 内 panic 使连接被断开，无 HTTP 响应可供断言（传输层错误：请求 /api/v1/issues/archive?dry_run=1 失败：error sending request for url (http://127.0.0.1:42455/api/v1/issues/archive?dry_run=1)）
+
+---- a8_stats_bucket_invariants stdout ----
+
+thread 'a8_stats_bucket_invariants' (1743298) panicked at harness.rs:368:35:
+请求 /api/v1/stats?project=p1 失败：error sending request for url (http://127.0.0.1:45771/api/v1/stats?project=p1)
+
+thread 'a8_stats_bucket_invariants' (1743298) panicked at acceptance_issue_governance.rs:320:13:
+[GET /api/v1/stats] 断言失败：SUT 未实现该能力 —— handler 内 panic 使连接被断开，无 HTTP 响应可供断言（传输层错误：请求 /api/v1/stats?project=p1 失败：error sending request for url (http://127.0.0.1:45771/api/v1/stats?project=p1)）
+
+---- a1_list_filter_project_and_status stdout ----
+
+thread 'a1_list_filter_project_and_status' (1743289) panicked at acceptance_issue_governance.rs:35:5:
+assertion `left == right` failed: [C3.2 非法 status → 400 Bad request: invalid status] 期望 HTTP 400，实际 status=200 body=[{"id":"ec691ecd-cd24-4c56-bb9f-43d3066b4d36","fingerprint":"db392570221022d0f0d163a90cf33567efeaf158424e82b446ea4d4acca11dd0","title":"ValidationError: A1 unresolved one","culprit":"api_v2/src/modules/issue_reporting/worker.py in build_pony_sentry_payload","platform":"python","status":"unresolved","assigned_to":null,"count":1,"last_release":"0.24.35","project":"p1","environment":"production","app":"api_v2","namespace":"production","component":"issue_reporting","level":"error","source_kind":"agent","first_seen_at":"2026-10-21T07:00:00Z","last_seen_at":"2026-10-21T07:00:00Z"},{"id":"525fd0a0-5d13-4747-916d-8cc8a336924b","fingerprint":"66e9c3a3e90ba3b4de0948ab0955c85bdb49a73efe43096e6f85e8b1ea24fa4d","title":"Governancea1u2Error: governance a1u2","culprit":"fixtures/a1u2.py in fn_a1u2","platform":"python","status":"unresolved","assigned_to":null,"count":1,"last_release":"0.24.35","project":"p1","environment":"production","app":"api_v2","namespace":"production","component":"issue_reporting","level":"error","source_kind":"agent","first_seen_at":"2026-10-21T07:00:00Z","last_seen_at":"2026-10-21T07:00:00Z"},{"id":"f7c811d0-2215-40dd-b586-a927bac36559","fingerprint":"ecfdf132e7989d5c7c9e7857a32966beddd93194bce749d925ec71032d97cc3a","title":"Governancea1i1Error: governance a1i1","culprit":"fixtures/a1i1.py in fn_a1i1","platform":"python","status":"ignored","assigned_to":null,"count":1,"last_release":"0.24.35","project":"p1","environment":"production","app":"api_v2","namespace":"production","component":"issue_reporting","level":"error","source_kind":"agent","first_seen_at":"2026-10-21T07:00:00Z","last_seen_at":"2026-10-21T07:00:00Z"},{"id":"924bcb43-9cbf-466c-9490-5cd439ca1afd","fingerprint":"7da61eed5bf9be5af78ea7fabec19fe1fcd506c49e571539dc1409ddabec9d35","title":"Governancea1r1Error: governance a1r1","culprit":"fixtures/a1r1.py in fn_a1r1","platform":"python","status":"resolved","assigned_to":null,"count":1,"last_release":"0.24.35","project":"p1","environment":"production","app":"api_v2","namespace":"production","component":"issue_reporting","level":"error","source_kind":"agent","first_seen_at":"2026-10-21T07:00:00Z","last_seen_at":"2026-10-21T07:00:00Z"}]
+  left: 200
+ right: 400
+
+---- a7_event_pagination_cursor stdout ----
+
+thread 'a7_event_pagination_cursor' (1743297) panicked at acceptance_issue_governance.rs:1231:5:
+assertion `left == right` failed: [A7] limit=5 必须恰好 5 条：status=200 body=[{"id":"f002326d-c898-41ed-8c21-c7b6e0a5fa18","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-00","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-00","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"2e106f54-c0a3-4fe9-a30b-2ed3da0c31a2","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-01","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-01","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"ec130170-2c0e-40f0-bbaf-7cd2ade301ac","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-02","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-02","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"c9bf8eaa-66f5-4f48-95dd-51ba286d65a2","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-03","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-03","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"db4e243f-b14c-4498-aa9b-61b18187a256","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-04","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-04","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"c0b19377-4209-49fe-abac-981ba370c061","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-05","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-05","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"94a41784-9da4-4ca0-aa0b-11ae13af7770","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-06","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-06","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"793da893-b43c-47e4-a783-7de1d2c4d0ef","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-07","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-07","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"a46b4745-8560-46b5-89f3-2874b355a112","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-08","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-08","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"58283428-90d6-4091-ad19-a6f43e6258d2","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-09","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-09","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"fa8ec98e-4e79-4fe4-8a3a-c7cb18bb5b38","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-10","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-10","level":"error","created_at":"2026-10-21T07:00:00Z"},{"id":"c4a0453d-2745-4ae9-988a-29e9780bcb4f","issue_id":"3166b54c-61ce-4145-8f2b-6ff6a9e2bce8","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-a7-11","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"A7 events"},"extra":{"project_path":"/workspace/p1"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"A7 events","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"issue-governance","project":"p1"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-a7-11","level":"error","created_at":"2026-10-21T07:00:00Z"}]
+  left: 12
+ right: 5
+
+---- a6b_restore_suppresses_ttl_rearchive stdout ----
+
+thread 'a6b_restore_suppresses_ttl_rearchive' (1743296) panicked at acceptance_issue_governance.rs:1745:5:
+[A6b Arrange] ignored issue 必须先被 TTL 作业自动归档（证明作业在跑）
+
+---- a6_ttl_auto_archive_job stdout ----
+
+thread 'a6_ttl_auto_archive_job' (1743295) panicked at acceptance_issue_governance.rs:1171:5:
+[A6] TTL_SECS=1 + INTERVAL_SECS=1 下，ignored issue 必须在 ≤10s 内被自动归档；实际 archived_at=None
+
+
+failures:
+    a11_ingest_unarchives_active_issue
+    a1_list_filter_project_and_status
+    a2_list_total_semantics_and_envelope
+    a3_list_archived_filter_modes
+    a4_single_archive_and_unarchive
+    a5_batch_archive_dry_run_and_skips
+    a6_ttl_auto_archive_job
+    a6b_restore_suppresses_ttl_rearchive
+    a7_event_pagination_cursor
+    a8_stats_bucket_invariants
+    a9_ingest_governance_metrics
+
+test result: FAILED. 1 passed; 11 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.26s
+
+error: test failed, to rerun pass `--test acceptance_issue_governance`
+EXIT_CODE=101

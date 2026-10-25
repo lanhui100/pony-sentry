@@ -1,0 +1,199 @@
+   Compiling pony-sentry-contract-tests v0.1.0 (/home/dm/pony-sentry/tests)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+     Running acceptance_issue_governance_adversarial.rs (tests/target/debug/deps/acceptance_issue_governance_adversarial-d29ecb9857f26eaf)
+
+running 9 tests
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+test fresh_empty_database_stats_are_zero ... FAILED
+test malformed_archive_batch_matrix ... FAILED
+test malformed_event_cursor_matrix ... FAILED
+test malformed_event_limit_matrix ... FAILED
+test concurrent_duplicate_ingest_is_exactly_once ... FAILED
+test concurrent_single_archive_is_idempotent ... FAILED
+test concurrent_read_and_toggle_never_5xx ... FAILED
+test oversized_payload_rejected_without_killing_process ... ok
+test sustained_ingest_burst_survives_metrics_path_degradation ... ok
+
+failures:
+
+---- fresh_empty_database_stats_are_zero stdout ----
+
+thread 'fresh_empty_database_stats_are_zero' (1731881) panicked at acceptance_issue_governance_adversarial.rs:390:5:
+assertion `left == right` failed: [fresh /ingest/stats] 空库必须 200：status=0 body=transport error: error sending request for url (http://127.0.0.1:34113/api/v1/ingest/stats)
+  left: 0
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- malformed_archive_batch_matrix stdout ----
+
+thread 'malformed_archive_batch_matrix' (1731883) panicked at acceptance_issue_governance_adversarial.rs:194:5:
+assertion `left == right` failed: [ids=1001] 必须 400：status=0 body=transport error: error sending request for url (http://127.0.0.1:37623/api/v1/issues/archive)
+  left: 0
+ right: 400
+
+---- malformed_event_cursor_matrix stdout ----
+
+thread 'malformed_event_cursor_matrix' (1731884) panicked at acceptance_issue_governance_adversarial.rs:179:9:
+assertion `left == right` failed: [cursor not-base64] 必须 400：status=200 body=[{"id":"9bde47bc-3569-4371-8fa1-55357036846a","issue_id":"cd7430a3-44d6-48c0-a5f1-fd30a44f9b80","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-l2at-cursor-1","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"cursor matrix"},"extra":{"project_path":"/workspace/l2at-malformed-cursor"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"cursor matrix","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"l2at-adversarial","project":"l2at-malformed-cursor"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-l2at-cursor-1","level":"error","created_at":"2026-10-21T07:00:00Z"}]
+  left: 200
+ right: 400
+
+---- malformed_event_limit_matrix stdout ----
+
+thread 'malformed_event_limit_matrix' (1731885) panicked at acceptance_issue_governance_adversarial.rs:149:9:
+assertion `left == right` failed: [events limit=0] 必须 400：status=200 body=[{"id":"2569fc25-5316-499c-9174-9224cab306a5","issue_id":"dea86908-04c9-4746-81ff-d96dd6a79335","payload":{"app":"api_v2","breadcrumbs":null,"component":"issue_reporting","environment":"production","error_type":"ValidationError","event_id":"evt-l2at-limit-1","exception":{"error_type":"ValidationError","stacktrace":[{"colno":5,"filename":"api_v2/src/modules/issue_reporting/worker.py","function":"build_pony_sentry_payload","in_app":true,"lineno":88}],"value":"limit matrix"},"extra":{"project_path":"/workspace/l2at-malformed-limit"},"grafana_url":"https://grafana.ponyjob.top/d/contract/issue-reporting","level":"error","loki_query":"{app=\"api_v2\"}","message":"limit matrix","namespace":"production","platform":"python","release":"0.24.35","service_name":"langgraph","source_kind":"agent","tags":{"alertname":"l2at-adversarial","project":"l2at-malformed-limit"},"timestamp":"2026-10-21T07:00:00Z"},"release":"0.24.35","environment":"production","event_key":"evt-l2at-limit-1","level":"error","created_at":"2026-10-21T07:00:00Z"}]
+  left: 200
+ right: 400
+
+---- concurrent_duplicate_ingest_is_exactly_once stdout ----
+
+thread 'concurrent_duplicate_ingest_is_exactly_once' (1731878) panicked at acceptance_issue_governance_adversarial.rs:301:26:
+[thread 0 iter 0] 并发 ingest 只允许 201/200，实际 500：{"error":"persistence_error"}
+
+---- concurrent_single_archive_is_idempotent stdout ----
+
+thread 'concurrent_single_archive_is_idempotent' (1731880) panicked at acceptance_issue_governance_adversarial.rs:246:13:
+assertion `left == right` failed: [thread 0 iter 0] 并发重复归档必须 200：transport error: error sending request for url (http://127.0.0.1:36653/api/v1/issues/5c2ef69f-f76a-4f1e-b934-5723886966c8/archive)
+  left: 0
+ right: 200
+
+---- concurrent_read_and_toggle_never_5xx stdout ----
+
+thread 'concurrent_read_and_toggle_never_5xx' (1731879) panicked at acceptance_issue_governance_adversarial.rs:378:5:
+并发读写/切换出现违规响应（120 条）：[
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "archive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/archive)",
+    "X-Total-Count=None < items.len()=0",
+    "stats status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/stats)",
+    "unarchive status=0 body=transport error: error sending request for url (http://127.0.0.1:36361/api/v1/issues/76189b58-f75b-4932-b5a5-85046cade3ac/unarchive)",
+]
+
+
+failures:
+    concurrent_duplicate_ingest_is_exactly_once
+    concurrent_read_and_toggle_never_5xx
+    concurrent_single_archive_is_idempotent
+    fresh_empty_database_stats_are_zero
+    malformed_archive_batch_matrix
+    malformed_event_cursor_matrix
+    malformed_event_limit_matrix
+
+test result: FAILED. 2 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
+
+error: test failed, to rerun pass `--test acceptance_issue_governance_adversarial`
+EXIT_CODE=101
