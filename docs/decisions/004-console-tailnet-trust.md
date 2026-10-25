@@ -1,4 +1,4 @@
-# ADR 004: 控制台在 Tailnet 内免 admin token（可信对端只读放行）
+# ADR-004: 控制台在 Tailnet 内免 admin token（可信对端只读放行）
 
 **状态**: 已采纳
 **日期**: 2026-10-22
@@ -8,7 +8,7 @@
 · **NFR**: `.dev-team/nfr-baseline.json` 的 `tailnet_trust` 段
 · **决策记录**: `.agents/notes/implemented/architecture/2026-10-22-console-tailnet-trust.md`
 
-## 问题
+## 背景
 
 控制台（`GET /api/v1/issues*`、`/projects`、`/traces*` 与两处 PATCH）要求凭证：静态 `ADMIN_TOKEN`
 或用它换来的短期会话 Cookie。控制台只经 tailnet MagicDNS（`devserver.taildb165c.ts.net:3000`）访问，
@@ -44,7 +44,7 @@
 4. 非法 `CONSOLE_TAILNET_CIDRS`/`CONSOLE_TRUSTED_HOSTS` 不 panic：降级为信任关闭 + 回退默认网段 + 启动 WARN。
 5. 每次信任放行写结构化审计日志（`trust_decision`/`peer`/`host`），任何日志不含 token/cookie/csrf。
 
-## Alternatives considered
+## 理由
 
 - **保持现状（每次输 admin token）**：零新增风险，但把长期管理凭证的摩擦留给人，实际会导致 token 被
   贴在便签/命令历史里；本次诉求即消除该摩擦。否决。
@@ -60,7 +60,7 @@
   该环境可用 `CONSOLE_TAILNET_CIDRS` 显式收窄。否决，记录为后续可选加固。
 - **信任默认开启**：对其它部署会静默放宽鉴权（任何 100.64/10 来源即管理员读权限），安全默认不可接受。否决。
 
-## Consequences
+## 影响
 
 - **安全边界明确为「整个 tailnet 成员 + 任何能让流量落到本机 100.64/10 对端的路径」**：tailnet ACL、
   节点授权、`tailscale up` 的 key 分发成为控制台读权限的实际边界；读接口暴露全部错误事件与堆栈。
