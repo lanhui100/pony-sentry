@@ -18,7 +18,10 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use pony_sentry_core::{
-    models::{EvalStatus, IssueStatus, TraceFilter, TraceOrder, TraceRecord},
+    models::{
+        EvalStatus, IngestGovernanceQuery, IssueArchiveRequest, IssueStatsQuery, IssueStatus,
+        TraceFilter, TraceOrder, TraceRecord,
+    },
     repository::{IssueFilter, IssueRepository, NewEventRecord, TraceRepository},
 };
 use pony_sentry_ingest::{
@@ -876,6 +879,13 @@ pub fn create_app_with_options(
             patch(handle_update_issue).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/v1/issues/:id/events", get(handle_get_issue_events))
+        // issue 治理（契约 `.dev-team/contract-issue-governance.md` FROZEN v1）：
+        // 路由注册占位；handler 均为空桩，由 Wave-9 executor 落地业务体。
+        .route("/api/v1/issues/archive", post(handle_archive_issues))
+        .route("/api/v1/issues/:id/archive", post(handle_archive_issue))
+        .route("/api/v1/issues/:id/unarchive", post(handle_unarchive_issue))
+        .route("/api/v1/stats", get(handle_get_issue_stats))
+        .route("/api/v1/ingest/stats", get(handle_get_ingest_stats))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
@@ -1696,6 +1706,59 @@ async fn handle_get_issue_events(
         .map_err(|err| internal_error("get_events_for_issue", err))?;
 
     Ok(Json(events))
+}
+
+// ---------------------------------------------------------------------------
+// issue 治理 handler 空桩（契约 `.dev-team/contract-issue-governance.md` FROZEN v1）
+//
+// **仅签名骨架**：业务体一律 `unimplemented!("implemented by wave-9 executor")`。
+// 返回值用具体类型 `Response`（非 `impl IntoResponse`），以便空桩在类型层面自洽。
+// 参数校验（400 边界）、鉴权后处理、DB 调用均由 executor 在本区段实现。
+// ---------------------------------------------------------------------------
+
+/// `C2.3`：`POST /api/v1/issues/archive`（批量归档，body 见 [`IssueArchiveRequest`]）。
+#[allow(dead_code)]
+async fn handle_archive_issues(
+    State(_state): State<AppState>,
+    _payload: Result<Json<IssueArchiveRequest>, JsonRejection>,
+) -> Result<Response, (StatusCode, String)> {
+    unimplemented!("implemented by wave-9 executor")
+}
+
+/// `C2.3`：`POST /api/v1/issues/:id/archive`（单条归档，幂等）。
+#[allow(dead_code)]
+async fn handle_archive_issue(
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    unimplemented!("implemented by wave-9 executor")
+}
+
+/// `C2.3`：`POST /api/v1/issues/:id/unarchive`（单条恢复，幂等）。
+#[allow(dead_code)]
+async fn handle_unarchive_issue(
+    State(_state): State<AppState>,
+    Path(_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    unimplemented!("implemented by wave-9 executor")
+}
+
+/// `C5`：`GET /api/v1/stats`（query 见 [`IssueStatsQuery`]）。
+#[allow(dead_code)]
+async fn handle_get_issue_stats(
+    State(_state): State<AppState>,
+    Query(_query): Query<IssueStatsQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    unimplemented!("implemented by wave-9 executor")
+}
+
+/// `C6.1`：`GET /api/v1/ingest/stats`（query 见 [`IngestGovernanceQuery`]）。
+#[allow(dead_code)]
+async fn handle_get_ingest_stats(
+    State(_state): State<AppState>,
+    Query(_query): Query<IngestGovernanceQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    unimplemented!("implemented by wave-9 executor")
 }
 
 async fn handle_ingest_trace(

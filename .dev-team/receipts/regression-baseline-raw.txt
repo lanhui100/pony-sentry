@@ -1,0 +1,60 @@
+
+     Running tests/reindex_test.rs (target/debug/deps/reindex_test-60ebd4d350ef654e)
+
+running 1 test
+test test_reindex_fingerprints_end_to_end ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/trace_ingest_switch.rs (target/debug/deps/trace_ingest_switch-69f076a93434f90c)
+
+running 3 tests
+test disabled_switch_makes_four_trace_routes_410_and_skips_writes ... ok
+test disabled_switch_leaves_issue_ingest_healthz_and_metrics_untouched ... ok
+test default_switch_keeps_trace_routes_working ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/trust_unit.rs (target/debug/deps/trust_unit-476eee6d9993ff7c)
+
+running 11 tests
+test rt8_cidr_contains_ipv4_boundaries ... ok
+test rt8_cidr_contains_ipv6_ula_boundaries ... ok
+test rt5d_empty_allowlist_or_empty_cidrs_never_trusts ... ok
+test rt5_is_proxied_detects_header_presence_only ... ok
+test rt8_contract_decide_chain_returns_trusted ... ok
+test rt5b_trusted_host_matches_ignoring_case_and_port ... ok
+test rt8_decide_priority_matrix_is_frozen ... ok
+test rt8_default_trusted_cidrs_match_frozen_contract ... ok
+test rt8_invalid_cidr_returns_err_without_panicking ... ok
+test rt8_normalize_peer_maps_ipv4_mapped_ipv6 ... ok
+test rt8b_illegal_cidr_config_returns_err_without_panicking ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_fingerprint
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_ingest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `-p pony-sentry-server --test api_test`

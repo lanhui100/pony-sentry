@@ -1,0 +1,46 @@
+{
+  "wave": "wave-9-issue-governance",
+  "recorded_at": "2026-10-25T19:0x+08:00",
+  "purpose": "存量测试回归基线（实现改动前完整跑一遍；红相/绿相后逐项对照，'基线绿→现红'即判回归）",
+  "command": "cargo test --workspace --no-fail-fast（env: 不加载 /etc/pony-sentry/pony-sentry.env；PONY_TEST_PG_URL=<prod db url 去掉库名>/ponysentry_test）",
+  "receipt_file": ".dev-team/receipts/regression-baseline-clean.txt",
+  "exit_code": 0,
+  "totals": {
+    "cargo_exit": 0,
+    "failed": 0,
+    "suites_green": 22
+  },
+  "per_suite": [
+    {"suite": "pony_sentry_fingerprint lib", "passed": 47, "failed": 0},
+    {"suite": "pony_sentry_ingest lib", "passed": 4, "failed": 0},
+    {"suite": "pony_sentry_core lib", "passed": 2, "failed": 0},
+    {"suite": "core storage_test", "passed": 8, "failed": 0},
+    {"suite": "core pg_repository_test", "passed": 9, "failed": 0},
+    {"suite": "core trace_repository_test", "passed": 25, "failed": 0},
+    {"suite": "core trace_v2_repository_test", "passed": 12, "failed": 0},
+    {"suite": "core trace_v2_ext_test", "passed": 1, "failed": 0},
+    {"suite": "fingerprint hasher_test", "passed": 35, "failed": 0},
+    {"suite": "ingest sanitizer_test", "passed": 2, "failed": 0},
+    {"suite": "server reindex_test", "passed": 29, "failed": 0},
+    {"suite": "server trust_unit", "passed": 3, "failed": 0},
+    {"suite": "server api_test", "passed": 33, "failed": 0},
+    {"suite": "server session", "passed": 1, "failed": 0},
+    {"suite": "server trace_webhook", "passed": 1, "failed": 0},
+    {"suite": "server trace_ingest", "passed": 3, "failed": 0},
+    {"suite": "server trust", "passed": 11, "failed": 0}
+  ],
+  "excluded_from_baseline": {
+    "tests/（契约级黑盒包，不属于 workspace）": "改动后按 tests/README 单独运行，见红相锚定",
+    "pytest 套件（tests/test_dsh_dispatcher.py, tests/web/*, tests/deploy/*）": "本次改动不触碰 web/ 与 deploy/ 脚本；若后续动到再回归"
+  },
+  "env_hazard_recorded": "首次误用 prod env（含 PONY_TRACE_INGEST_ENABLED=0）跑基线导致 server api_test 24 条假红（410 trace_ingest_disabled）；已在 .dev-team/receipts/regression-baseline-full.txt 留证并以 clean env 重跑。教训：prod env 不得直接注入测试进程。",
+  "behaviour_snapshot_before_change": {
+    "GET /api/v1/issues (no project)": "bare JSON array, 50 items（全部项目，无 total 字段）",
+    "GET /api/v1/issues?project=pony-agent&status=unresolved": "bare array, 2 items",
+    "GET /api/v1/issues?project=pony-agent": "bare array, 11 items (ignored 7 / resolved 2 / unresolved 2)",
+    "GET /api/v1/issues/:id/events?limit=5": "bare array, 20 items（limit 被忽略）",
+    "GET /api/v1/stats": "404",
+    "GET /api/v1/events": "404",
+    "db": "111 issues / 1255 events（全库）；pony-agent 11 issues / sum(issues.count)=185 / events 行数=196"
+  }
+}

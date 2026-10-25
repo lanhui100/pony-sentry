@@ -1,9 +1,11 @@
 use crate::models::{
-    EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, TraceFilter, TraceRecord,
+    EvalStatus, Event, IngestGovernanceQuery, IngestGovernanceStats, IngestMetricOutcome, Issue,
+    IssueArchiveOutcome, IssueArchiveRequest, IssueEventsCursor, IssueEventsOrder, IssueStatsQuery,
+    IssueStatsResponse, IssueStatus, IssueStatusEnvironmentCount, TraceFilter, TraceRecord,
 };
 use crate::reindex::FingerprintOut;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
@@ -161,4 +163,107 @@ pub trait TraceRepository: Send + Sync {
         cutoff: DateTime<Utc>,
         batch_size: i64,
     ) -> Result<u64, RepositoryError>;
+}
+
+// ============================================================================
+// issue 治理读/写能力（契约：`.dev-team/contract-issue-governance.md` FROZEN v1）
+//
+// **纯空桩**：独立 trait，方法体一律 `unimplemented!("implemented by wave-9 executor")`。
+// 既有 `IssueRepository` / `TraceRepository` 的既有方法签名**不得修改**（会破坏 impl 编译）；
+// 新增能力全部落在这里，由 Wave-9 executor 在两种方言 repo 上 impl。
+// ============================================================================
+#[async_trait]
+pub trait IssueGovernanceRepository: Send + Sync {
+    /// `C3.3`：与 `list_issues` **同过滤条件**的总数（`X-Total-Count` / `envelope.total` 数据源），
+    /// 不受 `limit/offset` 影响（先例：`TraceRepository::count_traces`）。
+    async fn count_issues(&self, _filter: IssueFilter) -> Result<i64, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C2.3`：单条归档（置 `archived_at`）。已归档 → 幂等返回既有行（`archived_at` 不变）；
+    /// 不存在 → `RepositoryError::NotFound`（路由层映射 404）。
+    async fn archive_issue(
+        &self,
+        _id: &str,
+        _archived_at: DateTime<Utc>,
+    ) -> Result<Issue, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C2.3`：单条恢复（`archived_at = NULL`）。未归档 → 幂等返回既有行；不存在 → `NotFound`。
+    async fn unarchive_issue(&self, _id: &str) -> Result<Issue, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C2.3` / `C2.4`：批量归档，返回 `C2.4` 结构。
+    ///
+    /// `ids` 非空时只按 `ids` 处理（`statuses`/`project` 被忽略）；`dry_run=true` 只统计不改库
+    /// （`archived == 0`）。`now` 由调用方注入（便于测试确定性）。
+    async fn archive_issues(
+        &self,
+        _request: &IssueArchiveRequest,
+        _dry_run: bool,
+        _now: DateTime<Utc>,
+    ) -> Result<IssueArchiveOutcome, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C2.2`：自动 TTL 归档一轮——把 `status IN (statuses) AND archived_at IS NULL
+    /// AND last_seen_at < cutoff` 的行置为归档，返回本次归档行数。
+    ///
+    /// `statuses` 由调用方限定为 `["ignored","resolved"]`（`unresolved`/`in_progress`/`regression`
+    /// 永不自动归档）；本方法**不删**任何 events 行、不改 `status`/`count`。
+    async fn archive_stale_issues(
+        &self,
+        _cutoff: DateTime<Utc>,
+        _statuses: &[IssueStatus],
+    ) -> Result<u64, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C4.2`：keyset 事件分页（`ORDER BY created_at DESC, id DESC`，`Asc` 时升序）。
+    ///
+    /// `cursor` 为解码后的 [`IssueEventsCursor`]（首页为 `None`）；issue 不存在 → 空 Vec（非错误）。
+    async fn list_issue_events_page(
+        &self,
+        _issue_id: &str,
+        _limit: i64,
+        _cursor: Option<IssueEventsCursor>,
+        _order: IssueEventsOrder,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C4.4`：该 issue 的事件总行数（翻页不重不漏的断言基准）。
+    async fn count_events_for_issue(&self, _issue_id: &str) -> Result<i64, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C5`：`GET /api/v1/stats` 的全量统计聚合（issues 聚合口径 + events 聚合/行双口径 + series）。
+    async fn issue_stats(
+        &self,
+        _query: &IssueStatsQuery,
+    ) -> Result<IssueStatsResponse, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C6.1`：`GET /api/v1/ingest/stats` 的治理指标读取（读时把 `project=''` 映射为 `null`）。
+    async fn ingest_governance_stats(
+        &self,
+        _query: &IngestGovernanceQuery,
+    ) -> Result<IngestGovernanceStats, RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
+
+    /// `C6.2`：治理计数单事件 UPSERT（`bucket_date` = UTC 日期；无 project 维度传 `""`）。
+    ///
+    /// 失败只 `warn` 不阻断 ingest（`warn_only_no_ingest_impact`）：调用方不得 `?` 传播该错误。
+    async fn record_ingest_metric(
+        &self,
+        _bucket_date: NaiveDate,
+        _project: &str,
+        _outcome: IngestMetricOutcome,
+    ) -> Result<(), RepositoryError> {
+        unimplemented!("implemented by wave-9 executor")
+    }
 }

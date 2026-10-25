@@ -1,0 +1,719 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_core-7667840b8c69623c)
+
+running 47 tests
+test models::tests::trace_filter_new_dimensions_default_to_none ... ok
+test models::tests::trace_record_serde_defaults_keep_legacy_rows_decodable ... ok
+test models::tests::trace_record_serializes_new_columns ... ok
+test reindex::tests::preserves_first_seen_from_earliest_event ... ok
+test reindex::tests::keeps_unparseable_events_and_their_issue ... ok
+test reindex::tests::merges_issues_with_same_new_fingerprint_and_deletes_originals ... ok
+test reindex::tests::reuses_issue_when_one_to_one_mapping ... ok
+test reindex::tests::splits_issue_when_events_map_to_different_groups ... ok
+test trace_merge::tests::merge_without_turn_id_aligns_by_content_hash ... ok
+test trace_merge::tests::new_payload_without_turns_keeps_old_turns ... ok
+test trace_merge::tests::totals_are_recomputed_from_turns_and_eval_status_is_stripped ... ok
+test trace_merge::tests::old_payload_without_turns_takes_new ... ok
+test trace_merge::tests::same_turn_id_is_merged_not_duplicated_and_new_ids_are_appended ... ok
+test trace_v2::tests::c2_1_late_terminal_status_advances_between_terminal_states ... ok
+test trace_v2::tests::c2_1_non_terminal_report_never_regresses_terminal_status ... ok
+test trace_v2::tests::c2_1_terminal_status_overrides_and_keeps_late_error ... ok
+test trace_v2::tests::c2_2_field_level_merge_skips_null_and_empty_values ... ok
+test trace_v2::tests::c2_1_terminal_to_success_clears_legacy_error_residue ... ok
+test trace_v2::tests::c2_3_tool_calls_merge_by_id_and_append_new_ids ... ok
+test trace_v2::tests::c2_4_diagnostics_union_survives_merge ... ok
+test trace_v2::tests::c2_5_missing_status_never_erases_known_status ... ok
+test trace_v2::tests::c2_aggregate_sorts_turns_by_seq_and_passes_session_id_source ... ok
+test trace_v2::tests::c2_aggregate_sums_turns_and_ignores_client_totals ... ok
+test trace_v2::tests::c2_top_level_extra_and_tags_deep_merge_and_eval_status_removed ... ok
+test trace_v2::tests::c2_2_step_deeper_json_object_is_deep_merged ... ok
+test trace_v2::tests::c2_3_tool_calls_without_id_merge_by_name_and_arguments ... ok
+test trace_v2::tests::c2_3_empty_or_missing_tool_calls_keep_existing ... ok
+test trace_v2::tests::c2_aggregate_totals_are_null_without_any_turn_field ... ok
+test trace_v2::tests::c2_totals_use_checked_add_and_flag_stats_incomplete ... ok
+test trace_v2::tests::c4_error_contract_missing_for_terminal_status_without_error_details ... ok
+test trace_v2::tests::c4_error_contract_not_raised_when_error_or_tool_error_reported ... ok
+test trace_v2::tests::c4_status_conflict_when_success_output_hits_failure_marker ... ok
+test trace_v2::tests::c4_error_missing_when_tool_call_error_has_no_details ... ok
+test trace_v2::tests::i02_normalize_incoming_turns_drops_invalid_and_collects_warnings ... ok
+test trace_v2::tests::merge_top_level_keeps_old_only_scalars_and_strips_eval_status ... ok
+test trace_v2::tests::normalize_incoming_turn_keeps_non_object_payloads ... ok
+test trace_v2::tests::session_id_source_follows_payload_or_falls_back_to_thread_id ... ok
+test trace_v2::tests::terminal_set_matches_contract_and_ignores_case ... ok
+test trace_v2::tests::v15_merge_lost_total_counts_old_terminal_overriding_new_value ... ok
+test trace_v2::tests::turn_key_prefers_explicit_id_and_hashes_missing_id_deterministically ... ok
+test trace_v2::tests::turn_keys_for_keeps_explicit_ids_and_dedupes_content_collisions ... ok
+test trace_v2::tests::e5_client_preset_truncated_is_ignored_and_recomputed ... ok
+test trace_v2::tests::i06_tool_call_text_is_truncated_at_limit_and_flagged ... ok
+test sqlite_repository::tests::environment_scopes_issue_rows ... ok
+test sqlite_repository::tests::duplicate_event_key_does_not_advance_issue ... ok
+test sqlite_repository::tests::migrate_is_idempotent_three_times ... ok
+test trace_v2::tests::e8_llm_calls_are_capped_and_whitelisted ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/pg_repository_test.rs (target/debug/deps/pg_repository_test-df6d435d040f0214)
+
+running 4 tests
+test event_payload_roundtrip_on_pg ... ok
+test duplicate_event_key_is_idempotent_on_pg ... ok
+test trace_payload_roundtrip_on_pg ... ok
+test environment_scopes_issues_on_pg ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_test.rs (target/debug/deps/storage_test-ac79d078f140f343)
+
+running 2 tests
+test test_project_dimension_persists_and_filters ... ok
+test test_issue_lifecycle_and_regression_flow ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/trace_repository_test.rs (target/debug/deps/trace_repository_test-751b0ccb7bf68c3e)
+
+running 8 tests
+test test_trace_eval_status_state_machine_roundtrip ... ok
+test test_trace_record_serialization_contract ... ok
+test test_trace_repository_contract_and_lifecycle ... ok
+test test_trace_incremental_merge_upsert_dedup ... ok
+test test_trace_filter_by_project ... ok
+test test_trace_upsert_on_same_session_id ... ok
+test test_migrate_upgrades_existing_traces_table_with_project_column ... ok
+test test_trace_not_found_and_adversarial_payload ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/trace_v2_ext_test.rs (target/debug/deps/trace_v2_ext_test-f801b08cedb4cfd8)
+
+running 9 tests
+test pg::i04_pg_count_and_order_by ... ok
+test pg::e7_pg_0006_down_migration_roundtrip ... ok
+test pg::w04_pg_run_id_filter_and_0006_schema ... ok
+test w04_turn_run_id_column_and_filter_matches_turn_or_trace ... ok
+test i02_invalid_turns_are_dropped_and_warnings_persisted ... ok
+test i06_long_tool_call_text_is_truncated_persisted_with_flag ... ok
+test e3_warnings_union_keeps_old_and_new_indices ... ok
+test i04_count_traces_matches_filter_and_order_by_switches ... ok
+test e6_sqlite_0006_index_self_heals_and_run_id_backfills ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/trace_v2_repository_test.rs (target/debug/deps/trace_v2_repository_test-27cfacc1266ba61f)
+
+running 25 tests
+test pg::v2_pg_schema_ensure_is_idempotent_and_restart_light ... ok
+test pg::v2_pg_backfill_generates_runtime_keys_for_missing_turn_ids ... ok
+test pg::v2_pg_migration_backfills_legacy_payload ... ok
+test pg::v2_pg_retention_never_deletes_turns_of_surviving_sessions ... ok
+test pg::v2_pg_terminal_merge_and_concurrency ... ok
+test pg::v2_pg_retention_and_ingest_interleaving_stays_consistent ... ok
+test v2_thread_id_fallback_marks_session_id_source ... ok
+test v2_legacy_payload_is_hydrated_on_next_ingest ... ok
+test v2_new_turn_is_appended_with_monotonic_seq ... ok
+test v2_hydration_fills_when_coverage_is_partial ... ok
+test v2_list_supports_run_id_turn_status_and_time_window ... ok
+test v2_diagnostics_are_generated_by_server ... ok
+test v2_note_patch_persists_and_survives_reingest ... ok
+test v2_terminal_status_wins_and_tool_calls_merge_by_id ... ok
+test v2_retention_judges_by_updated_at ... ok
+test v2_retention_never_deletes_turns_of_surviving_sessions ... ok
+test v2_migration_backfills_trace_turns_from_legacy_payload ... ok
+test v2_backfill_missing_turn_ids_use_runtime_sha256_keys ... ok
+test v2_backfill_does_not_collapse_identical_legacy_turns ... ok
+test v2_migration_twice_keeps_turn_store_stable ... ok
+test v2_totals_are_null_when_no_turn_carries_token_fields ... ok
+test v2_totals_overflow_marks_stats_incomplete_instead_of_panicking ... ok
+test v2_totals_sum_turns_and_top_level_fields_merge ... ok
+test v2_concurrent_ingest_loses_no_turn_on_sqlite ... ok
+test v2_sqlite_retention_and_ingest_interleaving_stays_consistent ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_fingerprint-4fc98949f58a7e15)
+
+running 12 tests
+test hasher::tests::v2_different_file_changes_fingerprint ... ok
+test hasher::tests::v2_discriminator_participates_even_with_culprit ... ok
+test hasher::tests::v2_error_kind_differentiates_failure_reasons ... ok
+test hasher::tests::v2_line_number_noise_does_not_change_fingerprint ... ok
+test hasher::tests::v2_missing_optional_components_stable ... ok
+test hasher::tests::v2_platform_case_insensitive ... ok
+test hasher::tests::v2_provider_prefix_model_alias_converges ... ok
+test hasher::tests::v2_rate_limit_debug_format_converges_to_variant_name ... ok
+test hasher::tests::v3_environment_case_and_space_insensitive ... ok
+test hasher::tests::v3_environment_scopes_fingerprint ... ok
+test hasher::tests::v3_skips_missing_optional_components_like_v2 ... ok
+test hasher::tests::v3_missing_environment_normalizes_to_unknown ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hasher_test.rs (target/debug/deps/hasher_test-5c064349fc8b57d6)
+
+running 1 test
+test test_fingerprint_stability ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_ingest-557f33b37c28735e)
+
+running 35 tests
+test fingerprint::tests::missing_environment_falls_back_to_unknown ... ok
+test fingerprint::tests::environment_scopes_fingerprint ... ok
+test fingerprint::tests::model_alias_converges ... ok
+test fingerprint::tests::rate_limit_debug_format_converges ... ok
+test fingerprint::tests::error_kind_and_model_always_participate ... ok
+test fingerprint::tests::synthesizes_culprit_from_command_or_endpoint_when_stacktrace_absent ... ok
+test fingerprint::tests::synthesizes_culprit_from_title_when_no_tags_available ... ok
+test fingerprint::tests::title_and_project_surfaced ... ok
+test parser::tests::frame_array_shape_is_preserved ... ok
+test fingerprint::tests::top_level_error_type_wins_over_exception ... ok
+test project::tests::does_not_blindly_infer_project_from_tauri_or_ipc_without_explicit_project ... ok
+test project::tests::extracts_explicit_project_or_project_name ... ok
+test project::tests::infers_project_from_service_or_app_synonyms ... ok
+test project::tests::handles_trailing_separators_and_windows_paths ... ok
+test project::tests::extracts_basename_of_posix_workspace ... ok
+test validate::tests::dimensions_trim_and_truncate ... ok
+test project::tests::infers_ponyllm_from_stream_failure_error ... ok
+test validate::tests::event_id_rejects_overlong_and_non_graphic ... ok
+test validate::tests::extra_over_limit_is_replaced ... ok
+test project::tests::survives_sanitization_masking_the_home_prefix ... ok
+test project::tests::returns_none_when_workspace_is_absent_or_degenerate ... ok
+test validate::tests::grafana_url_scheme_whitelist ... ok
+test validate::tests::loki_query_structure ... ok
+test validate::tests::timestamp_requires_rfc3339 ... ok
+test validate::tests::level_defaults_to_error_and_degrades_invalid ... ok
+test validate::tests::tags_truncated_deterministically ... ok
+test parser::tests::parses_colon_in_form ... ok
+test parser::tests::unparsable_text_yields_no_frame_without_error ... ok
+test parser::tests::string_stacktrace_becomes_extra_text_and_single_frame ... ok
+test fingerprint::tests::string_stacktrace_normalized_before_fingerprint ... ok
+test parser::tests::parses_python_traceback_form ... ok
+test sanitizer::tests::m04_token_metrics_are_not_redacted ... ok
+test sanitizer::tests::e1_quoted_values_close_on_same_quote_only ... ok
+test sanitizer::tests::m04_redacts_five_secret_spellings ... ok
+test sanitizer::tests::m04_sanitize_trace_value_counts_secrets_and_paths ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/sanitizer_test.rs (target/debug/deps/sanitizer_test-b38071734afbf847)
+
+running 2 tests
+test test_string_stacktrace_is_sanitized ... ok
+test test_deep_zero_trust_sanitization ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running unittests src/lib.rs (target/debug/deps/pony_sentry_server-5e3c71398bc6f376)
+
+running 29 tests
+test routes::tests::admin_auth_requires_token_when_only_client_token_configured ... ok
+test routes::tests::admin_auth_prefers_admin_token_and_falls_back_to_client_token ... ok
+test routes::tests::metrics_label_values_are_escaped ... ok
+test routes::tests::derived_error_type_falls_back_to_exception ... ok
+test routes::tests::token_match_requires_exact_value ... ok
+test routes::tests::write_auth_allows_when_no_token_configured ... ok
+test routes::tests::derived_error_type_prefers_top_level_field ... ok
+test session::tests::cookie_has_http_only_same_site_and_secure_flag_when_configured ... ok
+test session::tests::login_rate_limit_locks_after_five_failures ... ok
+test session::tests::malformed_session_token_is_rejected ... ok
+test session::tests::session_roundtrip_and_logout ... ok
+test trace_ingest::tests::empty_or_blank_values_keep_ingest_enabled ... ok
+test trace_ingest::tests::disabled_response_is_410_with_fixed_body ... ok
+test trace_ingest::tests::off_values_disable_ingest ... ok
+test trace_ingest::tests::unknown_values_keep_ingest_enabled ... ok
+test trace_ingest::tests::unset_env_keeps_ingest_enabled ... ok
+test trace_webhook::tests::dedupe_key_parts_are_normalized_and_truncated ... ok
+test trace_webhook::tests::dedupe_window_suppresses_repeats_and_expires ... ok
+test trace_webhook::tests::only_failure_terminal_states_are_notifiable ... ok
+test session::tests::eviction_drops_oldest_trusted_peer_and_keeps_manual_sessions ... ok
+test session::tests::eviction_falls_back_to_oldest_session_when_no_trusted_peer_exists ... ok
+test trace_webhook::tests::disabled_without_url_and_empty_string_counts_as_disabled ... ok
+test trust::tests::is_proxied_detects_forwarded_header ... ok
+test trust::tests::empty_cidr_override_degrades_to_disabled_without_panicking ... ok
+test trace_webhook::tests::url_digest_never_exposes_path_or_query ... ok
+test trace_webhook::tests::entries_cap_evicts_oldest_and_keeps_recent_dedupe ... ok
+test session::tests::expired_session_is_rejected ... ok
+test trace_webhook::tests::bytes_cap_evicts_oldest_and_never_clears_table ... ok
+test trace_webhook::tests::concurrent_claims_keep_table_bounded ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running unittests src/main.rs (target/debug/deps/pony_sentry_server-eb1d938ea23a8cb2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/adversarial_tailnet_trust.rs (target/debug/deps/adversarial_tailnet_trust-1b4601937390c7d9)
+
+running 3 tests
+test adversarial_malformed_hosts_and_oversized_inputs_keep_process_alive ... ok
+test adversarial_proxy_headers_never_bypass_trust_gate ... ok
+test adversarial_concurrent_trusted_reads_are_deterministic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/api_test.rs (target/debug/deps/api_test-f7e40b801f6034b6)
+
+running 33 tests
+test test_ingest_unknown_fields_go_to_payload_unmapped ... FAILED
+test test_ingest_ignores_client_eval_status ... FAILED
+test test_patch_rejections_are_bad_request_without_enum_echo ... FAILED
+test test_ingest_injects_redaction_counts ... FAILED
+test test_ingest_normalizes_turns_and_records_warnings ... FAILED
+test test_list_order_summary_projection_and_total_count ... FAILED
+test test_ingest_rejects_reported_at_out_of_range ... FAILED
+test test_metrics_payload_bytes_help_describes_upload_volume ... FAILED
+test test_metrics_expose_extended_v15_counters ... FAILED
+test test_metrics_requires_bearer_or_metrics_token_when_configured ... FAILED
+test test_trace_metrics_series_are_capped_to_512_with_overflow ... FAILED
+test test_trace_ingest_response_matches_persisted_row ... FAILED
+test test_trace_ingest_malformed_body_is_400_without_db_leak ... FAILED
+test test_trace_metrics_expose_four_counters_and_grow ... FAILED
+test test_trace_metrics_labels_are_normalized_and_bounded ... FAILED
+test test_metrics_stays_anonymous_when_token_not_configured ... ok
+test test_trace_query_params_reject_invalid_without_db_leak ... FAILED
+test test_trace_note_patch_persists_and_survives_reingest ... FAILED
+test test_ingest_requires_client_token_when_configured ... ok
+test test_sql_injection_is_safely_parametrized ... ok
+test test_console_session_login_cookie_csrf_and_logout ... ok
+test test_traces_api_project_filter_and_aggregation ... FAILED
+test test_trace_webhook_notifies_failures_with_ten_minute_dedupe ... FAILED
+test test_project_path_is_surfaced_and_filterable ... ok
+test test_ingest_and_agent_api_flow ... ok
+test test_traces_server_side_sanitization ... FAILED
+test test_traces_ingest_supports_langgraph_thread_id_and_upsert ... FAILED
+test test_ingest_contract_diagnostics_and_synonym_resolution ... ok
+test test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped ... FAILED
+test test_traces_large_payload_limit_2mb ... FAILED
+test test_webhook_anti_avalanche_on_regression ... ok
+test test_issue_endpoints_hide_db_error_text ... ok
+test test_trace_endpoints_hide_db_error_text ... FAILED
+
+failures:
+
+---- test_ingest_unknown_fields_go_to_payload_unmapped stdout ----
+
+thread 'test_ingest_unknown_fields_go_to_payload_unmapped' (1219237) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_ingest_ignores_client_eval_status stdout ----
+
+thread 'test_ingest_ignores_client_eval_status' (1219232) panicked at crates/server/tests/api_test.rs:1692:13:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_patch_rejections_are_bad_request_without_enum_echo stdout ----
+
+thread 'test_patch_rejections_are_bad_request_without_enum_echo' (1219256) panicked at crates/server/tests/api_test.rs:1619:10:
+POST 必须返回 id
+
+---- test_ingest_injects_redaction_counts stdout ----
+
+thread 'test_ingest_injects_redaction_counts' (1219233) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_ingest_normalizes_turns_and_records_warnings stdout ----
+
+thread 'test_ingest_normalizes_turns_and_records_warnings' (1219234) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_list_order_summary_projection_and_total_count stdout ----
+
+thread 'test_list_order_summary_projection_and_total_count' (1219242) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_ingest_rejects_reported_at_out_of_range stdout ----
+
+thread 'test_ingest_rejects_reported_at_out_of_range' (1219235) panicked at crates/server/tests/api_test.rs:2014:13:
+assertion failed: `(left == right)`: Expected status code to be 400 (Bad Request), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<4[0m[1;48;5;52;31m0[0m[31m0[0m
+[32m>4[0m[1;48;5;22;32m1[0m[32m0[0m
+
+
+
+---- test_metrics_payload_bytes_help_describes_upload_volume stdout ----
+
+thread 'test_metrics_payload_bytes_help_describes_upload_volume' (1219251) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_metrics_expose_extended_v15_counters stdout ----
+
+thread 'test_metrics_expose_extended_v15_counters' (1219250) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_metrics_requires_bearer_or_metrics_token_when_configured stdout ----
+
+thread 'test_metrics_requires_bearer_or_metrics_token_when_configured' (1219253) panicked at crates/server/tests/api_test.rs:1836:10:
+assertion failed: `(left == right)`: Expected status code to be 200 (OK), received 410 (Gone), for request GET http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m0[0m
+[32m>[0m[1;48;5;22;32m41[0m[32m0[0m
+
+
+
+---- test_trace_metrics_series_are_capped_to_512_with_overflow stdout ----
+
+thread 'test_trace_metrics_series_are_capped_to_512_with_overflow' (1219378) panicked at crates/server/tests/api_test.rs:1589:14:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_ingest_response_matches_persisted_row stdout ----
+
+thread 'test_trace_ingest_response_matches_persisted_row' (1219365) panicked at crates/server/tests/api_test.rs:1268:13:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_ingest_malformed_body_is_400_without_db_leak stdout ----
+
+thread 'test_trace_ingest_malformed_body_is_400_without_db_leak' (1219361) panicked at crates/server/tests/api_test.rs:1330:10:
+assertion failed: `(left == right)`: Expected status code to be 400 (Bad Request), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<4[0m[1;48;5;52;31m0[0m[31m0[0m
+[32m>4[0m[1;48;5;22;32m1[0m[32m0[0m
+
+
+
+---- test_trace_metrics_expose_four_counters_and_grow stdout ----
+
+thread 'test_trace_metrics_expose_four_counters_and_grow' (1219366) panicked at crates/server/tests/api_test.rs:1137:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_metrics_labels_are_normalized_and_bounded stdout ----
+
+thread 'test_trace_metrics_labels_are_normalized_and_bounded' (1219374) panicked at crates/server/tests/api_test.rs:1534:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_query_params_reject_invalid_without_db_leak stdout ----
+
+thread 'test_trace_query_params_reject_invalid_without_db_leak' (1219393) panicked at crates/server/tests/api_test.rs:1048:14:
+assertion failed: `(left == right)`: Expected status code to be 400 (Bad Request), received 410 (Gone), for request GET http://localhost/api/v1/traces?limit=-5, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<4[0m[1;48;5;52;31m0[0m[31m0[0m
+[32m>4[0m[1;48;5;22;32m1[0m[32m0[0m
+
+
+
+---- test_trace_note_patch_persists_and_survives_reingest stdout ----
+
+thread 'test_trace_note_patch_persists_and_survives_reingest' (1219391) panicked at crates/server/tests/api_test.rs:1192:13:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_traces_api_project_filter_and_aggregation stdout ----
+
+thread 'test_traces_api_project_filter_and_aggregation' (1219445) panicked at crates/server/tests/api_test.rs:561:17:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_webhook_notifies_failures_with_ten_minute_dedupe stdout ----
+
+thread 'test_trace_webhook_notifies_failures_with_ten_minute_dedupe' (1219442) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_traces_server_side_sanitization stdout ----
+
+thread 'test_traces_server_side_sanitization' (1219456) panicked at crates/server/tests/api_test.rs:652:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_traces_ingest_supports_langgraph_thread_id_and_upsert stdout ----
+
+thread 'test_traces_ingest_supports_langgraph_thread_id_and_upsert' (1219447) panicked at crates/server/tests/api_test.rs:360:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped stdout ----
+
+thread 'test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped' (1219459) panicked at crates/server/tests/api_test.rs:1865:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_traces_large_payload_limit_2mb stdout ----
+
+thread 'test_traces_large_payload_limit_2mb' (1219453) panicked at crates/server/tests/api_test.rs:748:10:
+assertion failed: `(left == right)`: Expected status code to be 201 (Created), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m20[0m[31m1[0m
+[32m>[0m[1;48;5;22;32m4[0m[32m1[0m[1;48;5;22;32m0[0m
+
+
+
+---- test_trace_endpoints_hide_db_error_text stdout ----
+
+thread 'test_trace_endpoints_hide_db_error_text' (1219357) panicked at crates/server/tests/api_test.rs:1496:12:
+assertion failed: `(left == right)`: Expected status code to be 500 (Internal Server Error), received 410 (Gone), for request POST http://localhost/api/v1/traces, with body {
+  "error": "trace_ingest_disabled",
+  "message": "tracing moved to tempo+langfuse"
+}
+
+[1mDiff[0m [31m< left[0m / [32mright >[0m :
+[31m<[0m[1;48;5;52;31m50[0m[31m0[0m
+[32m>[0m[1;48;5;22;32m41[0m[32m0[0m
+
+
+
+
+failures:
+    test_ingest_ignores_client_eval_status
+    test_ingest_injects_redaction_counts
+    test_ingest_normalizes_turns_and_records_warnings
+    test_ingest_rejects_reported_at_out_of_range
+    test_ingest_unknown_fields_go_to_payload_unmapped
+    test_list_order_summary_projection_and_total_count
+    test_metrics_expose_extended_v15_counters
+    test_metrics_payload_bytes_help_describes_upload_volume
+    test_metrics_requires_bearer_or_metrics_token_when_configured
+    test_patch_rejections_are_bad_request_without_enum_echo
+    test_trace_endpoints_hide_db_error_text
+    test_trace_ingest_malformed_body_is_400_without_db_leak
+    test_trace_ingest_response_matches_persisted_row
+    test_trace_metrics_expose_four_counters_and_grow
+    test_trace_metrics_labels_are_normalized_and_bounded
+    test_trace_metrics_series_are_capped_to_512_with_overflow
+    test_trace_note_patch_persists_and_survives_reingest
+    test_trace_query_params_reject_invalid_without_db_leak
+    test_trace_webhook_notifies_failures_with_ten_minute_dedupe
+    test_traces_api_project_filter_and_aggregation
+    test_traces_ingest_supports_langgraph_thread_id_and_upsert
+    test_traces_large_payload_limit_2mb
+    test_traces_server_side_sanitization
+    test_unknown_keys_kept_except_reserved_and_nested_reserved_stripped
+
+test result: FAILED. 9 passed; 24 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+error: test failed, to rerun pass `-p pony-sentry-server --test api_test`
+     Running tests/pg_api_duplicate_test.rs (target/debug/deps/pg_api_duplicate_test-04d7646b6257e644)
+
+running 1 test
+test duplicate_event_id_is_200_on_pg_without_panic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reindex_test.rs (target/debug/deps/reindex_test-60ebd4d350ef654e)
+
+running 1 test
+test test_reindex_fingerprints_end_to_end ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/trace_ingest_switch.rs (target/debug/deps/trace_ingest_switch-69f076a93434f90c)
+
+running 3 tests
+test disabled_switch_makes_four_trace_routes_410_and_skips_writes ... ok
+test disabled_switch_leaves_issue_ingest_healthz_and_metrics_untouched ... ok
+test default_switch_keeps_trace_routes_working ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/trust_unit.rs (target/debug/deps/trust_unit-476eee6d9993ff7c)
+
+running 11 tests
+test rt5_is_proxied_detects_header_presence_only ... ok
+test rt5d_empty_allowlist_or_empty_cidrs_never_trusts ... ok
+test rt5b_trusted_host_matches_ignoring_case_and_port ... ok
+test rt8_cidr_contains_ipv6_ula_boundaries ... ok
+test rt8_cidr_contains_ipv4_boundaries ... ok
+test rt8_contract_decide_chain_returns_trusted ... ok
+test rt8_decide_priority_matrix_is_frozen ... ok
+test rt8_default_trusted_cidrs_match_frozen_contract ... ok
+test rt8_invalid_cidr_returns_err_without_panicking ... ok
+test rt8_normalize_peer_maps_ipv4_mapped_ipv6 ... ok
+test rt8b_illegal_cidr_config_returns_err_without_panicking ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_fingerprint
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_ingest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pony_sentry_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `-p pony-sentry-server --test api_test`

@@ -58,5 +58,24 @@
   "trace_write_tx_timeout_ms": 3000,
   "trace_lock_timeout_ms": 2000,
   "trace_list_limit_max": 100,
-  "trace_retention_use_updated_at": true
+  "trace_retention_use_updated_at": true,
+  "issue_archive": {
+    "contract": ".dev-team/contract-issue-governance.md",
+    "enabled_env": "PONY_ISSUE_ARCHIVE_ENABLED",
+    "ttl_secs_env": "PONY_ISSUE_ARCHIVE_TTL_SECS",
+    "ttl_days_env": "PONY_ISSUE_ARCHIVE_TTL_DAYS",
+    "interval_secs_env": "PONY_ISSUE_ARCHIVE_INTERVAL_SECS",
+    "default_ttl_days": 30,
+    "min_interval_secs": 1,
+    "default_interval_secs": 3600,
+    "production_recommended_interval_secs": 3600,
+    "auto_archive_statuses": ["ignored", "resolved"],
+    "never_auto_archive_statuses": ["unresolved", "in_progress", "regression"],
+    "non_blocking": true,
+    "failure_policy": "warn_only"
+  },
+  "issue_events_page_limit_max": 100,
+  "issue_list_limit_max": 100,
+  "ingest_metrics_failure_policy": "warn_only_no_ingest_impact",
+  "stats_series_max_points": 744
 }
