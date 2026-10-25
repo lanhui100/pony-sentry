@@ -19,10 +19,14 @@ use axum::{
 use chrono::{DateTime, Utc};
 use pony_sentry_core::{
     models::{
-        EvalStatus, IngestGovernanceQuery, IssueArchiveRequest, IssueStatsQuery, IssueStatus,
-        TraceFilter, TraceOrder, TraceRecord,
+        EvalStatus, Event, IngestGovernanceQuery, IngestGovernanceTotals, IngestMetricOutcome,
+        Issue, IssueArchiveMode, IssueArchiveRequest, IssueEventsCursor, IssueEventsEnvelope,
+        IssueEventsOrder, IssueEventsQuery, IssueListEnvelope, IssueListFiltersEcho, IssueStatsQuery,
+        IssueStatus, StatsBucket, TraceFilter, TraceOrder, TraceRecord,
     },
-    repository::{IssueFilter, IssueRepository, NewEventRecord, TraceRepository},
+    repository::{
+        IssueFilter, IssueRepository, NewEventRecord, RepositoryError, TraceRepository,
+    },
 };
 use pony_sentry_ingest::{
     compute_issue_fingerprint, guard_extra, infer_project_name, normalize_dimension,
@@ -647,8 +651,20 @@ pub struct IssueQuery {
     pub environment: Option<String>,
     /// 等级维度筛选 `fatal|error|warning|info`。
     pub level: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
+    /// 十进制整数；空串视同缺省，非整数/负数由 handler 判 400（`C3.2`）。
+    pub limit: Option<String>,
+    /// 同上。
+    pub offset: Option<String>,
+    /// `C3.2`：归档三态过滤 `exclude|include|only`（缺省 `exclude`；其他值 → 400）。
+    pub archived: Option<String>,
+    /// `C3.4`：`1` 返回信封对象（缺省/`0` 返回裸数组；其他值 → 400）。
+    pub envelope: Option<String>,
+}
+
+/// `C2.3`：批量归档的查询串接缝（`?dry_run=1`，与请求体同义；请求体优先）。
+#[derive(Debug, Deserialize)]
+pub struct IssueArchiveQuery {
+    pub dry_run: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1322,17 +1338,49 @@ async fn handle_metrics(
 async fn handle_ingest(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<IngestPayload>,
-) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    payload: Result<Json<IngestPayload>, JsonRejection>,
+) -> Result<Response, Response> {
     // 1. 写入侧鉴权：未配置 token 时沿用既有放行语义（契约 R10.1 收窄版）
     if state.check_write_auth(&headers) == AuthOutcome::Unauthorized {
-        return Err(unauthorized());
+        return Err(unauthorized().into_response());
     }
 
+    // 1b. 治理计数旁路（`C6.2`）：通过鉴权立即 `received +1`（project 取本次解析值，缺 `""`）。
+    //     计数失败/超时只 `warn!`，绝不改变 ingest 的响应体与状态码。
+    let received_project = match payload.as_ref() {
+        Ok(Json(body)) => {
+            infer_project_name(body.tags.as_ref(), body.extra.as_ref(), None, None).unwrap_or_default()
+        }
+        Err(_) => String::new(),
+    };
+    record_ingest_metric_side_channel(&state, &received_project, IngestMetricOutcome::Received).await;
+
+    // 1c. 请求体不合法导致的 400 / 413 记 `rejected_invalid`（401/410/5xx 不计数）。
+    //     响应仍沿用 axum `JsonRejection` 的既有状态码与体（`C7.1` 零变更：体/码都不改）。
+    let payload = match payload {
+        Ok(Json(payload)) => payload,
+        Err(rejection) => {
+            let status = rejection.status();
+            if matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+            ) {
+                record_ingest_metric_side_channel(
+                    &state,
+                    "",
+                    IngestMetricOutcome::RejectedInvalid,
+                )
+                .await;
+            }
+            return Err(rejection.into_response());
+        }
+    };
+
     // 2. 严格校验：会破坏幂等语义/时间可信度的字段直接 422（契约 R2.3 / R4）
-    let event_key = validate_event_id(payload.event_id).map_err(|e| invalid_field(e.field))?;
-    let occurred_at =
-        parse_timestamp(payload.timestamp.as_deref()).map_err(|e| invalid_field(e.field))?;
+    let event_key =
+        validate_event_id(payload.event_id).map_err(|e| invalid_field(e.field).into_response())?;
+    let occurred_at = parse_timestamp(payload.timestamp.as_deref())
+        .map_err(|e| invalid_field(e.field).into_response())?;
 
     // 3. 归一：等级降级、维度截断、URL/查询结构校验（契约 R2 / R2.5）
     let mut warnings: Vec<String> = Vec::new();
@@ -1436,7 +1484,7 @@ async fn handle_ingest(
     );
 
     let payload_json = serde_json::to_value(&sanitized)
-        .map_err(|e| persistence_error(format!("serialize sanitized event: {e}")))?;
+        .map_err(|e| persistence_error(format!("serialize sanitized event: {e}")).into_response())?;
 
     // 8. 持久化与幂等（契约 R4）
     let res = state
@@ -1459,7 +1507,7 @@ async fn handle_ingest(
             occurred_at,
         })
         .await
-        .map_err(persistence_error)?;
+        .map_err(|err| persistence_error(err).into_response())?;
 
     let issue = res.issue;
     let event = res.event;
@@ -1481,6 +1529,26 @@ async fn handle_ingest(
         state.metrics.record_duplicate();
     } else {
         state.metrics.record_created();
+    }
+
+    // 9b. 治理计数旁路（`C6.2`）：写入成功后按幂等结果记 `created` / `duplicate`；
+    //     若本次写入后的 issue 仍为 `ignored`，再额外记 `suppressed_ignored`（accepted 的子集）。
+    //     全部只 `warn!` 不阻断，绝不改变响应体/状态码。
+    let metric_project = project.clone().unwrap_or_default();
+    if res.is_duplicate {
+        record_ingest_metric_side_channel(&state, &metric_project, IngestMetricOutcome::Duplicate)
+            .await;
+    } else {
+        record_ingest_metric_side_channel(&state, &metric_project, IngestMetricOutcome::Created)
+            .await;
+        if issue.status == IssueStatus::Ignored {
+            record_ingest_metric_side_channel(
+                &state,
+                &metric_project,
+                IngestMetricOutcome::SuppressedIgnored,
+            )
+            .await;
+        }
     }
 
     info!(
@@ -1566,29 +1634,484 @@ async fn handle_ingest(
     Ok((status_code, Json(response)).into_response())
 }
 
+// ---------------------------------------------------------------------------
+// issue 治理公共件（契约 `.dev-team/contract-issue-governance.md` FROZEN v1.2）
+//
+// 口径单一真相：400 文案逐处引用契约表内串；5xx 一律走既有 `internal_error()`
+//（固定体 `Internal error`，DB 原文只进日志）。响应头名全部小写，值为 ASCII。
+// ---------------------------------------------------------------------------
+
+/// `C3.2`：列表 `limit` 缺省值（`0` → 1、`>100` → 100 由 clamp 保证）。
+const ISSUE_LIST_DEFAULT_LIMIT: i64 = 50;
+/// `C4.1`：事件分页 `limit` 缺省值。
+const ISSUE_EVENTS_DEFAULT_LIMIT: i64 = 20;
+/// `C3.2` / `C4.1`：分页 `limit` 上限（超出 clamp 到 100）。
+const PAGINATION_MAX_LIMIT: i64 = 100;
+/// `C4.1`：`cursor` 串长度硬上限（超过即 400，不做解码尝试）。
+const ISSUE_EVENTS_CURSOR_MAX_CHARS: usize = 512;
+/// `C2.3` / `amend v1.1 B-5`：批量归档 `ids` 去重后上限。
+const ARCHIVE_MAX_IDS: usize = 1000;
+/// `C2.3` / `amend v1.1 B-5`：单个 id 长度上限（字符数）。
+const ARCHIVE_MAX_ID_CHARS: usize = 128;
+/// `C2.3`：可归档状态白名单（亦为批量归档缺省值与自动 TTL 归档的状态集）。
+const ARCHIVE_STATUS_WHITELIST: [&str; 2] = ["ignored", "resolved"];
+/// `C5`：`level` 白名单（列表过滤与统计过滤共用）。
+const ISSUE_LEVEL_WHITELIST: [&str; 4] = ["fatal", "error", "warning", "info"];
+/// `C5`：`series` 点数上限（NFR `stats_series_max_points`）。
+const STATS_SERIES_MAX_POINTS: i64 = 744;
+/// `C5`：`bucket=hour` 允许的最大区间（7 天，超出 → 400）。
+const STATS_HOUR_BUCKET_MAX_SPAN_DAYS: i64 = 7;
+/// `C5`：`from` 缺省 = `to - 30d`。
+const STATS_DEFAULT_WINDOW_DAYS: i64 = 30;
+/// `C6.2`：治理计数单次写入超时（NFR `ingest_metrics_write_timeout_ms = 1000`）。
+const INGEST_METRICS_WRITE_TIMEOUT: Duration = Duration::from_millis(1000);
+/// base64url 字母表（RFC 4648 §5，无 padding；`C4.2`）。
+const B64URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Query 参数归一：去空白；空串视同缺省（契约各表「空串视同缺省」）。
+fn governance_param(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(str::to_string)
+}
+
+/// `C2.3` / `C3.2` / `C4.1` / `C5` / `C6.1`：固定 400 文案（表内串原样）。
+///
+/// 响应体是**该串的 JSON 字符串**（`Content-Type: application/json`）：契约把文案写死为
+/// 单一串，`L2-AT` 对抗套件同时断言 400 体可被 JSON 解析（`malformed_event_limit_matrix`）。
+fn governance_bad_request(message: &'static str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::Value::String(message.to_string())),
+    )
+        .into_response()
+}
+
+/// 组装响应头（值为 ASCII 十进制/枚举/base64url，`HeaderValue::from_str` 不会失败；
+/// 万一失败则该头静默跳过，绝不 500）。
+fn governance_headers(entries: Vec<(&'static str, String)>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, value) in entries {
+        match HeaderValue::from_str(&value) {
+            Ok(header_value) => {
+                headers.insert(name, header_value);
+            }
+            // 契约 C3.3 要求值为 ASCII；非 ASCII（如非 ASCII project 名）无法进头部，
+            // 记 warn 留痕（信息进日志、不改变响应体语义），绝不 5xx。
+            Err(_) => warn!(header = name, "响应头值非 ASCII，已跳过该头"),
+        }
+    }
+    headers
+}
+
+/// 单行事件 `created_at` 的**原始 RFC3339 串**（`C4.2` / `amend v1.1 B-2`）。
+///
+/// 直接取该行 JSON 序列化后的字符串，保证游标载荷与本页末行响应**逐字符一致**
+///（禁止自行格式化、禁止截断到微秒/秒）。
+fn event_created_at_raw(event: &Event) -> String {
+    serde_json::to_value(event)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("created_at")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| event.created_at.to_rfc3339())
+}
+
+/// `C4.2`：base64url（无 padding）编码。
+fn base64url_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for chunk in input.chunks(3) {
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        let bits = ((chunk[0] as u32) << 16) | ((second as u32) << 8) | third as u32;
+        out.push(B64URL_ALPHABET[(bits >> 18) as usize & 63] as char);
+        out.push(B64URL_ALPHABET[(bits >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(B64URL_ALPHABET[(bits >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(B64URL_ALPHABET[bits as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// `C4.2`：base64url（无 padding）解码——非法字符/非法尾位一律 `None`（调用方 400）。
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut accumulator: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        } as u32;
+        accumulator = (accumulator << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((accumulator >> bits) & 0xff) as u8);
+        }
+    }
+    // 无 padding 的 base64url：剩余位必须 < 6（排除 `len % 4 == 1`）且全为 0。
+    if bits >= 6 || (accumulator & ((1 << bits) - 1)) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// `C4.2`：把一行事件编码为不透明游标串（`{"created_at":"<原始串>","id":"<id>"}`）。
+fn encode_events_cursor(event: &Event) -> Option<String> {
+    let payload = json!({
+        "created_at": event_created_at_raw(event),
+        "id": event.id,
+    });
+    let raw = serde_json::to_vec(&payload).ok()?;
+    Some(base64url_encode(&raw))
+}
+
+/// `C4.1`：解码并**严格校验**游标载荷。
+///
+/// 拒绝：长度 > 512 / 非 base64url / 非 UTF-8 / 非 JSON / 非对象 / 字段缺失 /
+/// 字段类型不符 / 多出未知字段（含旧版 `created_at_micros` 载荷）。
+fn decode_events_cursor(raw: &str) -> Option<IssueEventsCursor> {
+    if raw.chars().count() > ISSUE_EVENTS_CURSOR_MAX_CHARS {
+        return None;
+    }
+    let bytes = base64url_decode(raw)?;
+    let text = String::from_utf8(bytes).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 2 {
+        return None;
+    }
+    Some(IssueEventsCursor {
+        created_at: object.get("created_at")?.as_str()?.to_string(),
+        id: object.get("id")?.as_str()?.to_string(),
+    })
+}
+
+/// `C2.3`：单条归档/恢复的错误映射（`NotFound` → 404；其余 → 固定体 `Internal error`）。
+fn map_issue_write_error(context: &'static str, err: RepositoryError) -> Response {
+    match err {
+        RepositoryError::NotFound(_) => (StatusCode::NOT_FOUND, "Issue not found").into_response(),
+        other => internal_error(context, other).into_response(),
+    }
+}
+
+/// `C2.3`：批量归档请求体校验（越界 → 400；文案按契约表写死）。
+fn validate_archive_request(request: &IssueArchiveRequest) -> Result<(), &'static str> {
+    // `statuses`：白名单仅 `ignored`/`resolved`；越界 / 重复 / 超过 2 项 → 同一文案。
+    if let Some(statuses) = &request.statuses {
+        let mut seen: Vec<&str> = Vec::new();
+        for status in statuses {
+            let status = status.trim();
+            if !ARCHIVE_STATUS_WHITELIST.contains(&status) || seen.contains(&status) {
+                return Err("Bad request: invalid statuses");
+            }
+            seen.push(status);
+        }
+        if seen.len() > ARCHIVE_STATUS_WHITELIST.len() {
+            return Err("Bad request: invalid statuses");
+        }
+    }
+    // `older_than_days`：负数 → 400。
+    if let Some(days) = request.older_than_days {
+        if days < 0 {
+            return Err(BAD_REQUEST_BODY);
+        }
+    }
+    // `ids`：单 id 长度 ≤ 128 字符；去重后 ≤ 1000 个（`amend v1.1 B-5`）。
+    if let Some(ids) = &request.ids {
+        if ids
+            .iter()
+            .any(|id| id.trim().chars().count() > ARCHIVE_MAX_ID_CHARS)
+        {
+            return Err("Bad request: invalid ids");
+        }
+        let mut deduped: Vec<&str> = Vec::new();
+        for id in ids {
+            let id = id.trim();
+            if !id.is_empty() && !deduped.contains(&id) {
+                deduped.push(id);
+            }
+        }
+        if deduped.len() > ARCHIVE_MAX_IDS {
+            return Err("Bad request: too many ids");
+        }
+    }
+    Ok(())
+}
+
+/// `C2.3`：`?dry_run=` 查询串形态（`1/true/on` → true；`0/false/off`/空 → false；其他 → 400）。
+fn dry_run_from_query(query: &Option<String>) -> Result<Option<bool>, &'static str> {
+    let raw = match governance_param(query) {
+        None => return Ok(None),
+        Some(raw) => raw,
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" => Ok(Some(true)),
+        "0" | "false" | "off" => Ok(Some(false)),
+        _ => Err("Bad request: invalid dry_run"),
+    }
+}
+
+/// `C3.2`：解析十进制整数 query 参数（空串视同缺省；非整数 → 400 固定文案）。
+fn governance_i64_param(
+    value: &Option<String>,
+    invalid_message: &'static str,
+) -> Result<Option<i64>, &'static str> {
+    match governance_param(value) {
+        None => Ok(None),
+        Some(raw) => raw.parse::<i64>().map(Some).map_err(|_| invalid_message),
+    }
+}
+
+/// `C5`：`GET /api/v1/stats` query 校验（非法值 → 400 固定文案；合法值交给仓储解析默认值）。
+fn validate_stats_query(query: &IssueStatsQuery) -> Result<(), &'static str> {
+    if let Some(level) = governance_param(&query.level) {
+        if !ISSUE_LEVEL_WHITELIST.contains(&level.as_str()) {
+            return Err("Bad request: invalid level");
+        }
+    }
+    let to = match governance_param(&query.to) {
+        None => Utc::now(),
+        Some(raw) => DateTime::parse_from_rfc3339(&raw)
+            .map_err(|_| "Bad request: invalid to")?
+            .with_timezone(&Utc),
+    };
+    let from = match governance_param(&query.from) {
+        None => to - chrono::Duration::days(STATS_DEFAULT_WINDOW_DAYS),
+        Some(raw) => DateTime::parse_from_rfc3339(&raw)
+            .map_err(|_| "Bad request: invalid from")?
+            .with_timezone(&Utc),
+    };
+    if from > to {
+        return Err("Bad request: invalid range");
+    }
+    let bucket = match governance_param(&query.bucket).as_deref() {
+        None | Some("day") => StatsBucket::Day,
+        Some("hour") => StatsBucket::Hour,
+        Some(_) => return Err("Bad request: invalid bucket"),
+    };
+    if let Some(include_archived) = governance_param(&query.include_archived) {
+        if !matches!(include_archived.as_str(), "0" | "1") {
+            return Err("Bad request: invalid include_archived");
+        }
+    }
+    if bucket == StatsBucket::Hour
+        && (to - from) > chrono::Duration::days(STATS_HOUR_BUCKET_MAX_SPAN_DAYS)
+    {
+        return Err("Bad request: range too large for hour bucket");
+    }
+    // 空桶补 0 的闭区间点数上限（`stats_series_max_points = 744`）。
+    let points = match bucket {
+        StatsBucket::Day => (to.date_naive() - from.date_naive()).num_days() + 1,
+        StatsBucket::Hour => {
+            to.timestamp().div_euclid(3600) - from.timestamp().div_euclid(3600) + 1
+        }
+    };
+    if points > STATS_SERIES_MAX_POINTS {
+        return Err("Bad request: range too large");
+    }
+    Ok(())
+}
+
+/// `C5` 附加治理总计：把统计区间折算成治理指标支持的窗口（`24h|7d|30d`）。
+fn governance_query_for_stats(
+    query: &IssueStatsQuery,
+    stats: &pony_sentry_core::models::IssueStatsResponse,
+) -> IngestGovernanceQuery {
+    let span = stats.range.to - stats.range.from;
+    let window = if span <= chrono::Duration::hours(24) {
+        "24h"
+    } else if span <= chrono::Duration::days(7) {
+        "7d"
+    } else {
+        "30d"
+    };
+    IngestGovernanceQuery {
+        window: Some(window.to_string()),
+        project: governance_param(&query.project),
+        bucket: Some("day".to_string()),
+    }
+}
+
 async fn handle_list_issues(
     State(state): State<AppState>,
     Query(q): Query<IssueQuery>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let status_enum = q.status.and_then(|s| s.parse::<IssueStatus>().ok());
-    let filter = IssueFilter {
-        status: status_enum,
-        platform: q.platform,
-        release: q.release,
-        project: q.project,
-        environment: q.environment,
-        level: q.level,
-        limit: q.limit,
-        offset: q.offset,
+) -> Result<Response, Response> {
+    // `C3.2`：`status`/`level`/`archived` 非法枚举一律 400（修正 F5 静默忽略）。
+    let status_enum = match governance_param(&q.status) {
+        None => None,
+        Some(raw) => Some(
+            raw.parse::<IssueStatus>()
+                .map_err(|_| governance_bad_request("Bad request: invalid status"))?,
+        ),
+    };
+    let level = match governance_param(&q.level) {
+        None => None,
+        Some(raw) => {
+            if !ISSUE_LEVEL_WHITELIST.contains(&raw.as_str()) {
+                return Err(governance_bad_request("Bad request: invalid level"));
+            }
+            Some(raw)
+        }
+    };
+    let archived = match governance_param(&q.archived).as_deref() {
+        None | Some("exclude") => IssueArchiveMode::Exclude,
+        Some("include") => IssueArchiveMode::Include,
+        Some("only") => IssueArchiveMode::Only,
+        Some(_) => return Err(governance_bad_request("Bad request: invalid archived")),
+    };
+    let envelope = match governance_param(&q.envelope).as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(_) => return Err(governance_bad_request("Bad request: invalid envelope")),
+    };
+    // `limit`：缺省 50、`0` → 1、`>100` → 100、负数/非整数 → 400。
+    let limit = match governance_i64_param(&q.limit, "Bad request: invalid limit")
+        .map_err(governance_bad_request)?
+    {
+        Some(value) if value < 0 => {
+            return Err(governance_bad_request("Bad request: invalid limit"))
+        }
+        Some(value) => value.clamp(1, PAGINATION_MAX_LIMIT),
+        None => ISSUE_LIST_DEFAULT_LIMIT,
+    };
+    let offset = match governance_i64_param(&q.offset, "Bad request: invalid offset")
+        .map_err(governance_bad_request)?
+    {
+        Some(value) if value < 0 => {
+            return Err(governance_bad_request("Bad request: invalid offset"))
+        }
+        Some(value) => value,
+        None => 0,
     };
 
-    let issues = state
-        .repo
-        .list_issues(filter)
-        .await
-        .map_err(|err| internal_error("list_issues", err))?;
+    let project = governance_param(&q.project);
+    let environment = governance_param(&q.environment);
+    let platform = governance_param(&q.platform);
+    let release = governance_param(&q.release);
 
-    Ok(Json(issues))
+    let base_filter = IssueFilter {
+        status: status_enum.clone(),
+        platform: platform.clone(),
+        release: release.clone(),
+        project: project.clone(),
+        environment: environment.clone(),
+        level: level.clone(),
+        archived,
+        limit: None,
+        offset: None,
+    };
+    // `C3.3`：`X-Total-Count` 与列表**同过滤条件**，不受 limit/offset 影响（先例 F9）。
+    let total = state
+        .repo
+        .count_issues(base_filter.clone())
+        .await
+        .map_err(|err| internal_error("count_issues", err).into_response())?;
+    let items = state
+        .repo
+        .list_issues(IssueFilter {
+            limit: Some(limit),
+            offset: Some(offset),
+            ..base_filter
+        })
+        .await
+        .map_err(|err| internal_error("list_issues", err).into_response())?;
+
+    let has_more = offset + (items.len() as i64) < total;
+    // `C3.3`：缺省/空串 project → `all`，否则回显原值。
+    let project_filter = project.clone().unwrap_or_else(|| "all".to_string());
+    let headers = governance_headers(vec![
+        ("x-total-count", total.to_string()),
+        ("x-limit", limit.to_string()),
+        ("x-offset", offset.to_string()),
+        ("x-has-more", has_more.to_string()),
+        ("x-archived-mode", archive_mode_label(archived).to_string()),
+        ("x-project-filter", project_filter),
+    ]);
+
+    // `C3.1`：默认裸数组；`envelope=1` 才切换为 `C3.4` 对象形态。
+    let body = if envelope {
+        json!(IssueListEnvelope {
+            items,
+            total,
+            limit,
+            offset,
+            has_more,
+            archived,
+            filters: IssueListFiltersEcho {
+                project,
+                status: status_enum.map(|status| status.to_string()),
+                level,
+                environment,
+                platform,
+                release,
+            },
+        })
+    } else {
+        json!(items)
+    };
+
+    Ok((headers, Json(body)).into_response())
+}
+
+/// `C3.3` / `C3.4`：归档模式的线缆取值（同时也是 `envelope.archived` 的序列化值）。
+fn archive_mode_label(mode: IssueArchiveMode) -> &'static str {
+    match mode {
+        IssueArchiveMode::Exclude => "exclude",
+        IssueArchiveMode::Include => "include",
+        IssueArchiveMode::Only => "only",
+    }
+}
+
+/// `C6.2`：治理计数旁路（`warn_only_no_ingest_impact`）。
+///
+/// 独立 1000ms 超时（NFR `ingest_metrics_write_timeout_ms`）；失败/超时/丢计数只 `warn!`，
+/// 带 `outcome` 与丢失计数，**绝不** `?` 传播、**绝不**影响 ingest 的响应体与状态码。
+async fn record_ingest_metric_side_channel(
+    state: &AppState,
+    project: &str,
+    outcome: IngestMetricOutcome,
+) {
+    let bucket_date = Utc::now().date_naive();
+    let result = tokio::time::timeout(
+        INGEST_METRICS_WRITE_TIMEOUT,
+        state
+            .repo
+            .record_ingest_metric(bucket_date, project, outcome),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(
+            scope = "ingest_metrics",
+            outcome = ?outcome,
+            project,
+            lost = 1,
+            error = %err,
+            "治理计数写入失败（允许丢计数，不影响 ingest 响应）"
+        ),
+        Err(_) => warn!(
+            scope = "ingest_metrics",
+            outcome = ?outcome,
+            project,
+            lost = 1,
+            timeout_ms = INGEST_METRICS_WRITE_TIMEOUT.as_millis() as u64,
+            "治理计数写入超时（允许丢计数，不影响 ingest 响应）"
+        ),
+    }
 }
 
 async fn handle_list_projects(
@@ -1699,70 +2222,210 @@ async fn handle_update_issue(
     Ok(Json(updated))
 }
 
+/// `C4`：`GET /api/v1/issues/:id/events`（keyset 分页；默认裸数组，`envelope=1` 走信封）。
 async fn handle_get_issue_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+    Query(query): Query<IssueEventsQuery>,
+) -> Result<Response, Response> {
+    // `C4.1`：`limit` 缺省 20；`0`/负数 → 400；`>100` → clamp 100。
+    let limit = match query.limit {
+        Some(value) if value <= 0 => {
+            return Err(governance_bad_request("Bad request: invalid limit"))
+        }
+        Some(value) => value.clamp(1, PAGINATION_MAX_LIMIT),
+        None => ISSUE_EVENTS_DEFAULT_LIMIT,
+    };
+    let order = match governance_param(&query.order).as_deref() {
+        None | Some("desc") => IssueEventsOrder::Desc,
+        Some("asc") => IssueEventsOrder::Asc,
+        Some(_) => return Err(governance_bad_request("Bad request: invalid order")),
+    };
+    let envelope = match governance_param(&query.envelope).as_deref() {
+        None | Some("0") => false,
+        Some("1") => true,
+        Some(_) => return Err(governance_bad_request("Bad request: invalid envelope")),
+    };
+    let cursor = match governance_param(&query.cursor) {
+        None => None,
+        Some(raw) => Some(
+            decode_events_cursor(&raw)
+                .ok_or_else(|| governance_bad_request("Bad request: invalid cursor"))?,
+        ),
+    };
+
+    // `C4.3` / `amend v1.1 B-4`：总行数与 cursor/limit 无关（翻页不重不漏的断言基准）。
+    let total = state
+        .repo
+        .count_events_for_issue(&id)
+        .await
+        .map_err(|err| internal_error("count_events_for_issue", err).into_response())?;
     let events = state
         .repo
-        .get_events_for_issue(&id, 20)
+        .list_issue_events_page(&id, limit, cursor, order)
         .await
-        .map_err(|err| internal_error("get_events_for_issue", err))?;
+        .map_err(|err| internal_error("list_issue_events_page", err).into_response())?;
 
-    Ok(Json(events))
+    // `X-Has-More` / `X-Next-Cursor`：`total` 是绝对总数，不能用于 keyset 判据；
+    // 本页满额时以「末行 keyset 游标」探针确认是否还有下一页（`C4.4`：空页不下发游标）。
+    let mut next_cursor: Option<String> = None;
+    let has_more = match events.last() {
+        Some(last) if events.len() as i64 == limit => {
+            let probe = IssueEventsCursor {
+                created_at: event_created_at_raw(last),
+                id: last.id.clone(),
+            };
+            let more = !state
+                .repo
+                .list_issue_events_page(&id, 1, Some(probe), order)
+                .await
+                .map_err(|err| internal_error("list_issue_events_page_probe", err).into_response())?
+                .is_empty();
+            if more {
+                next_cursor = encode_events_cursor(last);
+            }
+            more
+        }
+        _ => false,
+    };
+
+    let mut headers = vec![
+        ("x-total-count", total.to_string()),
+        ("x-limit", limit.to_string()),
+        ("x-has-more", has_more.to_string()),
+    ];
+    if let Some(cursor) = &next_cursor {
+        headers.push(("x-next-cursor", cursor.clone()));
+    }
+    let headers = governance_headers(headers);
+
+    let body = if envelope {
+        json!(IssueEventsEnvelope {
+            items: events,
+            next_cursor,
+            has_more,
+            limit,
+            total,
+        })
+    } else {
+        json!(events)
+    };
+    Ok((headers, Json(body)).into_response())
 }
 
 // ---------------------------------------------------------------------------
-// issue 治理 handler 空桩（契约 `.dev-team/contract-issue-governance.md` FROZEN v1）
+// issue 治理 handler（契约 `.dev-team/contract-issue-governance.md` FROZEN v1.2）
 //
-// **仅签名骨架**：业务体一律 `unimplemented!("implemented by wave-9 executor")`。
-// 返回值用具体类型 `Response`（非 `impl IntoResponse`），以便空桩在类型层面自洽。
-// 参数校验（400 边界）、鉴权后处理、DB 调用均由 executor 在本区段实现。
+// 400 文案逐字取自契约表；5xx 一律 `internal_error()`（固定体 `Internal error`）。
 // ---------------------------------------------------------------------------
 
 /// `C2.3`：`POST /api/v1/issues/archive`（批量归档，body 见 [`IssueArchiveRequest`]）。
-#[allow(dead_code)]
 async fn handle_archive_issues(
-    State(_state): State<AppState>,
-    _payload: Result<Json<IssueArchiveRequest>, JsonRejection>,
-) -> Result<Response, (StatusCode, String)> {
-    unimplemented!("implemented by wave-9 executor")
+    State(state): State<AppState>,
+    Query(query): Query<IssueArchiveQuery>,
+    payload: Result<Json<IssueArchiveRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    // 请求体不合法：`JsonRejection` 保留 413 的传输层语义，其余统一 400 `Bad request`。
+    let Json(request) = payload.map_err(|rejection| json_rejection_response(rejection).into_response())?;
+    validate_archive_request(&request).map_err(governance_bad_request)?;
+    // `dry_run` 可由查询串（`?dry_run=1`）或请求体给出；请求体优先（`C2.3`）。
+    let dry_run = match request.dry_run {
+        Some(value) => value,
+        None => dry_run_from_query(&query.dry_run)
+            .map_err(governance_bad_request)?
+            .unwrap_or(false),
+    };
+    let outcome = state
+        .repo
+        .archive_issues(&request, dry_run, Utc::now())
+        .await
+        .map_err(|err| internal_error("archive_issues", err).into_response())?;
+    Ok(Json(outcome).into_response())
 }
 
 /// `C2.3`：`POST /api/v1/issues/:id/archive`（单条归档，幂等）。
-#[allow(dead_code)]
 async fn handle_archive_issue(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-) -> Result<Response, (StatusCode, String)> {
-    unimplemented!("implemented by wave-9 executor")
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let issue: Issue = state
+        .repo
+        .archive_issue(&id, Utc::now())
+        .await
+        .map_err(|err| map_issue_write_error("archive_issue", err))?;
+    Ok(Json(issue).into_response())
 }
 
 /// `C2.3`：`POST /api/v1/issues/:id/unarchive`（单条恢复，幂等）。
-#[allow(dead_code)]
 async fn handle_unarchive_issue(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
-) -> Result<Response, (StatusCode, String)> {
-    unimplemented!("implemented by wave-9 executor")
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let issue: Issue = state
+        .repo
+        .unarchive_issue(&id)
+        .await
+        .map_err(|err| map_issue_write_error("unarchive_issue", err))?;
+    Ok(Json(issue).into_response())
 }
 
 /// `C5`：`GET /api/v1/stats`（query 见 [`IssueStatsQuery`]）。
-#[allow(dead_code)]
 async fn handle_get_issue_stats(
-    State(_state): State<AppState>,
-    Query(_query): Query<IssueStatsQuery>,
-) -> Result<Response, (StatusCode, String)> {
-    unimplemented!("implemented by wave-9 executor")
+    State(state): State<AppState>,
+    Query(query): Query<IssueStatsQuery>,
+) -> Result<Response, Response> {
+    if let Err(message) = validate_stats_query(&query) {
+        return Err(governance_bad_request(message));
+    }
+    let stats = state
+        .repo
+        .issue_stats(&query)
+        .await
+        .map_err(|err| internal_error("issue_stats", err).into_response())?;
+    let mut body = serde_json::to_value(&stats)
+        .map_err(|err| internal_error("serialize_issue_stats", err).into_response())?;
+
+    // 附加治理总计（additive，非 C5 契约字段）：红相套件 `fresh_empty_database_stats_are_zero`
+    // 要求 `/stats` 携带 `totals.received`。读失败只 `warn!` 并落零值，不改本接口主语义。
+    let governance_query = governance_query_for_stats(&query, &stats);
+    let totals: IngestGovernanceTotals = match state
+        .repo
+        .ingest_governance_stats(&governance_query)
+        .await
+    {
+        Ok(governance) => governance.totals,
+        Err(err) => {
+            warn!(error = %err, "stats.totals 治理总计读取失败，回落零值");
+            IngestGovernanceTotals::default()
+        }
+    };
+    if let (Some(object), Ok(totals)) = (body.as_object_mut(), serde_json::to_value(&totals)) {
+        object.insert("totals".to_string(), totals);
+    }
+    Ok(Json(body).into_response())
 }
 
 /// `C6.1`：`GET /api/v1/ingest/stats`（query 见 [`IngestGovernanceQuery`]）。
-#[allow(dead_code)]
 async fn handle_get_ingest_stats(
-    State(_state): State<AppState>,
-    Query(_query): Query<IngestGovernanceQuery>,
-) -> Result<Response, (StatusCode, String)> {
-    unimplemented!("implemented by wave-9 executor")
+    State(state): State<AppState>,
+    Query(query): Query<IngestGovernanceQuery>,
+) -> Result<Response, Response> {
+    if let Some(window) = governance_param(&query.window) {
+        if !matches!(window.as_str(), "24h" | "7d" | "30d") {
+            return Err(governance_bad_request("Bad request: invalid window"));
+        }
+    }
+    if let Some(bucket) = governance_param(&query.bucket) {
+        if !matches!(bucket.as_str(), "day" | "hour") {
+            return Err(governance_bad_request("Bad request: invalid bucket"));
+        }
+    }
+    let stats = state
+        .repo
+        .ingest_governance_stats(&query)
+        .await
+        .map_err(|err| internal_error("ingest_governance_stats", err).into_response())?;
+    Ok(Json(stats).into_response())
 }
 
 async fn handle_ingest_trace(

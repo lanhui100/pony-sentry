@@ -139,6 +139,17 @@ pub fn plan_reindex(
             .unwrap_or(events[first_idx].created_at);
         let last_release = group_events.iter().filter_map(|e| e.release.clone()).max();
 
+        // 0007：归档状态随 1:1 复用的旧行保留（新建行必然未归档）。仓储层 UPDATE 不写归档列，
+        // 此处只让 plan 行与库内真实行语义一致（归档 ≠ 删除，reindex 不得清除归档标记）。
+        let (archived_at, archive_restored_at) = reusable_old_id
+            .map(|old_id| {
+                (
+                    old_issue_by_id[old_id].archived_at,
+                    old_issue_by_id[old_id].archive_restored_at,
+                )
+            })
+            .unwrap_or((None, None));
+
         plan.issue_rows.push(Issue {
             id: issue_id.clone(),
             fingerprint: fp.clone(),
@@ -158,6 +169,8 @@ pub fn plan_reindex(
             source_kind: info.source_kind.clone(),
             first_seen_at: first_seen,
             last_seen_at: last_seen,
+            archived_at,
+            archive_restored_at,
         });
 
         if reusable_old_id.is_some() {
@@ -242,6 +255,8 @@ mod tests {
             source_kind: None,
             first_seen_at: now,
             last_seen_at: now,
+            archived_at: None,
+            archive_restored_at: None,
         }
     }
 

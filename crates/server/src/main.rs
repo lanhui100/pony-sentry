@@ -1,6 +1,7 @@
 use chrono::Utc;
 use pony_sentry_core::{
-    create_pool, IssueRepository, PgIssueRepository, SqliteIssueRepository, TraceRepository,
+    create_pool, models::IssueStatus, IssueRepository, PgIssueRepository, SqliteIssueRepository,
+    TraceRepository,
 };
 use pony_sentry_server::{
     create_app_with_options, session::SessionStore, trace_ingest::TraceIngestSwitch,
@@ -139,6 +140,164 @@ fn spawn_retention(
     });
 }
 
+/// `C2.2`：issue 归档 TTL 作业配置（环境变量解析结果）。
+#[derive(Debug, Clone, Copy)]
+struct IssueArchiveConfig {
+    ttl_secs: u64,
+    interval_secs: u64,
+}
+
+/// `C2.2`：`PONY_ISSUE_ARCHIVE_TTL_DAYS` 缺省 = 30 天。
+const ISSUE_ARCHIVE_DEFAULT_TTL_DAYS: u64 = 30;
+/// `C2.2`：`PONY_ISSUE_ARCHIVE_INTERVAL_SECS` 缺省 = 3600（亦为生产值）。
+const ISSUE_ARCHIVE_DEFAULT_INTERVAL_SECS: u64 = 3600;
+/// `C2.2` / `amend v1.1 B-10`：单轮失败后的重试间隔上限 = `min(INTERVAL_SECS, 60)`。
+const ISSUE_ARCHIVE_FAILURE_BACKOFF_CAP_SECS: u64 = 60;
+/// 单轮归档 DB 操作硬超时（慢库不得拖住作业循环）。
+const ISSUE_ARCHIVE_OP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `C2.2`：读取正 u64 环境变量；缺失/非法/0 一律 `None`（由调用方回落默认值 + `warn!`）。
+fn env_positive_u64(name: &'static str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<u64>() {
+        Ok(value) if value > 0 => Some(value),
+        Ok(_) => {
+            warn!(env = name, value = raw, "环境变量为 0，回落默认值");
+            None
+        }
+        Err(_) => {
+            warn!(env = name, value = raw, "环境变量非整数，回落默认值");
+            None
+        }
+    }
+}
+
+/// `C2.2`：`PONY_ISSUE_ARCHIVE_*` 解析（非法值只 `warn!` 回落默认，**不得 panic**）。
+///
+/// 返回 `None` 表示自动作业关闭（手动归档接口不受影响）。
+fn issue_archive_config() -> Option<IssueArchiveConfig> {
+    let enabled = match std::env::var("PONY_ISSUE_ARCHIVE_ENABLED") {
+        Err(_) => true,
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "true" | "on" => true,
+            "0" | "false" | "off" => false,
+            other => {
+                warn!(
+                    value = other,
+                    "PONY_ISSUE_ARCHIVE_ENABLED 非法值，按启用处理"
+                );
+                true
+            }
+        },
+    };
+    if !enabled {
+        return None;
+    }
+
+    // TTL 解析顺序写死：`TTL_SECS`(>0) > `TTL_DAYS`(>0) > 30 天。
+    let ttl_secs = match env_positive_u64("PONY_ISSUE_ARCHIVE_TTL_SECS") {
+        Some(secs) => secs,
+        None => env_positive_u64("PONY_ISSUE_ARCHIVE_TTL_DAYS")
+            .unwrap_or(ISSUE_ARCHIVE_DEFAULT_TTL_DAYS)
+            .saturating_mul(24 * 60 * 60),
+    };
+    // `INTERVAL_SECS` 最小 1（`<1` → 取 1 + `warn!`；非法字面量 → 回落默认 3600 + `warn!`）。
+    let interval_secs = match std::env::var("PONY_ISSUE_ARCHIVE_INTERVAL_SECS") {
+        Err(_) => ISSUE_ARCHIVE_DEFAULT_INTERVAL_SECS,
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => {
+                warn!(
+                    env = "PONY_ISSUE_ARCHIVE_INTERVAL_SECS",
+                    value = raw.trim(),
+                    "周期 < 1，按最小 1 秒执行"
+                );
+                1
+            }
+            Ok(secs) => secs,
+            Err(_) => {
+                warn!(
+                    env = "PONY_ISSUE_ARCHIVE_INTERVAL_SECS",
+                    value = raw.trim(),
+                    "环境变量非整数，回落默认值"
+                );
+                ISSUE_ARCHIVE_DEFAULT_INTERVAL_SECS
+            }
+        },
+    };
+    Some(IssueArchiveConfig {
+        ttl_secs,
+        interval_secs,
+    })
+}
+
+/// `C2.2`：自动 TTL 归档作业——首轮立即执行，之后固定周期；单轮失败只 `warn!` 并按
+/// `min(interval, 60)` 秒退避重试（`amend v1.1 B-10`），永不终止循环、永不退出进程。
+///
+/// 调用方必须保证：本函数在 schema 迁移**成功返回之后**才被调用（首轮时序要求）。
+fn spawn_issue_archive_job(repo: Arc<dyn IssueRepository>, config: IssueArchiveConfig) {
+    tokio::spawn(async move {
+        let mut next_delay = Duration::ZERO;
+        loop {
+            if !next_delay.is_zero() {
+                tokio::time::sleep(next_delay).await;
+            }
+            let cutoff = Utc::now() - chrono::Duration::seconds(config.ttl_secs as i64);
+            // `C2.1`：只归档 `ignored`/`resolved`；`unresolved`/`in_progress`/`regression` 永不自动归档。
+            let outcome = tokio::time::timeout(
+                ISSUE_ARCHIVE_OP_TIMEOUT,
+                repo.archive_stale_issues(
+                    cutoff,
+                    &[IssueStatus::Ignored, IssueStatus::Resolved],
+                ),
+            )
+            .await;
+            let succeeded = match outcome {
+                Ok(Ok(archived)) => {
+                    info!(
+                        scope = "issue_archive",
+                        archived,
+                        cutoff = %cutoff,
+                        ttl_secs = config.ttl_secs,
+                        interval_secs = config.interval_secs,
+                        "issue archive round completed"
+                    );
+                    true
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        scope = "issue_archive",
+                        error = %err,
+                        cutoff = %cutoff,
+                        ttl_secs = config.ttl_secs,
+                        interval_secs = config.interval_secs,
+                        "issue archive round failed"
+                    );
+                    false
+                }
+                Err(_) => {
+                    warn!(
+                        scope = "issue_archive",
+                        cutoff = %cutoff,
+                        ttl_secs = config.ttl_secs,
+                        interval_secs = config.interval_secs,
+                        "issue archive round timed out"
+                    );
+                    false
+                }
+            };
+            next_delay = if succeeded {
+                Duration::from_secs(config.interval_secs)
+            } else {
+                Duration::from_secs(config.interval_secs.min(ISSUE_ARCHIVE_FAILURE_BACKOFF_CAP_SECS))
+            };
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -226,6 +385,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             spawn_retention(repo.clone(), trace_repo.clone(), config);
         }
         None => info!("retention 任务已通过 RETENTION_DISABLED=1 关闭"),
+    }
+
+    // 内置 issue 归档 TTL 作业（契约 C2.2）：**schema 迁移已成功返回之后**启动
+    //（`repo.migrate()` 在构造仓储时 await 完成），`tokio::spawn` 不阻塞监听；首轮立即执行。
+    match issue_archive_config() {
+        Some(config) => {
+            info!(
+                ttl_secs = config.ttl_secs,
+                interval_secs = config.interval_secs,
+                "issue 归档 TTL 作业已启用（首轮立即执行）"
+            );
+            spawn_issue_archive_job(repo.clone(), config);
+        }
+        None => info!("issue 归档 TTL 作业已通过 PONY_ISSUE_ARCHIVE_ENABLED=0 关闭（手动接口仍可用）"),
     }
 
     let session_ttl_secs = std::env::var("CONSOLE_SESSION_TTL_SECS")

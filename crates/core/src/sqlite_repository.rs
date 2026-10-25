@@ -1,24 +1,32 @@
 use crate::{
     db::DatabasePool,
     models::{
-        EvalStatus, Event, Issue, IssueStatus, IssueStatusEnvironmentCount, TraceFilter,
-        TraceRecord,
+        EvalStatus, Event, EventStatsCounts, IngestGovernanceProjectRow, IngestGovernanceQuery,
+        IngestGovernanceSeriesPoint, IngestGovernanceStats, IngestGovernanceTotals,
+        IngestMetricOutcome, Issue, IssueArchiveCriteria, IssueArchiveOutcome, IssueArchiveRequest,
+        IssueEventsCursor, IssueEventsOrder, IssueStatsCounts, IssueStatsQuery, IssueStatsResponse,
+        IssueStatus, IssueStatusEnvironmentCount, StatsBucket, StatsRange, StatsSeriesPoint,
+        TraceFilter, TraceRecord,
     },
     reindex::{plan_reindex, FingerprintOut, ReindexSummary},
-    repository::{IssueFilter, IssueRepository, NewEventRecord, RepositoryError, TraceRepository},
+    repository::{
+        IssueFilter, IssueGovernanceRepository, IssueRepository, NewEventRecord, RepositoryError,
+        TraceRepository,
+    },
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::json;
 use sqlx::Row;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
-/// issues 表全量列（对齐 `migrations/0001_init.sql` + `0002` + `0004`），
+/// issues 表全量列（对齐 `migrations/0001_init.sql` + `0002` + `0004` + `0007`），
 /// 集中一处避免 SELECT/INSERT 列清单漂移。
 const ISSUE_COLUMNS: &str =
     "id, fingerprint, title, culprit, platform, status, assigned_to, count, \
      last_release, project, environment, app, namespace, component, level, source_kind, \
-     first_seen_at, last_seen_at";
+     first_seen_at, last_seen_at, archived_at, archive_restored_at";
 
 /// events 表全量列（含 0004 新增 event_key / level）。
 const EVENT_COLUMNS: &str =
@@ -153,6 +161,33 @@ impl SqliteIssueRepository {
         // `trace_v2::turn_key_of`（sha256）同构，SQL 方言无 sha256 故不写在迁移文件里。
         self.backfill_trace_turns().await?;
 
+        // 0007（契约 C1.2 / C1.4）：issue 归档列 + 治理读路径索引 + `ingest_metrics`。
+        // SQLite 无 `ADD COLUMN IF NOT EXISTS`，故：
+        //  - 两列**分别探测、分别 ALTER**（`SELECT <col> FROM issues LIMIT 0` 失败才执行），
+        //    半迁移库（只有一列）可自愈，范式同 0006；
+        //  - `CREATE TABLE/INDEX IF NOT EXISTS` 自身幂等，每次启动都执行（0005/0006 同）。
+        // 语句来源统一取自迁移文件本身，避免「文件 vs 代码」双份真相漂移。
+        for statement in split_sql_statements(include_str!(
+            "../../../migrations/0007_issue_archive.sql"
+        )) {
+            if statement.to_ascii_uppercase().starts_with("ALTER TABLE") {
+                match add_column_target(&statement) {
+                    Some((table, column)) => {
+                        let probe = format!("SELECT {column} FROM {table} LIMIT 0");
+                        if sqlx::query(&probe).fetch_all(&self.pool).await.is_err() {
+                            sqlx::query(&statement).execute(&self.pool).await?;
+                        }
+                    }
+                    // 解析失败不静默吞：按原语句执行，让 DB 报错暴露契约漂移。
+                    None => {
+                        sqlx::query(&statement).execute(&self.pool).await?;
+                    }
+                }
+                continue;
+            }
+            sqlx::query(&statement).execute(&self.pool).await?;
+        }
+
         Ok(())
     }
 
@@ -210,6 +245,256 @@ struct UpsertDuplicate {
     event: Event,
 }
 
+/// 仅当错误是 SQLite 的 `SQLITE_BUSY`（code 5 / "database is locked"）且仍有重试预算时，
+/// 返回本次退避毫秒数（10 / 20 / 40ms，最多 3 次重试）。**其它错误一律不重试**。
+fn sqlite_busy_retry_delay(error: &RepositoryError, attempt: usize) -> Option<u64> {
+    const DELAYS_MS: [u64; 3] = [10, 20, 40];
+    let delay = *DELAYS_MS.get(attempt)?;
+    let RepositoryError::Database(sqlx::Error::Database(db_error)) = error else {
+        return None;
+    };
+    let message = db_error.message().to_ascii_lowercase();
+    // 仅 `SQLITE_BUSY`（primary code 5；扩展码 517 = BUSY_SNAPSHOT 亦归此主码）。
+    // `SQLITE_LOCKED (6)` 等其它码不重试，避免掩盖真实缺陷。
+    let busy_code = db_error.code().map(|code| code == "5").unwrap_or(false);
+    if busy_code || message.contains("database is locked") || message.contains("database is busy") {
+        Some(delay)
+    } else {
+        None
+    }
+}
+
+/// `record_event_and_upsert_issue` 的**单次尝试**（不含重试）：一个 `BEGIN IMMEDIATE` 写事务内
+/// 完成幂等预查 → issue upsert → events 插入 → （按需）活跃即解档 → 提交。
+async fn record_event_and_upsert_issue_once(
+    repo: &SqliteIssueRepository,
+    record: &NewEventRecord<'_>,
+) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
+    let now = Utc::now();
+    let occurred_at = record.occurred_at.unwrap_or(now);
+    let environment = normalize_environment(record.environment);
+
+    // 1. 幂等前置检查：同 event_key 已存在 → 直接返回既有 issue/event，
+    //    不新增 events 行、不递增 count、不推进 last_seen_at（契约 R4.1）。
+    if let Some(key) = record.event_key {
+        if let Some(hit) = repo.duplicate_hit(key).await? {
+            let issue = repo.issue_by_id(&hit.issue_id).await?;
+            return Ok(duplicate_result(issue, hit.event));
+        }
+    }
+
+    // **BEGIN IMMEDIATE**（不是 `pool.begin()` 的 deferred 语义）：一开始就取写锁，
+    // 多写者按 busy_timeout 排队；deferred 事务会「先 SHARED 再升级写锁」，并发升级即
+    // `SQLITE_BUSY: database is locked`（且 busy handler 不重试升级死锁）→ 整请求 500。
+    // 先例：本文件 trace 路径（`record_trace` / `delete_traces_older_than`）。
+    let mut tx = repo.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+    let existing = sqlx::query(&format!(
+        "SELECT {ISSUE_COLUMNS} FROM issues WHERE fingerprint = ? AND environment = ?"
+    ))
+    .bind(record.fingerprint)
+    .bind(&environment)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let mut is_new = false;
+    let mut is_regression_trigger = false;
+
+    let issue = match existing {
+        Some(row) => {
+            let stored = issue_from_row(&row);
+            let mut status = stored.status;
+            // 核心状态机：仅当首次处于 Resolved 且新事件再次出现时，才触发一次 Regression 状态跃迁
+            if status == IssueStatus::Resolved {
+                status = IssueStatus::Regression;
+                is_regression_trigger = true;
+            }
+            let new_count = stored.count + 1;
+            // 乱序事件（补投历史 timestamp）不得把 last_seen_at 拉回过去
+            let last_seen_at = if occurred_at > stored.last_seen_at {
+                occurred_at
+            } else {
+                stored.last_seen_at
+            };
+            sqlx::query(
+                "UPDATE issues SET count = ?, status = ?, last_release = ?, last_seen_at = ? WHERE id = ?"
+            )
+            .bind(new_count)
+            .bind(status.to_string())
+            .bind(record.release)
+            .bind(last_seen_at.to_rfc3339())
+            .bind(&stored.id)
+            .execute(&mut *tx)
+            .await?;
+
+            // 维度以首报为准（与项目名同策略）：后续上报若缺维度，不把已有值擦成 NULL。
+            let app = stored.app.or_else(|| record.app.map(str::to_string));
+            let namespace = stored
+                .namespace
+                .or_else(|| record.namespace.map(str::to_string));
+            let component = stored
+                .component
+                .or_else(|| record.component.map(str::to_string));
+            sqlx::query(
+                "UPDATE issues SET app = ?, namespace = ?, component = ?, level = ?, source_kind = ? WHERE id = ?",
+            )
+            .bind(&app)
+            .bind(&namespace)
+            .bind(&component)
+            .bind(record.level)
+            .bind(record.source_kind)
+            .bind(&stored.id)
+            .execute(&mut *tx)
+            .await?;
+
+            // C2.5（`amend v1.1 / A-2`）：活跃即解档——**同一事务内**追加一条 UPDATE。
+            // 零变更硬约束（C7.1）：不动 count/status/响应字段/事件语义，只清归档标记。
+            let mut archived_at = stored.archived_at;
+            let mut archive_restored_at = stored.archive_restored_at;
+            if archived_at.is_some() && crate::repository::is_active_issue_status(&status) {
+                sqlx::query(
+                    "UPDATE issues SET archived_at = NULL, archive_restored_at = NULL WHERE id = ?",
+                )
+                .bind(&stored.id)
+                .execute(&mut *tx)
+                .await?;
+                archived_at = None;
+                archive_restored_at = None;
+            }
+
+            Issue {
+                id: stored.id,
+                fingerprint: record.fingerprint.to_string(),
+                title: record.title.to_string(),
+                culprit: record.culprit.map(str::to_string),
+                platform: record.platform.to_string(),
+                status,
+                assigned_to: stored.assigned_to,
+                count: new_count,
+                last_release: record.release.map(str::to_string),
+                project: stored
+                    .project
+                    .or_else(|| record.project.map(str::to_string)),
+                environment: environment.clone(),
+                app,
+                namespace,
+                component,
+                level: record.level.to_string(),
+                source_kind: record.source_kind.map(str::to_string),
+                first_seen_at: stored.first_seen_at,
+                last_seen_at,
+                archived_at,
+                archive_restored_at,
+            }
+        }
+        None => {
+            is_new = true;
+            let id = Uuid::new_v4().to_string();
+            let status = IssueStatus::Unresolved;
+            sqlx::query(
+                "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, count, \
+                 last_release, project, environment, app, namespace, component, level, source_kind, \
+                 first_seen_at, last_seen_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(record.fingerprint)
+            .bind(record.title)
+            .bind(record.culprit)
+            .bind(record.platform)
+            .bind(status.to_string())
+            .bind(1i64)
+            .bind(record.release)
+            .bind(record.project)
+            .bind(&environment)
+            .bind(record.app)
+            .bind(record.namespace)
+            .bind(record.component)
+            .bind(record.level)
+            .bind(record.source_kind)
+            .bind(occurred_at.to_rfc3339())
+            .bind(occurred_at.to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+
+            Issue {
+                id,
+                fingerprint: record.fingerprint.to_string(),
+                title: record.title.to_string(),
+                culprit: record.culprit.map(str::to_string),
+                platform: record.platform.to_string(),
+                status,
+                assigned_to: None,
+                count: 1,
+                last_release: record.release.map(str::to_string),
+                project: record.project.map(str::to_string),
+                environment: environment.clone(),
+                app: record.app.map(str::to_string),
+                namespace: record.namespace.map(str::to_string),
+                component: record.component.map(str::to_string),
+                level: record.level.to_string(),
+                source_kind: record.source_kind.map(str::to_string),
+                first_seen_at: occurred_at,
+                last_seen_at: occurred_at,
+                // 新建 issue 必然未归档（0007 默认 NULL）。
+                archived_at: None,
+                archive_restored_at: None,
+            }
+        }
+    };
+
+    let event_id = Uuid::new_v4().to_string();
+    let insert_result = sqlx::query(
+        "INSERT INTO events (id, issue_id, payload, release, environment, event_key, level, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&event_id)
+    .bind(&issue.id)
+    .bind(serde_json::to_string(&record.payload).unwrap_or_default())
+    .bind(record.release)
+    .bind(&environment)
+    .bind(record.event_key)
+    .bind(record.level)
+    .bind(occurred_at.to_rfc3339())
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(err) = insert_result {
+        // 并发同 event_key：唯一索引兜底，归一为幂等命中（契约 R4.2，不得 500）。
+        if is_unique_violation(&err) {
+            tx.rollback().await?;
+            if let Some(key) = record.event_key {
+                if let Some(hit) = repo.duplicate_hit(key).await? {
+                    let issue = repo.issue_by_id(&hit.issue_id).await?;
+                    return Ok(duplicate_result(issue, hit.event));
+                }
+            }
+        }
+        return Err(err.into());
+    }
+
+    tx.commit().await?;
+
+    let event = Event {
+        id: event_id,
+        issue_id: issue.id.clone(),
+        payload: record.payload.clone(),
+        release: record.release.map(str::to_string),
+        environment: Some(environment),
+        event_key: record.event_key.map(str::to_string),
+        level: Some(record.level.to_string()),
+        created_at: occurred_at,
+    };
+
+    Ok(crate::repository::UpsertIssueResult {
+        issue,
+        event,
+        is_new,
+        is_regression_trigger,
+        is_duplicate: false,
+    })
+}
+
 fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Issue {
     let status_str: String = row.get("status");
     let first_seen_str: String = row.get("first_seen_at");
@@ -237,6 +522,27 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Issue {
         last_seen_at: chrono::DateTime::parse_from_rfc3339(&last_seen_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
+        // 0007：归档列为 ISO8601 UTC 文本；解析失败按 `None` 并 `warn!`（**不得 panic**）。
+        archived_at: optional_timestamp(row, "archived_at"),
+        archive_restored_at: optional_timestamp(row, "archive_restored_at"),
+    }
+}
+
+/// 读取可空时间列（0007 归档列）：非 NULL 但解析失败 → `None` + `warn!`，不 panic。
+fn optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<DateTime<Utc>> {
+    let raw: Option<String> = row.get(column);
+    let raw = raw?;
+    match DateTime::parse_from_rfc3339(&raw) {
+        Ok(value) => Some(value.with_timezone(&Utc)),
+        Err(error) => {
+            tracing::warn!(
+                column,
+                raw = %raw,
+                error = %error,
+                "issues 时间列不是合法 RFC3339，按 None 处理"
+            );
+            None
+        }
     }
 }
 
@@ -287,205 +593,27 @@ impl IssueRepository for SqliteIssueRepository {
         &self,
         record: NewEventRecord<'_>,
     ) -> Result<crate::repository::UpsertIssueResult, RepositoryError> {
-        let now = Utc::now();
-        let occurred_at = record.occurred_at.unwrap_or(now);
-        let environment = normalize_environment(record.environment);
-
-        // 1. 幂等前置检查：同 event_key 已存在 → 直接返回既有 issue/event，
-        //    不新增 events 行、不递增 count、不推进 last_seen_at（契约 R4.1）。
-        if let Some(key) = record.event_key {
-            if let Some(hit) = self.duplicate_hit(key).await? {
-                let issue = self.issue_by_id(&hit.issue_id).await?;
-                return Ok(duplicate_result(issue, hit.event));
+        // 语义红线（契约 R4.1 / C7.1）：同 event_id 只产生 1 次真实写入，其余为 duplicate；
+        // 重试只作用于「整事务尚未提交」的 SQLITE_BUSY（code 5），不改变响应字段与状态码集合。
+        let mut attempt = 0usize;
+        loop {
+            match record_event_and_upsert_issue_once(self, &record).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    let Some(delay_ms) = sqlite_busy_retry_delay(&error, attempt) else {
+                        return Err(error);
+                    };
+                    attempt += 1;
+                    tracing::warn!(
+                        attempt,
+                        delay_ms,
+                        error = %error,
+                        "SQLite 写事务命中 BUSY（database is locked），整事务退避重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
             }
         }
-
-        let mut tx = self.pool.begin().await?;
-
-        let existing = sqlx::query(&format!(
-            "SELECT {ISSUE_COLUMNS} FROM issues WHERE fingerprint = ? AND environment = ?"
-        ))
-        .bind(record.fingerprint)
-        .bind(&environment)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let mut is_new = false;
-        let mut is_regression_trigger = false;
-
-        let issue = match existing {
-            Some(row) => {
-                let stored = issue_from_row(&row);
-                let mut status = stored.status;
-                // 核心状态机：仅当首次处于 Resolved 且新事件再次出现时，才触发一次 Regression 状态跃迁
-                if status == IssueStatus::Resolved {
-                    status = IssueStatus::Regression;
-                    is_regression_trigger = true;
-                }
-                let new_count = stored.count + 1;
-                // 乱序事件（补投历史 timestamp）不得把 last_seen_at 拉回过去
-                let last_seen_at = if occurred_at > stored.last_seen_at {
-                    occurred_at
-                } else {
-                    stored.last_seen_at
-                };
-                sqlx::query(
-                    "UPDATE issues SET count = ?, status = ?, last_release = ?, last_seen_at = ? WHERE id = ?"
-                )
-                .bind(new_count)
-                .bind(status.to_string())
-                .bind(record.release)
-                .bind(last_seen_at.to_rfc3339())
-                .bind(&stored.id)
-                .execute(&mut *tx)
-                .await?;
-
-                // 维度以首报为准（与项目名同策略）：后续上报若缺维度，不把已有值擦成 NULL。
-                let app = stored.app.or_else(|| record.app.map(str::to_string));
-                let namespace = stored
-                    .namespace
-                    .or_else(|| record.namespace.map(str::to_string));
-                let component = stored
-                    .component
-                    .or_else(|| record.component.map(str::to_string));
-                sqlx::query(
-                    "UPDATE issues SET app = ?, namespace = ?, component = ?, level = ?, source_kind = ? WHERE id = ?",
-                )
-                .bind(&app)
-                .bind(&namespace)
-                .bind(&component)
-                .bind(record.level)
-                .bind(record.source_kind)
-                .bind(&stored.id)
-                .execute(&mut *tx)
-                .await?;
-
-                Issue {
-                    id: stored.id,
-                    fingerprint: record.fingerprint.to_string(),
-                    title: record.title.to_string(),
-                    culprit: record.culprit.map(str::to_string),
-                    platform: record.platform.to_string(),
-                    status,
-                    assigned_to: stored.assigned_to,
-                    count: new_count,
-                    last_release: record.release.map(str::to_string),
-                    project: stored
-                        .project
-                        .or_else(|| record.project.map(str::to_string)),
-                    environment: environment.clone(),
-                    app,
-                    namespace,
-                    component,
-                    level: record.level.to_string(),
-                    source_kind: record.source_kind.map(str::to_string),
-                    first_seen_at: stored.first_seen_at,
-                    last_seen_at,
-                }
-            }
-            None => {
-                is_new = true;
-                let id = Uuid::new_v4().to_string();
-                let status = IssueStatus::Unresolved;
-                sqlx::query(
-                    "INSERT INTO issues (id, fingerprint, title, culprit, platform, status, count, \
-                     last_release, project, environment, app, namespace, component, level, source_kind, \
-                     first_seen_at, last_seen_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(record.fingerprint)
-                .bind(record.title)
-                .bind(record.culprit)
-                .bind(record.platform)
-                .bind(status.to_string())
-                .bind(1i64)
-                .bind(record.release)
-                .bind(record.project)
-                .bind(&environment)
-                .bind(record.app)
-                .bind(record.namespace)
-                .bind(record.component)
-                .bind(record.level)
-                .bind(record.source_kind)
-                .bind(occurred_at.to_rfc3339())
-                .bind(occurred_at.to_rfc3339())
-                .execute(&mut *tx)
-                .await?;
-
-                Issue {
-                    id,
-                    fingerprint: record.fingerprint.to_string(),
-                    title: record.title.to_string(),
-                    culprit: record.culprit.map(str::to_string),
-                    platform: record.platform.to_string(),
-                    status,
-                    assigned_to: None,
-                    count: 1,
-                    last_release: record.release.map(str::to_string),
-                    project: record.project.map(str::to_string),
-                    environment: environment.clone(),
-                    app: record.app.map(str::to_string),
-                    namespace: record.namespace.map(str::to_string),
-                    component: record.component.map(str::to_string),
-                    level: record.level.to_string(),
-                    source_kind: record.source_kind.map(str::to_string),
-                    first_seen_at: occurred_at,
-                    last_seen_at: occurred_at,
-                }
-            }
-        };
-
-        let event_id = Uuid::new_v4().to_string();
-        let insert_result = sqlx::query(
-            "INSERT INTO events (id, issue_id, payload, release, environment, event_key, level, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&event_id)
-        .bind(&issue.id)
-        .bind(serde_json::to_string(&record.payload).unwrap_or_default())
-        .bind(record.release)
-        .bind(&environment)
-        .bind(record.event_key)
-        .bind(record.level)
-        .bind(occurred_at.to_rfc3339())
-        .execute(&mut *tx)
-        .await;
-
-        if let Err(err) = insert_result {
-            // 并发同 event_key：唯一索引兜底，归一为幂等命中（契约 R4.2，不得 500）。
-            if is_unique_violation(&err) {
-                tx.rollback().await?;
-                if let Some(key) = record.event_key {
-                    if let Some(hit) = self.duplicate_hit(key).await? {
-                        let issue = self.issue_by_id(&hit.issue_id).await?;
-                        return Ok(duplicate_result(issue, hit.event));
-                    }
-                }
-            }
-            return Err(err.into());
-        }
-
-        tx.commit().await?;
-
-        let event = Event {
-            id: event_id,
-            issue_id: issue.id.clone(),
-            payload: record.payload,
-            release: record.release.map(str::to_string),
-            environment: Some(environment),
-            event_key: record.event_key.map(str::to_string),
-            level: Some(record.level.to_string()),
-            created_at: occurred_at,
-        };
-
-        Ok(crate::repository::UpsertIssueResult {
-            issue,
-            event,
-            is_new,
-            is_regression_trigger,
-            is_duplicate: false,
-        })
     }
 
     async fn get_issue(&self, id: &str) -> Result<Issue, RepositoryError> {
@@ -493,39 +621,23 @@ impl IssueRepository for SqliteIssueRepository {
     }
 
     async fn list_issues(&self, filter: IssueFilter) -> Result<Vec<Issue>, RepositoryError> {
-        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
-            "SELECT {ISSUE_COLUMNS} FROM issues WHERE 1=1"
-        ));
-
-        if let Some(ref st) = filter.status {
-            builder.push(" AND status = ").push_bind(st.to_string());
-        }
-        if let Some(ref pf) = filter.platform {
-            builder.push(" AND platform = ").push_bind(pf);
-        }
-        if let Some(ref rel) = filter.release {
-            builder.push(" AND last_release = ").push_bind(rel);
-        }
-        if let Some(ref proj) = filter.project {
-            builder.push(" AND project = ").push_bind(proj);
-        }
-        if let Some(ref env) = filter.environment {
-            builder.push(" AND environment = ").push_bind(env);
-        }
-        if let Some(ref level) = filter.level {
-            builder.push(" AND level = ").push_bind(level);
-        }
-        builder.push(" ORDER BY last_seen_at DESC");
-
+        // 过滤子句与 `count_issues` / stats 聚合共用同一构造器（`C3.3` 要求「同 WHERE」）。
+        let clause = crate::repository::issue_filter_clause(&filter, "", |_| "?".to_string());
         let limit = filter.limit.unwrap_or(50).clamp(1, 100);
         let offset = filter.offset.unwrap_or(0).max(0);
-        builder
-            .push(" LIMIT ")
-            .push_bind(limit)
-            .push(" OFFSET ")
-            .push_bind(offset);
-
-        let rows = builder.build().fetch_all(&self.pool).await?;
+        let sql = format!(
+            "SELECT {ISSUE_COLUMNS} FROM issues{} ORDER BY last_seen_at DESC LIMIT ? OFFSET ?",
+            clause.clause
+        );
+        let mut query = sqlx::query(&sql);
+        for bind in clause.binds {
+            query = query.bind(bind);
+        }
+        let rows = query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.iter().map(issue_from_row).collect())
     }
 
@@ -1398,6 +1510,682 @@ fn trace_from_row(row: &sqlx::sqlite::SqliteRow) -> TraceRecord {
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
     }
+}
+
+
+// ============================================================================
+// 契约 `.dev-team/contract-issue-governance.md`（FROZEN **v1.2**）治理能力：SQLite 实现
+//
+// 口径单一真相：`list_issues` / `count_issues` / stats 聚合共用
+// `repository::issue_filter_clause`。时间列在 SQLite 侧是 **ISO8601 UTC 文本**，
+// 故比较统一按「库内同一格式的原始串」做字典序（契约 C4.2 / C7.1：存储格式零变更）。
+// ============================================================================
+#[async_trait]
+impl IssueGovernanceRepository for SqliteIssueRepository {
+    async fn count_issues(&self, filter: IssueFilter) -> Result<i64, RepositoryError> {
+        let clause = crate::repository::issue_filter_clause(&filter, "", |_| "?".to_string());
+        sqlite_scalar(
+            &self.pool,
+            &format!("SELECT COUNT(*) AS n FROM issues{}", clause.clause),
+            &clause.binds,
+        )
+        .await
+    }
+
+    async fn archive_issue(
+        &self,
+        id: &str,
+        archived_at: DateTime<Utc>,
+    ) -> Result<Issue, RepositoryError> {
+        // 幂等（C2.3）：已归档 → `archived_at` 不变（COALESCE 保留原值）；
+        // `archive_restored_at` 不被覆盖（`amend v1.1 A-1`）。
+        let affected = sqlx::query(
+            "UPDATE issues SET archived_at = COALESCE(archived_at, ?) WHERE id = ?",
+        )
+        .bind(archived_at.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            return Err(RepositoryError::NotFound(id.to_string()));
+        }
+        self.issue_by_id(id).await
+    }
+
+    async fn unarchive_issue(&self, id: &str) -> Result<Issue, RepositoryError> {
+        // 同语句写 `archived_at = NULL` + `archive_restored_at = now`（`amend v1.1 A-1`）。
+        let affected =
+            sqlx::query("UPDATE issues SET archived_at = NULL, archive_restored_at = ? WHERE id = ?")
+                .bind(Utc::now().to_rfc3339())
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        if affected == 0 {
+            return Err(RepositoryError::NotFound(id.to_string()));
+        }
+        self.issue_by_id(id).await
+    }
+
+    async fn archive_issues(
+        &self,
+        request: &IssueArchiveRequest,
+        dry_run: bool,
+        now: DateTime<Utc>,
+    ) -> Result<IssueArchiveOutcome, RepositoryError> {
+        let statuses = crate::repository::effective_archive_statuses(request);
+        let project = request
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let ids = request
+            .ids
+            .as_ref()
+            .map(|raw| crate::repository::dedup_ids(raw))
+            .filter(|deduped| !deduped.is_empty());
+        let ids_take_priority = ids.is_some();
+        let mut outcome = IssueArchiveOutcome {
+            dry_run,
+            matched: 0,
+            archived: 0,
+            skipped_already_archived: 0,
+            skipped_not_archivable: 0,
+            skipped_missing: 0,
+            criteria: IssueArchiveCriteria {
+                project: project.clone(),
+                statuses: statuses.clone(),
+                older_than_days: request.older_than_days,
+                ids: request.ids.clone(),
+                ids_take_priority,
+            },
+        };
+
+        match ids {
+            // ---- `ids` 模式（`amend v1.1 A-3` + `v1.2`）：ids 定候选集，statuses 仍是白名单 ----
+            Some(ids) => {
+                outcome.matched = ids.len() as i64;
+                // SQLite 绑定变量上限 999：ids 必须分批（每批 ≤ [`SQLITE_MAX_BIND_VARS`]），
+                // 且为 statuses 留出余量，超限不报错。
+                // `BEGIN IMMEDIATE`：先 SELECT 分桶再 UPDATE 的两次读写必须在同一写锁内，
+                // 否则并发归档会在锁升级处 `database is locked`（deferred 事务升级竞态）。
+                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                let mut found: HashMap<String, (String, bool)> = HashMap::new();
+                for chunk in ids.chunks(SQLITE_MAX_BIND_VARS) {
+                    let sql = format!(
+                        "SELECT id, status, archived_at FROM issues WHERE id IN ({})",
+                        sqlite_placeholders(chunk.len())
+                    );
+                    let mut query = sqlx::query(&sql);
+                    for id in chunk {
+                        query = query.bind(id.as_str());
+                    }
+                    for row in query.fetch_all(&mut *tx).await? {
+                        found.insert(
+                            row.get::<String, _>("id"),
+                            (
+                                row.get::<String, _>("status"),
+                                row.get::<Option<String>, _>("archived_at").is_some(),
+                            ),
+                        );
+                    }
+                }
+                for id in &ids {
+                    match found.get(id) {
+                        None => outcome.skipped_missing += 1,
+                        Some((status, archived)) => {
+                            if !statuses.iter().any(|allowed| allowed == status) {
+                                outcome.skipped_not_archivable += 1;
+                            } else if *archived {
+                                outcome.skipped_already_archived += 1;
+                            }
+                        }
+                    }
+                }
+                if !dry_run {
+                    let status_placeholders = sqlite_placeholders(statuses.len());
+                    let mut archived_total = 0u64;
+                    for chunk in ids.chunks(SQLITE_MAX_BIND_VARS) {
+                        let sql = format!(
+                            "UPDATE issues SET archived_at = ? \
+                             WHERE id IN ({}) AND status IN ({status_placeholders}) AND archived_at IS NULL",
+                            sqlite_placeholders(chunk.len())
+                        );
+                        let mut query = sqlx::query(&sql).bind(now.to_rfc3339());
+                        for id in chunk {
+                            query = query.bind(id.as_str());
+                        }
+                        for status in &statuses {
+                            query = query.bind(status.as_str());
+                        }
+                        archived_total += query.execute(&mut *tx).await?.rows_affected();
+                    }
+                    outcome.archived = archived_total as i64;
+                }
+                tx.commit().await?;
+            }
+            // ---- `statuses`/`project` 模式：`matched ≡ archived`，`skipped_*` 恒 0 ----
+            None => {
+                let cutoff = request
+                    .older_than_days
+                    .map(|days| now - chrono::Duration::days(days.max(0)));
+                let mut condition = format!(
+                    "status IN ({}) AND archived_at IS NULL",
+                    sqlite_placeholders(statuses.len())
+                );
+                if project.is_some() {
+                    condition.push_str(" AND project = ?");
+                }
+                if cutoff.is_some() {
+                    condition.push_str(" AND last_seen_at < ?");
+                }
+                if dry_run {
+                    let sql = format!("SELECT COUNT(*) AS n FROM issues WHERE {condition}");
+                    let mut query = sqlx::query(&sql);
+                    for status in &statuses {
+                        query = query.bind(status.as_str());
+                    }
+                    if let Some(project) = &project {
+                        query = query.bind(project.as_str());
+                    }
+                    if let Some(cutoff) = cutoff {
+                        query = query.bind(cutoff.to_rfc3339());
+                    }
+                    let row = query.fetch_one(&self.pool).await?;
+                    outcome.matched = row.get::<i64, _>("n");
+                    outcome.archived = 0;
+                } else {
+                    let sql = format!("UPDATE issues SET archived_at = ? WHERE {condition}");
+                    let mut query = sqlx::query(&sql).bind(now.to_rfc3339());
+                    for status in &statuses {
+                        query = query.bind(status.as_str());
+                    }
+                    if let Some(project) = &project {
+                        query = query.bind(project.as_str());
+                    }
+                    if let Some(cutoff) = cutoff {
+                        query = query.bind(cutoff.to_rfc3339());
+                    }
+                    let updated = query.execute(&self.pool).await?.rows_affected();
+                    outcome.matched = updated as i64;
+                    outcome.archived = updated as i64;
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn archive_stale_issues(
+        &self,
+        cutoff: DateTime<Utc>,
+        statuses: &[IssueStatus],
+    ) -> Result<u64, RepositoryError> {
+        if statuses.is_empty() {
+            return Ok(0);
+        }
+        let statuses: Vec<String> = statuses.iter().map(|status| status.to_string()).collect();
+        // C2.1 / `amend v1.1 A-1`：末项 `archive_restored_at` 抑制项必须在内；不覆盖 `archive_restored_at`。
+        let sql = format!(
+            "UPDATE issues SET archived_at = ? \
+             WHERE status IN ({}) AND archived_at IS NULL AND last_seen_at < ? \
+               AND (archive_restored_at IS NULL OR archive_restored_at < last_seen_at)",
+            sqlite_placeholders(statuses.len())
+        );
+        // 绑定顺序必须与 SQL 占位符顺序一致：`archived_at = ?` → `status IN (?...)` → `last_seen_at < ?`。
+        let mut query = sqlx::query(&sql).bind(Utc::now().to_rfc3339());
+        for status in &statuses {
+            query = query.bind(status.as_str());
+        }
+        let query = query.bind(cutoff.to_rfc3339());
+        Ok(query.execute(&self.pool).await?.rows_affected())
+    }
+
+    async fn list_issue_events_page(
+        &self,
+        issue_id: &str,
+        limit: i64,
+        cursor: Option<IssueEventsCursor>,
+        order: IssueEventsOrder,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let limit = limit.clamp(1, 100);
+        let (comparator, direction) = match order {
+            IssueEventsOrder::Desc => ("<", "DESC"),
+            IssueEventsOrder::Asc => (">", "ASC"),
+        };
+        // `amend v1.1 B-2` / C7.1：游标原样携带库内 RFC3339 串，SQLite 侧按 TEXT 字典序比较。
+        // 行为稳健起见把等价时刻归一为**库内写入格式**（`DateTime::to_rfc3339`，AutoSi + `+00:00`），
+        // 避免上游用 `Z` 后缀重排格式时字典序失真；解析失败则原样比较（不 panic、不 500）。
+        let cursor_at = cursor.as_ref().map(|payload| {
+            DateTime::parse_from_rfc3339(&payload.created_at)
+                .map(|value| value.with_timezone(&Utc).to_rfc3339())
+                .unwrap_or_else(|_| payload.created_at.clone())
+        });
+        let mut sql = format!("SELECT {EVENT_COLUMNS} FROM events WHERE issue_id = ?");
+        if cursor_at.is_some() {
+            sql.push_str(&format!(
+                " AND (created_at {comparator} ? OR (created_at = ? AND id {comparator} ?))"
+            ));
+        }
+        sql.push_str(&format!(" ORDER BY created_at {direction}, id {direction} LIMIT ?"));
+        let mut query = sqlx::query(&sql).bind(issue_id);
+        if let (Some(at), Some(payload)) = (cursor_at, cursor.as_ref()) {
+            // 匿名 `?` 逐位绑定：`created_at < ?` 与 `created_at = ?` 是**两个**占位符，
+            // 必须把同一个游标时刻绑两次（`id < ?` 第三次）。
+            query = query.bind(at.clone()).bind(at).bind(&payload.id);
+        }
+        let rows = query.bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(event_from_row).collect())
+    }
+
+    async fn count_events_for_issue(&self, issue_id: &str) -> Result<i64, RepositoryError> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM events WHERE issue_id = ?")
+            .bind(issue_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    async fn issue_stats(&self, query: &IssueStatsQuery) -> Result<IssueStatsResponse, RepositoryError> {
+        let scope = crate::repository::stats_scope(query, Utc::now());
+        // ---- issues 口径（受 project/environment/level/include_archived；**不受** from/to，C5.0）----
+        let clause = crate::repository::issue_filter_clause(&scope.filter, "", |_| "?".to_string());
+        let total = sqlite_scalar(
+            &self.pool,
+            &format!("SELECT COUNT(*) AS n FROM issues{}", clause.clause),
+            &clause.binds,
+        )
+        .await?;
+        let by_status = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT status AS k, COUNT(*) AS n FROM issues{} GROUP BY 1",
+                clause.clause
+            ),
+            &clause.binds,
+        )
+        .await?;
+        let by_level = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT level AS k, COUNT(*) AS n FROM issues{} GROUP BY 1",
+                clause.clause
+            ),
+            &clause.binds,
+        )
+        .await?;
+        let by_environment = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT environment AS k, COUNT(*) AS n FROM issues{} GROUP BY 1",
+                clause.clause
+            ),
+            &clause.binds,
+        )
+        .await?;
+        // `events.total` = SUM(issues.count)（聚合口径，全时段）。
+        let events_total = sqlite_scalar(
+            &self.pool,
+            &format!(
+                "SELECT COALESCE(SUM(count), 0) AS n FROM issues{}",
+                clause.clause
+            ),
+            &clause.binds,
+        )
+        .await?;
+
+        // ---- events 行口径（受 from/to；include_archived=false 时只计未归档 issue 的行）----
+        let row_clause = crate::repository::issue_filter_clause(&scope.filter, "i.", |_| "?".to_string());
+        let row_from = format!(
+            " FROM events e JOIN issues i ON i.id = e.issue_id{} \
+             AND e.created_at >= ? AND e.created_at <= ?",
+            row_clause.clause
+        );
+        let mut row_binds = row_clause.binds.clone();
+        row_binds.push(scope.from.to_rfc3339());
+        row_binds.push(scope.to.to_rfc3339());
+        let stored_rows = sqlite_scalar(
+            &self.pool,
+            &format!("SELECT COUNT(*) AS n{row_from}"),
+            &row_binds,
+        )
+        .await?;
+        let ev_by_level = sqlite_grouped(
+            &self.pool,
+            &format!("SELECT COALESCE(e.level, 'unknown') AS k, COUNT(*) AS n{row_from} GROUP BY 1"),
+            &row_binds,
+        )
+        .await?;
+        let ev_by_environment = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT COALESCE(e.environment, 'unknown') AS k, COUNT(*) AS n{row_from} GROUP BY 1"
+            ),
+            &row_binds,
+        )
+        .await?;
+        let ev_by_release = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT COALESCE(e.release, 'unknown') AS k, COUNT(*) AS n{row_from} GROUP BY 1"
+            ),
+            &row_binds,
+        )
+        .await?;
+
+        // ---- series（空桶补 0；`sum(series.events) == stored_rows` 由同 WHERE 保证）----
+        let issue_bucket = sqlite_bucket_prefix("first_seen_at", scope.bucket);
+        let mut issue_binds = clause.binds.clone();
+        issue_binds.push(scope.from.to_rfc3339());
+        issue_binds.push(scope.to.to_rfc3339());
+        let issue_series = sqlite_grouped(
+            &self.pool,
+            &format!(
+                "SELECT {issue_bucket} AS k, COUNT(*) AS n FROM issues{} \
+                 AND first_seen_at >= ? AND first_seen_at <= ? GROUP BY 1",
+                clause.clause
+            ),
+            &issue_binds,
+        )
+        .await?;
+        let event_bucket = sqlite_bucket_prefix("e.created_at", scope.bucket);
+        let event_series = sqlite_grouped(
+            &self.pool,
+            &format!("SELECT {event_bucket} AS k, COUNT(*) AS n{row_from} GROUP BY 1"),
+            &row_binds,
+        )
+        .await?;
+
+        let issue_series = sqlite_rekey_buckets(issue_series, scope.bucket);
+        let event_series = sqlite_rekey_buckets(event_series, scope.bucket);
+        let series = crate::repository::bucket_keys(scope.from, scope.to, scope.bucket)
+            .into_iter()
+            .map(|key| StatsSeriesPoint {
+                issues: issue_series.get(&key).copied().unwrap_or(0),
+                events: event_series.get(&key).copied().unwrap_or(0),
+                bucket: key,
+            })
+            .collect();
+
+        Ok(IssueStatsResponse {
+            project: scope.filter.project.clone(),
+            range: StatsRange {
+                from: scope.from,
+                to: scope.to,
+                bucket: scope.bucket,
+            },
+            include_archived: scope.include_archived,
+            issues: IssueStatsCounts {
+                total,
+                by_status,
+                by_level,
+                by_environment,
+            },
+            events: EventStatsCounts {
+                total: events_total,
+                basis: "sum_issues_count".to_string(),
+                stored_rows,
+                by_level: ev_by_level,
+                by_environment: ev_by_environment,
+                by_release: ev_by_release,
+            },
+            series,
+        })
+    }
+
+    async fn ingest_governance_stats(
+        &self,
+        query: &IngestGovernanceQuery,
+    ) -> Result<IngestGovernanceStats, RepositoryError> {
+        let now = Utc::now();
+        let window = match query.window.as_deref().map(str::trim) {
+            Some("7d") => "7d",
+            Some("30d") => "30d",
+            _ => "24h",
+        };
+        let span = match window {
+            "7d" => chrono::Duration::days(7),
+            "30d" => chrono::Duration::days(30),
+            _ => chrono::Duration::hours(24),
+        };
+        let to = now;
+        let from = now - span;
+        let bucket = match query.bucket.as_deref().map(str::trim) {
+            Some("hour") => StatsBucket::Hour,
+            _ => StatsBucket::Day,
+        };
+        let project = query
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        // 计数按 UTC 日期落库（`bucket_date` 为 `YYYY-MM-DD` 文本），按日期闭区间过滤。
+        let mut where_clause = " WHERE bucket_date >= ? AND bucket_date <= ?".to_string();
+        if project.is_some() {
+            where_clause.push_str(" AND project = ?");
+        }
+        let from_date = from.date_naive().format("%Y-%m-%d").to_string();
+        let to_date = to.date_naive().format("%Y-%m-%d").to_string();
+        let mut base_binds: Vec<String> = vec![from_date, to_date];
+        if let Some(project) = &project {
+            base_binds.push(project.clone());
+        }
+
+        let outcome_sql = format!(
+            "SELECT outcome AS k, COALESCE(SUM(count), 0) AS n FROM ingest_metrics{where_clause} GROUP BY 1"
+        );
+        let mut sums: HashMap<String, i64> = HashMap::new();
+        let mut query_handle = sqlx::query(&outcome_sql);
+        for bind in &base_binds {
+            query_handle = query_handle.bind(bind.as_str());
+        }
+        for row in query_handle.fetch_all(&self.pool).await? {
+            sums.insert(row.get::<String, _>("k"), row.get::<i64, _>("n"));
+        }
+        let value_of = |outcome: &str| sums.get(outcome).copied().unwrap_or(0);
+        let totals = IngestGovernanceTotals {
+            received: value_of("received"),
+            created: value_of("created"),
+            duplicate: value_of("duplicate"),
+            suppressed_ignored: value_of("suppressed_ignored"),
+            rejected_invalid: value_of("rejected_invalid"),
+            accepted: value_of("created") + value_of("duplicate"),
+        };
+
+        let by_project_sql = format!(
+            "SELECT project AS k, \
+             COALESCE(SUM(CASE WHEN outcome = 'received' THEN count ELSE 0 END), 0) AS received, \
+             COALESCE(SUM(CASE WHEN outcome IN ('created','duplicate') THEN count ELSE 0 END), 0) AS accepted, \
+             COALESCE(SUM(CASE WHEN outcome = 'suppressed_ignored' THEN count ELSE 0 END), 0) AS suppressed \
+             FROM ingest_metrics{where_clause} GROUP BY project"
+        );
+        let mut query_handle = sqlx::query(&by_project_sql);
+        for bind in &base_binds {
+            query_handle = query_handle.bind(bind.as_str());
+        }
+        let mut by_project: Vec<IngestGovernanceProjectRow> = query_handle
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|row| IngestGovernanceProjectRow {
+                project: Some(row.get::<String, _>("k")).filter(|value| !value.is_empty()),
+                received: row.get("received"),
+                accepted: row.get("accepted"),
+                suppressed_ignored: row.get("suppressed"),
+            })
+            .collect();
+        // `null` 排最后（`C6.1` 排序口径）。
+        by_project.sort_by(|left, right| match (&left.project, &right.project) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+
+        let series_sql = format!(
+            "SELECT bucket_date AS k, \
+             COALESCE(SUM(CASE WHEN outcome = 'received' THEN count ELSE 0 END), 0) AS received, \
+             COALESCE(SUM(CASE WHEN outcome IN ('created','duplicate') THEN count ELSE 0 END), 0) AS accepted, \
+             COALESCE(SUM(CASE WHEN outcome = 'suppressed_ignored' THEN count ELSE 0 END), 0) AS suppressed \
+             FROM ingest_metrics{where_clause} GROUP BY bucket_date"
+        );
+        let mut query_handle = sqlx::query(&series_sql);
+        for bind in &base_binds {
+            query_handle = query_handle.bind(bind.as_str());
+        }
+        let mut day_sums: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
+        for row in query_handle.fetch_all(&self.pool).await? {
+            day_sums.insert(
+                row.get::<String, _>("k"),
+                (row.get("received"), row.get("accepted"), row.get("suppressed")),
+            );
+        }
+        let mut series: Vec<IngestGovernanceSeriesPoint> = Vec::new();
+        for key in crate::repository::bucket_keys(from, to, bucket) {
+            // 存储粒度为「UTC 日期」：hour 桶时计数只可能落在当日 00:00 桶（其余桶补 0）。
+            let day = key.chars().take(10).collect::<String>();
+            let (received, accepted, suppressed_ignored) = match bucket {
+                StatsBucket::Day => day_sums.get(&day).copied().unwrap_or((0, 0, 0)),
+                StatsBucket::Hour => {
+                    if key.ends_with("T00:00:00Z") {
+                        day_sums.get(&day).copied().unwrap_or((0, 0, 0))
+                    } else {
+                        (0, 0, 0)
+                    }
+                }
+            };
+            series.push(IngestGovernanceSeriesPoint {
+                bucket: key,
+                received,
+                accepted,
+                suppressed_ignored,
+            });
+        }
+
+        Ok(IngestGovernanceStats {
+            window: window.to_string(),
+            from,
+            to,
+            bucket: match bucket {
+                StatsBucket::Day => "day".to_string(),
+                StatsBucket::Hour => "hour".to_string(),
+            },
+            totals,
+            by_project,
+            series,
+        })
+    }
+
+    async fn record_ingest_metric(
+        &self,
+        bucket_date: NaiveDate,
+        project: &str,
+        outcome: IngestMetricOutcome,
+    ) -> Result<(), RepositoryError> {
+        // `C6.2`（`amend v1.1 B-3`）：单语句 UPSERT；`ON CONFLICT` 目标列**必须**与主键同序。
+        sqlx::query(
+            "INSERT INTO ingest_metrics (bucket_date, project, outcome, count, updated_at) \
+             VALUES (?, ?, ?, 1, ?) \
+             ON CONFLICT(bucket_date, project, outcome) \
+             DO UPDATE SET count = count + 1, updated_at = excluded.updated_at",
+        )
+        .bind(bucket_date.format("%Y-%m-%d").to_string())
+        .bind(project)
+        .bind(crate::repository::ingest_metric_outcome_str(outcome))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+/// SQLite 单条语句的绑定变量上限（999）留出的安全批次：ids 分批后仍需容纳 statuses。
+const SQLITE_MAX_BIND_VARS: usize = 500;
+
+/// 生成 `?,?,?` 形态的匿名占位符串。
+fn sqlite_placeholders(count: usize) -> String {
+    vec!["?"; count].join(",")
+}
+
+/// 标量计数查询。
+async fn sqlite_scalar(
+    pool: &DatabasePool,
+    sql: &str,
+    binds: &[String],
+) -> Result<i64, RepositoryError> {
+    let mut query = sqlx::query(sql);
+    for bind in binds {
+        query = query.bind(bind.as_str());
+    }
+    let row = query.fetch_one(pool).await?;
+    Ok(row.get::<i64, _>("n"))
+}
+
+/// 分组计数查询（`k` 文本键 / `n` 计数）。
+async fn sqlite_grouped(
+    pool: &DatabasePool,
+    sql: &str,
+    binds: &[String],
+) -> Result<BTreeMap<String, i64>, RepositoryError> {
+    let mut query = sqlx::query(sql);
+    for bind in binds {
+        query = query.bind(bind.as_str());
+    }
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<String, _>("k"), row.get::<i64, _>("n")))
+        .collect())
+}
+
+/// SQL 侧桶前缀（day = 10 字符 `YYYY-MM-DD`；hour = 13 字符 `YYYY-MM-DDTHH`）。
+///
+/// 用 `substr` 而非 `strftime`：库内时间串恒为 UTC 且格式统一（C7.1 零变更），
+/// 前缀即 UTC 桶键，既不依赖 SQLite 的时区解析也不做任何精度截断。
+fn sqlite_bucket_prefix(column: &str, bucket: StatsBucket) -> String {
+    match bucket {
+        StatsBucket::Day => format!("substr({column}, 1, 10)"),
+        StatsBucket::Hour => format!("substr({column}, 1, 13)"),
+    }
+}
+
+/// 把 SQL 产出的桶前缀归一为 `series[].bucket` 键。
+fn sqlite_rekey_buckets(raw: BTreeMap<String, i64>, bucket: StatsBucket) -> BTreeMap<String, i64> {
+    raw.into_iter()
+        .map(|(prefix, count)| {
+            (
+                crate::repository::bucket_key_from_prefix(&prefix, bucket),
+                count,
+            )
+        })
+        .collect()
+}
+
+/// 按 `;` 拆分迁移文件为独立语句（先剔除 `--` 行注释；本批迁移文件不含字符串内分号）。
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    sql.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 解析 `ALTER TABLE <table> ADD COLUMN <column>`（SQLite 无 `IF NOT EXISTS`）。
+fn add_column_target(statement: &str) -> Option<(String, String)> {
+    let tokens: Vec<&str> = statement.split_whitespace().collect();
+    let table = tokens.get(2)?.to_string();
+    let column_keyword = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("COLUMN"))?;
+    Some((table, tokens.get(column_keyword + 1)?.to_string()))
 }
 
 #[cfg(test)]

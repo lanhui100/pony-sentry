@@ -212,12 +212,12 @@ async fn test_sql_injection_is_safely_parametrized() {
         "SQL injection attempt must not return data"
     );
 
-    // 负分页参数应被钳制而非报错
+    // 契约 C3.2 / C7.3 B4：负 limit/offset → 400（旧行为「静默钳制」已由 B4 显式登记为 breaking）
     let neg_res = server
         .get("/api/v1/issues?limit=-5&offset=-10")
         .add_header("x-admin-token", "test-admin-token")
         .await;
-    neg_res.assert_status(StatusCode::OK);
+    neg_res.assert_status(StatusCode::BAD_REQUEST);
 }
 
 /// 项目维度端到端：extra.project_path → issue.project → 筛选与候选列表。

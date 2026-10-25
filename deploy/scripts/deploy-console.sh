@@ -223,10 +223,23 @@ PYLOGIN
 
 check_http_status 200 "$BASE_URL/api/v1/auth/session" -b "$COOKIE_JAR" \
   || { echo "ERROR: 会话状态接口自检失败" >&2; exit 1; }
-for path in '/api/v1/issues?' '/api/v1/projects' '/api/v1/traces?limit=100'; do
+for path in '/api/v1/issues?' '/api/v1/projects'; do
   check_http_status 200 "$BASE_URL$path" -b "$COOKIE_JAR" \
     || { echo "ERROR: Cookie 会话读接口自检失败 $path" >&2; exit 1; }
 done
+
+# trace 读接口的期望码随停收开关变化（docs/trace-contract.md §0）：
+# `PONY_TRACE_INGEST_ENABLED` 关闭时 trace 路由一律 410 Gone，此时自检必须期待 410，
+# 否则本脚本会在合法配置下误判为部署失败并回滚。
+TRACE_ENABLED="$($SUDO sed -n 's/^PONY_TRACE_INGEST_ENABLED=//p' "$ENV_FILE" | tr -d '\r' | head -1)"
+TRACE_ENABLED_LC="$(printf '%s' "$TRACE_ENABLED" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$TRACE_ENABLED_LC" in
+  0|false|off) TRACE_READ_EXPECT=410 ;;
+  *) TRACE_READ_EXPECT=200 ;;
+esac
+check_http_status "$TRACE_READ_EXPECT" "$BASE_URL/api/v1/traces?limit=100" -b "$COOKIE_JAR" \
+  || { echo "ERROR: Cookie 会话 trace 读自检失败（期待 $TRACE_READ_EXPECT，PONY_TRACE_INGEST_ENABLED=${TRACE_ENABLED:-<unset>}）" >&2; exit 1; }
+echo "trace 读接口自检：HTTP $TRACE_READ_EXPECT（PONY_TRACE_INGEST_ENABLED=${TRACE_ENABLED:-<unset>}）"
 
 # Cookie 会话执行 PATCH 但缺 CSRF 头必须 403；请求在中间件层被拒绝，不会触达业务。
 check_http_status 403 "$BASE_URL/api/v1/issues/00000000-0000-0000-0000-000000000000" \

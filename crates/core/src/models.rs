@@ -101,6 +101,16 @@ pub struct Issue {
     pub source_kind: Option<String>,
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+    /// 归档时刻（契约 `C2.1`）：`Some` 即已归档；`None` = 未归档。
+    ///
+    /// `serde(default)` 保证旧形态 JSON（无该字段）仍可反序列化为 `None`，
+    /// 且序列化时缺失值显式落 `null`（不得省略字段——Web/验收侧按字段存在性判断）。
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
+    /// 最近一次**手动恢复**时刻（契约 `C2.1` / `amend v1.1 A-1`）：自动 TTL 归档的抑制依据；
+    /// `None` = 从未手动恢复。
+    #[serde(default)]
+    pub archive_restored_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
