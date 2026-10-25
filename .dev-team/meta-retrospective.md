@@ -1,56 +1,54 @@
-# 元框架复盘：wave-6 / 控制台读超时契约
+# Wave-9 元框架复盘（Meta-Retrospective）
 
-> 复盘对象是**协作元框架与组织协议本身**，不是业务代码变量命名。上一轮（wave-5）复盘已归档为
-> `.dev-team/meta-retrospective-wave5.md`。
+> 任务：PonySentry 服务端 issue 治理与分析接口（B 级开发任务）
+> 周期：2026-10-25 18:48 至 20:30
+> 参与角色：Lead（调度/裁决/交付）、Protocol Agent（契约与空桩）、Test Agent & Test Agent 2（黑盒常规验收）、L2-AT（破坏性对抗测试）、Executor-core（数据层与迁移）、Executor-server（服务与路由层）
 
-## 1. 通信拓扑与信噪比（Topology & Noise）
+---
 
-- 本轮名册：Lead（编排+裁决+同提交文档）→ Protocol Agent（契约 ver1→ver4、NFR 基准）→
-  Test Agent（红相 23 用例 → 加固 37 用例）→ Executor（最小闭包 3 处）→ Subagent 池
-  （L3-A 契约/测试真实性、L3-B 覆盖与等价性、L3-P 五问）。常驻 4（≤8），审查不占槽位。
-- 信噪比最高的是**外部视角推翻"全绿即安全"**：37 条测试全绿时，L3-A 仍用三条变形（死引用凑数、
-  单点下调 2500、auth/timeout 对调）证明旧判据可绕过；L3-P 则用 `git show HEAD:web/dist` 证明
-  跟踪产物未同步、用 `grep -n acquire_timeout` 证明行号锚点漂移。三次都是「机器绿了但语义有洞」。
-- 噪声与浪费：① L3-A 首轮耗时 ~13 分钟（要求在 clean clone 里做变异，复制开销大），期间 Lead 空等；
-  ② 我把 L3-B 与 Test Agent 并行派出，L3-B 审到的是加固前快照（23 用例），其 PASS 不能覆盖加固后
-  语义——需要一次人工对账（结论是 L3-A 已覆盖同一面）。
-- 令牌产出比：最省的是把「契约含糊点」变成三条显式裁决（AMB-a/b/c），每条两行、零返工；
-  最贵的是 L3-A 的 clean clone 变异（每轮 cp + 跑测），本可给它一个预置 worktree 直接复用。
+## 一、通信拓扑与信噪比
 
-## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
+本次 Wave-9 开发全面遵循了 Agent Team 的状态机与通信拓扑公理：
+- **拓扑严谨度**：严格贯彻了“持久有状态者走 Teammate、无状态单次局部求值走 Subagent”的映射公理。在 Roster 预算内派生 Protocol Agent、Test Agent 与 Executors（常驻成员 ≤ 6，严格受控于 Roster ≤ 8 上限）。
+- **通信收敛与信噪比**：
+  1. 放弃了盲目短轮询，充分依靠 `wait_agent` 的事件驱动机制等待结果。
+  2. Protocol Agent、Test Agent 与 Executor 均采用高度结构化的纯事实 JSON 或紧凑型清单进行汇报，彻底消除了自然语言外壳与过程性废话。
+  3. 审查阶段采用严格的 `dev-review-lint.py` JSON Schema 规范，在 Gate-1 阶段精确捕获了 10 个 BLOCKING 缺陷，并在收口汇聚阶段生成标准收据 `review-join-wave9.json`，信噪比极高。
+- **Token 消耗与重复命令率**：
+  在前期，第一代 Test Agent 与 L2-AT Subagent 一度因尝试整读 2600 行的 `routes.rs` 和 2100 行的 `sqlite_repository.rs` 而耗尽上下文。Lead 及时识别该反模式，实施“单次读取 ≤ 120 行、必须以 grep/sed 精准切片”的硬预算约束，换用第二棒后顺利在极小 Token 成本内产出了 1925 行的常规用例和 454 行的对抗用例。
 
-- **真实拦截**：L3-P 2 条（产物未同提交 → 干净 checkout 内嵌旧前端；注释插入导致 `main.rs:152`
-  锚点漂移）；L3-A 3 条（R1 计数可凑、R8 只看 max、R5 git diff 恒空）。5 条全部有可复现反例，
-  Lead 逐条复核后修复：产物同步 + 注释下移 + 测试改结构判据（37 用例，变异矩阵四类全拦）。
-- **误杀/过度声明**：0 条。L3-P 判「dist 未同步」时，Lead 本就计划在 release commit 同步——但审查在
-  release 前给出 FAIL 属正确时序，不算误杀。
-- **假放行风险点（本轮新发现）**：测试的结构性弱点不会被测试自己发现。三条穿透的共同形态是
-  **判据只验证了代理指标**（出现次数、max、git diff），而非被约束的真实结构。加固后每条判据都直接
-  读结构（定时器实参、逐站点值、分支顺序），并配合成反例单测。
-- **物理凭证纪律**：红相 exit=1、绿相 37/37、变异矩阵 5 类非零退出、混沌 A/B（旧→「请求超时」/
-  新→「服务端错误」）、部署自检 exit=0，全部落盘 `.dev-team/e2e-console-timeout.txt`。
-- **一次自造混乱**：E2E 准备期我误以为 `web/dist` 已是新产物，实际它与旧构建**字节等长**
-  （`3e3`→`8e3` 同长度），只有内容不同；靠 sha256 + 内容 grep 才定性。教训：产物类事实必须以内容
-  哈希为准，不得以体积/mtime/git status 推断。
+---
 
-## 3. 分工契约与隔离有效性（Contract Isolation）
+## 二、门禁穿透与误杀率
 
-- 写域零冲突：Protocol（`.dev-team/` 两文件）、Test（`web/tests/` 三文件）、Executor
-  （`web/src/lib`、`web/src/App.vue`、`crates/server/src/main.rs`）、Lead（docs/README/ADR/state/
-  review JSON/部署）。Executor 额外跑过一次 `npx vite build` 改写被跟踪的 `web/dist`，已自查还原并
-  主动申报——本轮唯一越界，靠「执行者自报 + L3-P 复核」闭环，未逃逸。
-- 测试分权有效：Executor 全程未碰 `web/tests/**`；加固由 Test Agent 完成，Lead 只验证不代写。
-- 信息下发：契约含糊点（AMB-a/b/c）集中由 Protocol 提报、Lead 裁决、回写正文，避免了 wave-5 那种
-  「并行派发 + 裁决滞后」的返工。
+- **红相拦截有效性**：
+  常规验收套件（`tests/acceptance_issue_governance.rs` 12 个用例）和对抗破坏套件（`tests/acceptance_issue_governance_adversarial.rs` 9 个用例）在空桩阶段均严格产生了原生非零退出码（`EXIT_CODE=101`），并通过了 `dev-red-purity.py` 的机械校验（Exit Code 0）。真实拦截了新路由 404、参数静默吞没、游标分页缺失等未实现逻辑，坚决杜绝了“假绿”与“无断言测试”。
+- **并发与锁升级穿透防线**：
+  L2-AT 编写的确定性并发用例 `concurrent_duplicate_ingest_is_exactly_once`（8 线程 × 5 轮高并发同 event_id）成功击穿了既有代码中 SQLite 默认 deferred 事务在并发读写下的锁升级漏洞（触发 `SQLITE_BUSY: database is locked` 500）。由于红相硬约束，Executor-core 不得不重构了底层事务逻辑，引入 `BEGIN IMMEDIATE`、连接级 `busy_timeout=5000` 以及整事务有界退避重试，将这一深层隐患彻底根治在交付前。
+- **门禁误杀与修复**：
+  1. 部署脚本 `deploy-console.sh` 原先硬编码要求 `/api/v1/traces?limit=100` 返回 200，而在生产配置 `PONY_TRACE_INGEST_ENABLED=0`（停收开关开启）下实际返回 410，导致部署脚本自检误杀并回滚。Lead 审计后修补了自检脚本对停收配置的动态适配。
+  2. 既有工作区单测 `test_sql_injection_is_safely_parametrized` 包含旧行为（负数分页参数静默钳制返回 200）的过时断言，与本次契约 B4（负数显式返回 400）冲突。经 Lead 授权单断言同步修正后，22 套件全绿通过。
 
-## 4. 元协议迭代建议（Self-Evolving Protocol）
+---
 
-1. **审查快照锚定**：`review-*.json` 增加必填字段 `reviewed_commit`，并规定「测试冻结 commit 之后
-   才允许派发 L3」，否则审查结论不可比（本轮 L3-B 审 23 用例、L3-A 审 37 用例）。
-2. **变异矩阵作为 PASS 必要条件**：凡以测试为门禁的波次，审查者必须自跑 ≥3 类变异并贴退出码，
-   不接受"读过测试觉得没问题"。
-3. **产物同源进入 Phase 4 清单**：凡仓库跟踪构建产物（如 `web/dist`），收口前必须机械比对
-   `git show HEAD:<artifact>` 与源码语义（本轮全靠 L3-P 才发现）。
-4. **审查者预置 worktree**：Lead 派发前准备 `git worktree`/副本路径，禁止审查者自行 clean clone。
-5. **行号锚点治理**：契约/注释引用源码行号时必须与被引用符号同行，或改用符号名——本轮
-   「插一行注释导致锚点漂移」可预防，应写进契约模板检查项。
+## 三、分工契约与隔离有效性
+
+- **严格分权与职责正交**：
+  - 彻底斩断了实施者“既写代码又写测试”的作弊链条。黑盒契约用例全部位于独立的 `tests/` 包，完全由 Test Agent 与 L2-AT 依据冻结契约独立产出，Executor 全程只读。
+  - Executor-core 独占 `migrations/` 与 `crates/core/src/` 写域；Executor-server 独占 `crates/server/src/` 写域，二者写域严格正交。
+- **契约演进与版本化闭环**：
+  - 需求与设计由 Lead 决策，Protocol Agent 独占负责将契约落盘（v1.0）。
+  - 在 Gate-1 阶段，方案对抗审查员提出了关于 `archive_restored_at` 留痕、活跃态自动解档、批量归档分桶口径、游标精度丢失等 10 项 BLOCKING 缺陷，Protocol Agent 迅速推进完成 v1.1、v1.2、v1.3 三轮增量 amend 提交，保证了实施者与测试者拥有绝对唯一、自洽的真源。
+- **物理账本与断点恢复**：
+  所有的契约冻结、红相基线、实现提交均被打上了精确的 Git Commit 和 Tag 检查点（`wave-9-protocol`、`wave-9-protocol-v11`、`wave-9-red` 等），`.dev-team/state.json` 实时维护全量波次账本。
+
+---
+
+## 四、元协议迭代建议
+
+1. **大文件侦察熔断机制**：
+   对于超过 1000 行的大型单文件（如 `routes.rs`），Subagent 在执行代码阅读前应默认增加静态行数检查；若直接使用未带 offset/limit 的 read，框架层或 Prompt 应强制告警或拦截，避免由于上下文超限发生 Subagent 中途静默阵亡。
+2. **多方言存储的游标基准规范化**：
+   在 SQLite 与 PostgreSQL 混用架构中，时间戳列的存储格式存在微秒与 RFC3339 纳秒文本的差异。未来契约设计应将“游标必须采用库内原始序列化文本”作为通用模式纳入 `dev-team` 模板，避免重复排查微秒截断导致的漏行问题。
+3. **部署脚本与功能开关联动校验**：
+   部署脚本在执行端点自检时，应当从环境配置中动态解析功能开关状态（如停收开关、信任开关），自适应调整断言期望码，避免因脚本期望僵化阻断正常的发布流水线。

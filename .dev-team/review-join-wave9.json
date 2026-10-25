@@ -1,0 +1,9 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/core/src",
+    "crates/server/src",
+    "migrations"
+  ],
+  "findings": []
+}
