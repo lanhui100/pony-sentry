@@ -42,6 +42,19 @@
   SQLite 不支持 `DROP COLUMN`，**无 down 迁移**，回滚需重建表或保留列（列可空，旧版本忽略它）；
   升级前必须备份 `ponysentry.db`。
 
+### 1.3 Issue 读侧 `trace_id`（读取时派生，无列）
+
+`issues` 表**不新增列**；列表 / 详情 / `envelope=1` 响应中的 `trace_id` 在读取时派生：
+
+- 来源优先级：该 issue **最近一条事件** payload 的一级 `trace_id` → payload `extra.trace_id` 回落；
+- 值形态：32 位小写 hex（OTel trace id）；无值或非法时**返回 `null` 且键恒存在**（便于脚本判断）；
+- 列表一次批量查询（`ROW_NUMBER()` 取每个 issue 的最近事件，sqlite/PG 同构），不产生 N+1；
+- 派生或查询失败只落 `null` + `warn!`，不拖垮接口。
+
+已知限制：`PATCH /api/v1/issues/:id` 响应**不派生**该字段（仍为 `null`），见 job_copilot backlog B219。
+
+改这一行为的门槛与 `archived_at` 同等：必须 same-commit 更新本文件。
+
 ## 2. 归档语义
 
 ### 2.1 手动归档（admin 鉴权）
