@@ -6,8 +6,8 @@ pub mod validate;
 
 pub use fingerprint::{compute_issue_fingerprint, normalize_environment};
 pub use parser::{
-    normalize_stacktrace, parse_first_frame, Exception, Frame, RawEvent, Stacktrace,
-    STACKTRACE_TEXT_MAX_CHARS,
+    normalize_stacktrace, normalize_trace_id, parse_first_frame, Exception, Frame, RawEvent,
+    Stacktrace, STACKTRACE_TEXT_MAX_CHARS,
 };
 pub use project::{infer_project_name, project_name_from_extra};
 pub use sanitizer::{RedactionCounts, SanitizationPipeline};

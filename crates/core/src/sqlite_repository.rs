@@ -385,6 +385,8 @@ async fn record_event_and_upsert_issue_once(
                 last_seen_at,
                 archived_at,
                 archive_restored_at,
+                // 读侧派生字段（最近一条事件 payload 的 trace_id），仓储层不赋值。
+                trace_id: None,
             }
         }
         None => {
@@ -439,6 +441,8 @@ async fn record_event_and_upsert_issue_once(
                 // 新建 issue 必然未归档（0007 默认 NULL）。
                 archived_at: None,
                 archive_restored_at: None,
+                // 读侧派生字段（最近一条事件 payload 的 trace_id），仓储层不赋值。
+                trace_id: None,
             }
         }
     };
@@ -525,6 +529,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Issue {
         // 0007：归档列为 ISO8601 UTC 文本；解析失败按 `None` 并 `warn!`（**不得 panic**）。
         archived_at: optional_timestamp(row, "archived_at"),
         archive_restored_at: optional_timestamp(row, "archive_restored_at"),
+        // 读侧派生字段：issues 表无此列，由 handler 读取时从最近一条事件 payload 取。
+        trace_id: None,
     }
 }
 
@@ -674,6 +680,41 @@ impl IssueRepository for SqliteIssueRepository {
         .await?;
 
         Ok(rows.iter().map(event_from_row).collect())
+    }
+
+    async fn latest_event_payloads(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<(String, serde_json::Value)>, RepositoryError> {
+        if issue_ids.is_empty() {
+            // 空集直接短路：避免拼出 `IN ()` 这种非法 SQL。
+            return Ok(Vec::new());
+        }
+        // `ROW_NUMBER()` 每 issue 只留最近一行；`id DESC` 仅作同 created_at 的确定性 tie-break。
+        let placeholders = vec!["?"; issue_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT issue_id, payload FROM ( \
+                SELECT issue_id, payload, \
+                       ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY created_at DESC, id DESC) AS rn \
+                FROM events WHERE issue_id IN ({placeholders}) \
+             ) ranked WHERE rn = 1"
+        );
+        let mut query = sqlx::query(&sql);
+        for issue_id in issue_ids {
+            query = query.bind(issue_id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let issue_id: String = row.get("issue_id");
+                let payload_str: String = row.get("payload");
+                // 载荷损坏只丢该 issue 的派生字段，不影响列表其余行（与 `event_from_row` 同策略）。
+                let payload = serde_json::from_str(&payload_str).unwrap_or_else(|_| json!({}));
+                (issue_id, payload)
+            })
+            .collect())
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError> {

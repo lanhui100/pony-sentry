@@ -111,6 +111,11 @@ pub struct Issue {
     /// `None` = 从未手动恢复。
     #[serde(default)]
     pub archive_restored_at: Option<DateTime<Utc>>,
+    /// 关联 `trace_id`（读侧派生，**不落库**）：handler 读取时从该 issue 最近一条事件的 payload
+    /// 提取（一级 `trace_id` → `extra.trace_id` 回落），因此 `serde(default)` 序列化恒有键、
+    /// 无值时显式 `null`——Web/脚本靠「键存在」判断能力，不必区分新老上报形态。
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

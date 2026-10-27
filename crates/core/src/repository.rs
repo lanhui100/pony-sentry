@@ -99,6 +99,16 @@ pub trait IssueRepository: IssueGovernanceRepository + Send + Sync {
         limit: i64,
     ) -> Result<Vec<Event>, RepositoryError>;
 
+    /// 读侧派生数据面：批量取每个 issue **最近一条**事件的 payload（单次往返，避免列表 N+1）。
+    ///
+    /// 只服务于「读取时派生」的视图字段（当前是 `trace_id`），不参与写入、指纹与计数；
+    /// 返回 `(issue_id, payload)`，无事件的 issue 不出现在返回值里。payload 体积受 ingest 上限约束
+    /// （`extra` ≤8KB、`stacktrace_text` ≤5000 字符），故列表页不额外新增列即可透出 trace 维。
+    async fn latest_event_payloads(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<(String, serde_json::Value)>, RepositoryError>;
+
     /// 已出现过的项目名去重列表，供 Web 端项目筛选下拉使用（不含未注入工作区的事件）。
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError>;
 

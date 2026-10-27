@@ -74,6 +74,10 @@ pub struct RawEvent {
     /// 事件发生时间（ISO8601 原文，解析在 `validate` 层完成）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// 关联 `trace_id`（一级形态）。历史上报只把它放在 `extra.trace_id`，由
+    /// [`normalize_trace_id`] 回填，因此下游（含读取侧）只需认这一个来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 /// 字符串栈帧文本的最大留存长度（契约 R3.0：`extra.stacktrace_text` ≤5000 字符）。
@@ -163,6 +167,26 @@ pub fn normalize_stacktrace(mut event: RawEvent) -> RawEvent {
     event
 }
 
+/// 兼容路径：历史上报把 `trace_id` 放在 `extra.trace_id`（发送侧契约），这里回填到一级字段，
+/// 使后续处理与读取侧只需要认 `trace_id` 一个来源；一级字段已有非空值时**不覆盖**（新形态优先）。
+pub fn normalize_trace_id(mut event: RawEvent) -> RawEvent {
+    let top_level = event
+        .trace_id
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let from_extra = event
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("trace_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    event.trace_id = top_level.or(from_extra);
+    event
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +242,7 @@ mod tests {
             grafana_url: None,
             loki_query: None,
             timestamp: None,
+            trace_id: None,
         };
 
         let normalized = normalize_stacktrace(event);
@@ -268,6 +293,7 @@ mod tests {
             grafana_url: None,
             loki_query: None,
             timestamp: None,
+            trace_id: None,
         };
         let normalized = normalize_stacktrace(event);
         assert!(
@@ -278,5 +304,70 @@ mod tests {
             Stacktrace::Frames(frames) => assert_eq!(frames.len(), 1),
             Stacktrace::Text(_) => panic!("frame array must stay frames"),
         }
+    }
+
+    /// 新上报形态：一级 `trace_id` 必须能被解析进 `RawEvent`（读取侧透出的前提）。
+    #[test]
+    fn parses_top_level_trace_id() {
+        let event: RawEvent = serde_json::from_value(serde_json::json!({
+            "platform": "python",
+            "trace_id": "0123456789abcdef0123456789abcdef"
+        }))
+        .expect("top-level trace_id must parse");
+        let normalized = normalize_trace_id(event);
+        assert_eq!(
+            normalized.trace_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    /// 历史形态兼容：只放 `extra.trace_id` 上报时，归一必须回填一级字段并 trim。
+    #[test]
+    fn backfills_trace_id_from_extra() {
+        let event: RawEvent = serde_json::from_value(serde_json::json!({
+            "platform": "python",
+            "extra": { "trace_id": " fedcba9876543210fedcba9876543210 " }
+        }))
+        .expect("extra-only trace_id must parse");
+        assert!(
+            event.trace_id.is_none(),
+            "extra 形态不得在解析期凭空产生一级字段"
+        );
+        let normalized = normalize_trace_id(event);
+        assert_eq!(
+            normalized.trace_id.as_deref(),
+            Some("fedcba9876543210fedcba9876543210"),
+            "extra.trace_id 必须回填到一级字段（去空白后）"
+        );
+    }
+
+    /// 两种形态同时存在时以一级字段为准：新上报不得被历史 extra 覆盖。
+    #[test]
+    fn top_level_trace_id_wins_over_extra() {
+        let event: RawEvent = serde_json::from_value(serde_json::json!({
+            "platform": "python",
+            "trace_id": "0123456789abcdef0123456789abcdef",
+            "extra": { "trace_id": "fedcba9876543210fedcba9876543210" }
+        }))
+        .expect("both forms must parse");
+        let normalized = normalize_trace_id(event);
+        assert_eq!(
+            normalized.trace_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    /// 无 trace_id 时不得落键（payload 保持既有形态，读取侧按「键存在」判断能力）。
+    #[test]
+    fn missing_trace_id_leaves_no_payload_key() {
+        let event: RawEvent = serde_json::from_value(serde_json::json!({ "platform": "rust" }))
+            .expect("minimal event must parse");
+        let normalized = normalize_trace_id(event);
+        assert!(normalized.trace_id.is_none());
+        let payload = serde_json::to_value(&normalized).expect("event must serialize");
+        assert!(
+            payload.get("trace_id").is_none(),
+            "无 trace_id 时 payload 不得出现空键：{payload}"
+        );
     }
 }

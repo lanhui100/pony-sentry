@@ -171,6 +171,8 @@ pub fn plan_reindex(
             last_seen_at: last_seen,
             archived_at,
             archive_restored_at,
+            // 派生视图字段，不落库（读取时由 handler 从最新事件 payload 取）。
+            trace_id: None,
         });
 
         if reusable_old_id.is_some() {
@@ -257,6 +259,8 @@ mod tests {
             last_seen_at: now,
             archived_at: None,
             archive_restored_at: None,
+            // 派生视图字段，不落库（读取时由 handler 从最新事件 payload 取）。
+            trace_id: None,
         }
     }
 

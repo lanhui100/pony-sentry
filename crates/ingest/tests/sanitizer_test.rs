@@ -48,6 +48,7 @@ fn test_deep_zero_trust_sanitization() {
         grafana_url: None,
         loki_query: None,
         timestamp: None,
+        trace_id: None,
     };
 
     let sanitized = SanitizationPipeline::sanitize_event(event);
@@ -120,6 +121,7 @@ fn test_string_stacktrace_is_sanitized() {
         grafana_url: None,
         loki_query: None,
         timestamp: None,
+        trace_id: None,
     };
 
     let sanitized = SanitizationPipeline::sanitize_event(event);

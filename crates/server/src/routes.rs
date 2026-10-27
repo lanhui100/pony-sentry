@@ -31,8 +31,9 @@ use pony_sentry_core::{
 use pony_sentry_ingest::{
     compute_issue_fingerprint, guard_extra, infer_project_name, normalize_dimension,
     normalize_environment, normalize_grafana_url, normalize_level, normalize_loki_query,
-    normalize_source_kind, normalize_stacktrace, normalize_tags, parse_timestamp, truncate_chars,
-    validate_event_id, RawEvent, SanitizationPipeline, MESSAGE_MAX_CHARS,
+    normalize_source_kind, normalize_stacktrace, normalize_tags, normalize_trace_id,
+    parse_timestamp, truncate_chars, validate_event_id, RawEvent, SanitizationPipeline,
+    MESSAGE_MAX_CHARS,
 };
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,9 @@ const DB_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 /// `F1`：通用错误响应文案（契约 v1.4-7：DB/serde 原文只进日志，绝不外发）。
 const BAD_REQUEST_BODY: &str = "Bad request";
 const INTERNAL_ERROR_BODY: &str = "Internal error";
+
+/// 一级 `trace_id` 的留存上限：正常形态是 32hex，留 128 只为容纳其他 SDK 的关联 ID 写法。
+const TRACE_ID_MAX_CHARS: usize = 128;
 
 /// `L3A-E2`（契约 v1.6-2）：服务端保留载荷键——仅这三个由服务端注入；
 /// 客户端传入一律先剥离（深层嵌套同剥），其余未知键（含 `_sdk` 等）全部保留到 `_unmapped`。
@@ -624,6 +628,9 @@ pub struct IngestPayload {
     pub loki_query: Option<String>,
     /// ISO8601 事件发生时间；缺省为服务端 now()（契约 R2）。
     pub timestamp: Option<String>,
+    /// 一级关联 `trace_id`（新上报形态）；历史上报仍可只放 `extra.trace_id`，
+    /// 由 ingest 侧 `normalize_trace_id` 回填后随 payload 落库。
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1461,21 +1468,26 @@ async fn handle_ingest(
         grafana_url,
         loki_query,
         timestamp: payload.timestamp,
+        // 一级 trace_id 先按维度截断；`extra.trace_id` 的历史回填在 normalize_trace_id 里做。
+        trace_id: normalize_dimension(payload.trace_id.as_deref(), TRACE_ID_MAX_CHARS),
     };
 
-    // 4. 栈帧双形态归一：字符串 → extra.stacktrace_text + 单帧（契约 R3）
+    // 4. trace_id 归一：一级缺失时从 `extra.trace_id` 回填，使新老上报落库形态同构。
+    let raw_event = normalize_trace_id(raw_event);
+
+    // 5. 栈帧双形态归一：字符串 → extra.stacktrace_text + 单帧（契约 R3）
     let raw_event = normalize_stacktrace(raw_event);
 
-    // 5. 脱敏
+    // 6. 脱敏
     let sanitized = SanitizationPipeline::sanitize_event(raw_event);
 
-    // 6. 计算 v3 指纹与派生维度（唯一真相源：compute_issue_fingerprint）
+    // 7. 计算 v3 指纹与派生维度（唯一真相源：compute_issue_fingerprint）
     let info = compute_issue_fingerprint(&sanitized);
     let title = info.title.clone();
     let culprit = info.culprit.clone();
     let fingerprint = info.fingerprint.clone();
 
-    // 7. 项目维度：综合 tags、extra、title 与 culprit 智能识别
+    // 8. 项目维度：综合 tags、extra、title 与 culprit 智能识别
     let project = infer_project_name(
         sanitized.tags.as_ref(),
         sanitized.extra.as_ref(),
@@ -1486,7 +1498,7 @@ async fn handle_ingest(
     let payload_json = serde_json::to_value(&sanitized)
         .map_err(|e| persistence_error(format!("serialize sanitized event: {e}")).into_response())?;
 
-    // 8. 持久化与幂等（契约 R4）
+    // 9. 持久化与幂等（契约 R4）
     let res = state
         .repo
         .record_event_and_upsert_issue(NewEventRecord {
@@ -1512,7 +1524,7 @@ async fn handle_ingest(
     let issue = res.issue;
     let event = res.event;
 
-    // 9. 契约缺陷告警（保持既有行为）
+    // 10. 契约缺陷告警（保持既有行为）
     if issue.project.is_none() {
         warnings.push(
             "missing_project: please supply tags.project, tags.service, or extra.project_path"
@@ -1560,7 +1572,7 @@ async fn handle_ingest(
         "ingest persisted"
     );
 
-    // 10. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
+    // 11. 仅当新问题创建 (is_new) 或首次从 Resolved 状态回归 (is_regression_trigger) 时分发 Webhook，杜绝雪崩
     //     幂等命中不再触发通知（同一事件不重复通知）。
     if !res.is_duplicate && (res.is_new || res.is_regression_trigger) {
         if let Some(ref webhook_url) = state.webhook_url {
@@ -2030,6 +2042,10 @@ async fn handle_list_issues(
         .await
         .map_err(|err| internal_error("list_issues", err).into_response())?;
 
+    // 读侧 trace_id 透出（不新增列）：批量从各 issue 最近一条事件的已存 payload 派生，
+    // 因此列表与详情共用同一份派生逻辑，且不引入 N+1 查询。
+    let items = attach_trace_ids(&state, items).await;
+
     let has_more = offset + (items.len() as i64) < total;
     // `C3.3`：缺省/空串 project → `all`，否则回显原值。
     let project_filter = project.clone().unwrap_or_else(|| "all".to_string());
@@ -2156,27 +2172,80 @@ fn derived_error_type(payload: &serde_json::Value) -> Option<String> {
         })
 }
 
+/// 从事件载荷派生 `trace_id`（读取时派生、不落库）：
+/// 优先级 `payload.trace_id`（新上报一级字段）→ `payload.extra.trace_id`（历史形态）。
+fn derived_trace_id(payload: &serde_json::Value) -> Option<String> {
+    let pick = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    pick(payload.get("trace_id"))
+        .or_else(|| pick(payload.get("extra").and_then(|extra| extra.get("trace_id"))))
+}
+
+/// 读侧 `trace_id` 透出的批量填装（列表/详情共用）：一次 `latest_event_payloads` 往返，
+/// 派生失败**只**让该字段落 `null`（键始终存在），绝不拖垮列表可用性。
+async fn attach_trace_ids(state: &AppState, issues: Vec<Issue>) -> Vec<Issue> {
+    if issues.is_empty() {
+        return issues;
+    }
+    let issue_ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
+    let payloads = match state.repo.latest_event_payloads(&issue_ids).await {
+        Ok(payloads) => payloads,
+        Err(err) => {
+            warn!(
+                scope = "issue_trace_id",
+                error = %err,
+                "最近事件载荷读取失败：trace_id 一律返回 null（列表其余字段不受影响）"
+            );
+            Vec::new()
+        }
+    };
+    let trace_ids: BTreeMap<String, String> = payloads
+        .into_iter()
+        .filter_map(|(issue_id, payload)| {
+            derived_trace_id(&payload).map(|trace_id| (issue_id, trace_id))
+        })
+        .collect();
+    issues
+        .into_iter()
+        .map(|mut issue| {
+            issue.trace_id = trace_ids.get(&issue.id).cloned();
+            issue
+        })
+        .collect()
+}
+
 async fn handle_get_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let issue = state.repo.get_issue(&id).await.map_err(|err| match err {
+    let mut issue = state.repo.get_issue(&id).await.map_err(|err| match err {
         pony_sentry_core::RepositoryError::NotFound(_) => {
             (StatusCode::NOT_FOUND, "Issue not found".into())
         }
         other => internal_error("get_issue", other),
     })?;
 
-    // 派生视图字段 `error_type`（事件级属性）：取该 issue 最近一条事件的载荷。
+    // 派生视图字段（`error_type` / `trace_id`，事件级属性）：同取最近一条事件的载荷，故只查一次。
+    let latest_payload = match state.repo.get_events_for_issue(&id, 1).await {
+        Ok(events) => events.first().map(|event| event.payload.clone()),
+        Err(err) => {
+            // 派生失败不得影响详情可用性：`trace_id` 落 null，`error_type` 按既有语义不注入。
+            warn!(scope = "issue_derive", issue_id = %id, error = %err, "最近事件读取失败，派生字段留空");
+            None
+        }
+    };
+    issue.trace_id = latest_payload.as_ref().and_then(derived_trace_id);
+
     let mut value =
         serde_json::to_value(&issue).map_err(|err| internal_error("serialize_issue", err))?;
-    if let Ok(events) = state.repo.get_events_for_issue(&id, 1).await {
-        if let Some(latest) = events.first() {
-            if let Some(error_type) = derived_error_type(&latest.payload) {
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("error_type".to_string(), json!(error_type));
-                }
-            }
+    if let Some(error_type) = latest_payload.as_ref().and_then(derived_error_type) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("error_type".to_string(), json!(error_type));
         }
     }
 

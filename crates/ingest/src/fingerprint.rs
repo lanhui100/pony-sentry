@@ -196,6 +196,7 @@ mod tests {
             grafana_url: None,
             loki_query: None,
             timestamp: None,
+            trace_id: None,
         }
     }
 

@@ -302,6 +302,8 @@ fn issue_from_row(row: &sqlx::postgres::PgRow) -> Issue {
         // 0007：归档列（PG `TIMESTAMPTZ` → `Option<DateTime<Utc>>`）。
         archived_at: row.get("archived_at"),
         archive_restored_at: row.get("archive_restored_at"),
+        // 读侧派生字段：issues 表无此列，由 handler 读取时从最近一条事件 payload 取。
+        trace_id: None,
     }
 }
 
@@ -533,6 +535,8 @@ impl IssueRepository for PgIssueRepository {
                     last_seen_at,
                     archived_at,
                     archive_restored_at,
+                    // 读侧派生字段（最近一条事件 payload 的 trace_id），仓储层不赋值。
+                    trace_id: None,
                 }
             }
             None => {
@@ -587,6 +591,8 @@ impl IssueRepository for PgIssueRepository {
                     // 新建 issue 必然未归档（0007 默认 NULL）。
                     archived_at: None,
                     archive_restored_at: None,
+                    // 读侧派生字段（最近一条事件 payload 的 trace_id），仓储层不赋值。
+                    trace_id: None,
                 }
             }
         };
@@ -704,6 +710,39 @@ impl IssueRepository for PgIssueRepository {
         .await?;
 
         rows.iter().map(event_from_row).collect()
+    }
+
+    async fn latest_event_payloads(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<(String, serde_json::Value)>, RepositoryError> {
+        if issue_ids.is_empty() {
+            // 空集直接短路：`= ANY($1)` 传空数组虽合法，但省掉一次往返更直观。
+            return Ok(Vec::new());
+        }
+        // `ROW_NUMBER()` 每 issue 只留最近一行；`id DESC` 仅作同 created_at 的确定性 tie-break。
+        // 与 sqlite 方言同构（PG 侧 `payload` 是 JSONB，故 `::text` 取出后由调方解析）。
+        let rows = sqlx::query(
+            "SELECT issue_id, payload::text AS payload FROM ( \
+                 SELECT issue_id, payload, \
+                        ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY created_at DESC, id DESC) AS rn \
+                 FROM events WHERE issue_id = ANY($1) \
+             ) ranked WHERE rn = 1",
+        )
+        .bind(issue_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let issue_id: String = row.try_get("issue_id")?;
+                let payload_text: String = row.try_get("payload")?;
+                // 载荷损坏只丢该 issue 的派生字段，不影响列表其余行（与 `event_from_row` 同策略）。
+                let payload =
+                    serde_json::from_str(&payload_text).unwrap_or_else(|_| serde_json::json!({}));
+                Ok((issue_id, payload))
+            })
+            .collect()
     }
 
     async fn list_projects(&self) -> Result<Vec<String>, RepositoryError> {
